@@ -20,8 +20,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _apiKeyController = TextEditingController();
   final _modelController = TextEditingController();
   final _modelSearchController = TextEditingController();
-  double _temperature = 0.7;
-  int _maxTokens = 4000;
+  double _temperature = 0.22;
+  int _maxTokens = 32000;
   int _maxIterations = 10;
   List<String> _availableModels = [];
   bool _isLoadingModels = false;
@@ -346,7 +346,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   filled: true,
                   fillColor: const Color(0xFF0A0E27),
                 ),
-                onChanged: (v) => _maxTokens = int.tryParse(v) ?? 4000,
+                onChanged: (v) => _maxTokens = int.tryParse(v) ?? 32000,
               ),
               const SizedBox(height: 24),
               Tooltip(
@@ -457,14 +457,49 @@ class _SettingsScreenState extends State<SettingsScreen> {
         apiKey: _apiKeyController.text.trim(),
         modelName: '',
       );
+      print('DEBUG: Fetching models for ${_selectedProvider.displayName}');
       final models = await _llmService.fetchAvailableModels(settings);
-      setState(() {
-        _availableModels = models;
-        _isLoadingModels = false;
-      });
+      print('DEBUG: Received ${models.length} models');
+      
+      // Ensure we always have at least fallback models
+      final finalModels = models.isEmpty ? _getFallbackModels() : models;
+      print('DEBUG: Final model count: ${finalModels.length}');
+      
+      if (mounted) {
+        setState(() {
+          _availableModels = finalModels;
+          _isLoadingModels = false;
+        });
+        print('DEBUG: State updated with ${_availableModels.length} models');
+      }
     } catch (e) {
-      setState(() => _isLoadingModels = false);
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to load models: $e')));
+      print('DEBUG: Error loading models: $e');
+      if (mounted) {
+        setState(() {
+          _availableModels = _getFallbackModels();
+          _isLoadingModels = false;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to load models: $e')));
+      }
+    }
+  }
+  
+  List<String> _getFallbackModels() {
+    switch (_selectedProvider) {
+      case LLMProvider.ollama:
+        return ['llama2', 'mistral', 'codellama'];
+      case LLMProvider.lmStudio:
+        return ['local-model'];
+      case LLMProvider.claude:
+        return ['claude-opus-4-5-20251101', 'claude-sonnet-4-5-20250929', 'claude-haiku-4-5-20251001'];
+      case LLMProvider.chatGPT:
+        return ['gpt-4o', 'gpt-4-turbo', 'gpt-4', 'gpt-3.5-turbo'];
+      case LLMProvider.gemini:
+        return ['gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-pro'];
+      case LLMProvider.openRouter:
+        return ['anthropic/claude-3.5-sonnet', 'openai/gpt-4o', 'google/gemini-pro-1.5', 'meta-llama/llama-3.1-70b-instruct'];
+      default:
+        return [];
     }
   }
 

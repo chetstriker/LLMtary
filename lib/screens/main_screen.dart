@@ -260,7 +260,7 @@ class _MainScreenState extends State<MainScreen> {
     return Consumer<AppState>(
       builder: (context, state, _) {
         return Container(
-          height: 300,
+          height: 250,
           margin: const EdgeInsets.symmetric(horizontal: 16),
           decoration: BoxDecoration(
             color: const Color(0xFF1A1F3A),
@@ -570,7 +570,7 @@ class _MainScreenState extends State<MainScreen> {
                               children: [
                                 // Command header
                                 Container(
-                                  padding: const EdgeInsets.all(10),
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
                                   decoration: BoxDecoration(
                                     gradient: LinearGradient(
                                       colors: [

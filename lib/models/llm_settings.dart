@@ -14,8 +14,8 @@ class LLMSettings {
     this.baseUrl,
     this.apiKey,
     required this.modelName,
-    this.temperature = 0.7,
-    this.maxTokens = 4000,
+    this.temperature = 0.22,
+    this.maxTokens = 32000,
     this.timeoutSeconds = 120,
   });
 
@@ -34,8 +34,8 @@ class LLMSettings {
     baseUrl: json['baseUrl'] as String?,
     apiKey: json['apiKey'] as String?,
     modelName: json['modelName'] as String? ?? '',
-    temperature: (json['temperature'] as num?)?.toDouble() ?? 0.7,
-    maxTokens: json['maxTokens'] as int? ?? 4000,
+    temperature: (json['temperature'] as num?)?.toDouble() ?? 0.22,
+    maxTokens: json['maxTokens'] as int? ?? 32000,
     timeoutSeconds: json['timeoutSeconds'] as int? ?? 120,
   );
 

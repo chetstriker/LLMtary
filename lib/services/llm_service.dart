@@ -182,6 +182,7 @@ class LLMService {
 
   Future<List<String>> fetchAvailableModels(LLMSettings settings) async {
     try {
+      print('DEBUG: fetchAvailableModels called for ${settings.provider}');
       switch (settings.provider) {
         case LLMProvider.ollama:
           final response = await http.get(Uri.parse('${settings.baseUrl}/api/tags'));
@@ -212,19 +213,25 @@ class LLMService {
         case LLMProvider.gemini:
           return ['gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-pro'];
         case LLMProvider.openRouter:
+          print('DEBUG: Fetching OpenRouter models with API key: ${settings.apiKey?.substring(0, 10)}...');
           final response = await http.get(
             Uri.parse('https://openrouter.ai/api/v1/models'),
             headers: {'Authorization': 'Bearer ${settings.apiKey ?? ''}'},
           );
+          print('DEBUG: OpenRouter response status: ${response.statusCode}');
           if (response.statusCode == 200) {
             final data = json.decode(response.body);
-            return (data['data'] as List?)?.map((m) => m['id'] as String).toList() ?? [];
+            final models = (data['data'] as List?)?.map((m) => m['id'] as String).toList() ?? [];
+            print('DEBUG: OpenRouter returned ${models.length} models');
+            return models;
           }
+          print('DEBUG: OpenRouter API failed, returning fallback models');
           return ['anthropic/claude-3.5-sonnet', 'openai/gpt-4o', 'google/gemini-pro-1.5'];
         default:
           return [];
       }
     } catch (e) {
+      print('DEBUG: fetchAvailableModels error: $e');
       return [];
     }
   }
