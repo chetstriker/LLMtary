@@ -8,7 +8,7 @@ class DatabaseHelper {
   static Database? _database;
 
   static Future<void> initialize() async {
-    if (Platform.isWindows || Platform.isLinux) {
+    if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
       sqfliteFfiInit();
       databaseFactory = databaseFactoryFfi;
     }

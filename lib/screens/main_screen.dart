@@ -581,42 +581,45 @@ class _MainScreenState extends State<MainScreen> {
                                     borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
                                   ),
                                   child: Row(
+                                    crossAxisAlignment: CrossAxisAlignment.center,
                                     children: [
                                       if (hasVulnIdx) ...[
                                         Container(
-                                          width: 24,
-                                          height: 24,
+                                          width: 20,
+                                          height: 20,
                                           decoration: BoxDecoration(
                                             color: _getVulnColor(vulnIdx).withOpacity(0.2),
                                             shape: BoxShape.circle,
-                                            border: Border.all(color: _getVulnColor(vulnIdx), width: 2),
+                                            border: Border.all(color: _getVulnColor(vulnIdx), width: 1.5),
                                           ),
                                           child: Center(
                                             child: Text(
                                               '${vulnIdx + 1}',
-                                              style: TextStyle(color: _getVulnColor(vulnIdx), fontSize: 10, fontWeight: FontWeight.bold),
+                                              style: TextStyle(color: _getVulnColor(vulnIdx), fontSize: 9, fontWeight: FontWeight.bold),
                                             ),
                                           ),
                                         ),
-                                        const SizedBox(width: 8),
+                                        const SizedBox(width: 6),
                                         if (isProof) ...[
-                                          const Icon(Icons.verified, color: Color(0xFF00F5FF), size: 14),
-                                          const SizedBox(width: 6),
-                                          const Text('PROOF', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 9)),
-                                          const SizedBox(width: 12),
+                                          const Icon(Icons.verified, color: Color(0xFF00F5FF), size: 12),
+                                          const SizedBox(width: 4),
+                                          const Text('PROOF', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 8)),
+                                          const SizedBox(width: 8),
                                         ],
                                       ],
-                                      const Icon(Icons.terminal, color: Color(0xFF00F5FF), size: 14),
-                                      const SizedBox(width: 8),
+                                      const Icon(Icons.terminal, color: Color(0xFF00F5FF), size: 12),
+                                      const SizedBox(width: 6),
                                       Expanded(
                                         child: Text(
                                           log.command,
                                           style: const TextStyle(
                                             color: Color(0xFF00F5FF),
                                             fontFamily: 'monospace',
-                                            fontSize: 11,
+                                            fontSize: 10,
                                             fontWeight: FontWeight.bold,
                                           ),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
                                         ),
                                       ),
                                     ],

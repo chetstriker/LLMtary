@@ -6,7 +6,7 @@ import 'screens/main_screen.dart';
 import 'widgets/app_state.dart';
 
 void main() {
-  if (Platform.isWindows || Platform.isLinux) {
+  if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
     sqfliteFfiInit();
     databaseFactory = databaseFactoryFfi;
   }
