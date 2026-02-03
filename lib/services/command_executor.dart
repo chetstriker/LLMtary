@@ -67,6 +67,13 @@ class CommandExecutor {
 
   static Future<Map<String, dynamic>> verifyToolSetup(String tool, LLMSettings settings, LLMService llmService) async {
     try {
+      // Skip setup verification for tools that don't need it
+      final noSetupTools = ['searchsploit', 'nmap', 'curl', 'wget', 'nc', 'netcat'];
+      if (noSetupTools.contains(tool.toLowerCase())) {
+        print('${_timestamp()} DEBUG: $tool does not require setup');
+        return {'needs_setup': false};
+      }
+      
       final os = await getOsInfo();
       
       final prompt = '''Does "$tool" on $os require any initialization or setup after installation before it can be used effectively?

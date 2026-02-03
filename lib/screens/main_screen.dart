@@ -547,8 +547,16 @@ class _MainScreenState extends State<MainScreen> {
                           final log = state.commandLogs[i];
                           final vulnIdx = log.vulnerabilityIndex ?? -1;
                           final vuln = vulnIdx >= 0 && vulnIdx < state.vulnerabilities.length ? state.vulnerabilities[vulnIdx] : null;
-                          final isProof = vuln != null && vuln.proofCommand == log.command && (vuln.status == VulnerabilityStatus.confirmed || vuln.status == VulnerabilityStatus.notVulnerable);
-                          final hasVulnIdx = vulnIdx != -1;
+                          final isProof = vuln != null && 
+                              ((vuln.proofCommand == log.command) || 
+                               (log.command.contains('Initial Evidence Analysis')) || 
+                               (log.command.contains('Analysis Conclusion'))) && 
+                              (vuln.status == VulnerabilityStatus.confirmed || vuln.status == VulnerabilityStatus.notVulnerable);
+                          
+                          // Debug logging
+                          if (log.command.contains('Initial Evidence Analysis') || log.command.contains('Analysis Conclusion')) {
+                            print('DEBUG: [UI] Rendering log: cmd="${log.command}", vulnIdx=$vulnIdx, vulnStatus=${vuln?.status.name}, isProof=$isProof');
+                          }
                           
                           if (isProof && !_proofKeys.containsKey(vulnIdx)) {
                             _proofKeys[vulnIdx] = GlobalKey();
@@ -583,7 +591,7 @@ class _MainScreenState extends State<MainScreen> {
                                   child: Row(
                                     crossAxisAlignment: CrossAxisAlignment.center,
                                     children: [
-                                      if (hasVulnIdx) ...[
+                                      if (vulnIdx >= 0) ...[
                                         Container(
                                           width: 20,
                                           height: 20,
@@ -741,7 +749,14 @@ class _MainScreenState extends State<MainScreen> {
     
     for (var i = 0; i < selected.length; i++) {
       final vuln = selected[i];
-      final vulnIdx = appState.vulnerabilities.indexOf(vuln);
+      // Find current index by ID since object reference may be stale after reload
+      final vulnIdx = appState.vulnerabilities.indexWhere((v) => v.id == vuln.id);
+      if (vulnIdx == -1) {
+        print('DEBUG: ERROR - Could not find vulnerability with id=${vuln.id} in current list');
+        continue;
+      }
+      print('DEBUG: Processing vulnerability id=${vuln.id} at index=$vulnIdx');
+      
       final executor = ExploitExecutor(
         deviceData: _deviceController.text,
         vulnerabilityIndex: vulnIdx,
@@ -759,9 +774,16 @@ class _MainScreenState extends State<MainScreen> {
       final maxIterations = int.tryParse(await DatabaseHelper.getSetting('max_iterations') ?? '10') ?? 10;
       final status = await executor.testVulnerability(vuln, appState.llmSettings, _requireApproval, maxIterations);
       vuln.status = status;
-      vuln.selected = false; // Uncheck only this vulnerability
+      vuln.selected = false;
       await DatabaseHelper.updateVulnerability(vuln);
+      
+      // Preserve selected state before reload
+      final selectedStates = {for (var v in appState.vulnerabilities) v.id: v.selected};
       await appState.loadVulnerabilities();
+      for (var v in appState.vulnerabilities) {
+        v.selected = selectedStates[v.id] ?? false;
+      }
+      
       await appState.loadCommandLogs();
       if (mounted) setState(() {});
     }
