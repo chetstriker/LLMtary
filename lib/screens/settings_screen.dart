@@ -23,9 +23,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   double _temperature = 0.22;
   int _maxTokens = 32000;
   int _maxIterations = 10;
+  int _timeoutSeconds = 180;
   List<String> _availableModels = [];
   bool _isLoadingModels = false;
   final _llmService = LLMService();
+  List<String> _whitelistedCommands = [];
 
   @override
   void initState() {
@@ -37,7 +39,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _modelController.text = settings.modelName;
     _temperature = settings.temperature;
     _maxTokens = settings.maxTokens;
+    _timeoutSeconds = settings.timeoutSeconds;
     _loadMaxIterations();
+    _loadWhitelist();
+  }
+
+  Future<void> _loadWhitelist() async {
+    final db = await DatabaseHelper.database;
+    final results = await db.query('command_whitelist', orderBy: 'command ASC');
+    setState(() {
+      _whitelistedCommands = results.map((r) => r['command'] as String).toList();
+    });
   }
 
   Future<void> _loadMaxIterations() async {
@@ -84,25 +96,72 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
-        child: Container(
-          padding: const EdgeInsets.all(24),
-          decoration: BoxDecoration(
-            color: const Color(0xFF1A1F3A),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: const Color(0xFF00F5FF).withOpacity(0.3)),
-            boxShadow: [
-              BoxShadow(
-                color: const Color(0xFF00F5FF).withOpacity(0.1),
-                blurRadius: 20,
-                spreadRadius: 2,
+        child: Column(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(24),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1A1F3A),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0xFF00F5FF).withOpacity(0.3)),
               ),
-            ],
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text('AI PROVIDER', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 12)),
-              const SizedBox(height: 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('ATTEMPTS', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 14, letterSpacing: 1)),
+                  const SizedBox(height: 16),
+                  Tooltip(
+                    message: 'Controls the maximum tries or attempts the LLM can perform on each vulnerability before giving up',
+                    child: const Text('MAX ITERATIONS', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 12)),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: SliderTheme(
+                          data: SliderThemeData(
+                            activeTrackColor: const Color(0xFF00F5FF),
+                            inactiveTrackColor: const Color(0xFF00F5FF).withOpacity(0.2),
+                            thumbColor: const Color(0xFF00F5FF),
+                            overlayColor: const Color(0xFF00F5FF).withOpacity(0.2),
+                          ),
+                          child: Slider(
+                            value: _maxIterations.toDouble(),
+                            min: 1,
+                            max: 25,
+                            divisions: 24,
+                            onChanged: (v) => setState(() => _maxIterations = v.round()),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF0A0E27),
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(color: const Color(0xFF00F5FF).withOpacity(0.3)),
+                        ),
+                        child: Text('$_maxIterations', style: const TextStyle(color: Color(0xFF00F5FF), fontFamily: 'monospace', fontWeight: FontWeight.bold)),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+            Container(
+              padding: const EdgeInsets.all(24),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1A1F3A),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0xFF00F5FF).withOpacity(0.3)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('AI PROVIDER', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 14, letterSpacing: 1)),
+                  const SizedBox(height: 16),
               Container(
                 decoration: BoxDecoration(
                   color: const Color(0xFF0A0E27),
@@ -385,6 +444,40 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                 ],
               ),
+              const SizedBox(height: 24),
+              const Text('TIMEOUT', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 12)),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: SliderTheme(
+                      data: SliderThemeData(
+                        activeTrackColor: const Color(0xFF00F5FF),
+                        inactiveTrackColor: const Color(0xFF00F5FF).withOpacity(0.2),
+                        thumbColor: const Color(0xFF00F5FF),
+                        overlayColor: const Color(0xFF00F5FF).withOpacity(0.2),
+                      ),
+                      child: Slider(
+                        value: _timeoutSeconds.toDouble(),
+                        min: 10,
+                        max: 360,
+                        divisions: 35,
+                        onChanged: (v) => setState(() => _timeoutSeconds = v.round()),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF0A0E27),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: const Color(0xFF00F5FF).withOpacity(0.3)),
+                    ),
+                    child: Text('${_timeoutSeconds}s', style: const TextStyle(color: Color(0xFF00F5FF), fontFamily: 'monospace', fontWeight: FontWeight.bold)),
+                  ),
+                ],
+              ),
               const SizedBox(height: 32),
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
@@ -441,9 +534,81 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                 ],
               ),
-            ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+          Container(
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(
+              color: const Color(0xFF1A1F3A),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: const Color(0xFF00F5FF).withOpacity(0.3)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('COMMAND WHITELIST', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 14, letterSpacing: 1)),
+                const SizedBox(height: 16),
+                _whitelistedCommands.isEmpty
+                    ? Center(
+                        child: Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Text('No whitelisted commands', style: TextStyle(color: Colors.white.withOpacity(0.3), fontSize: 12)),
+                        ),
+                      )
+                    : ListView.builder(
+                        shrinkWrap: true,
+                        physics: const NeverScrollableScrollPhysics(),
+                        itemCount: _whitelistedCommands.length,
+                        itemBuilder: (context, i) {
+                          final command = _whitelistedCommands[i];
+                          return Container(
+                            margin: const EdgeInsets.only(bottom: 8),
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF0A0E27),
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: const Color(0xFF00F5FF).withOpacity(0.2)),
+                            ),
+                            child: Row(
+                              children: [
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF00F5FF).withOpacity(0.2),
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: Text(
+                                    command.toUpperCase(),
+                                    style: const TextStyle(
+                                      color: Color(0xFF00F5FF),
+                                      fontFamily: 'monospace',
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                ),
+                                const Spacer(),
+                                IconButton(
+                                  icon: const Icon(Icons.delete, color: Color(0xFFFF0080), size: 20),
+                                  onPressed: () async {
+                                    final db = await DatabaseHelper.database;
+                                    await db.delete('command_whitelist', where: 'LOWER(command) = ?', whereArgs: [command.toLowerCase()]);
+                                    _loadWhitelist();
+                                  },
+                                  tooltip: 'Remove from whitelist',
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+              ],
+            ),
           ),
-        ),
+        ],
+      ),
       ),
     );
   }
@@ -528,6 +693,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       modelName: _modelController.text,
       temperature: _temperature,
       maxTokens: _maxTokens,
+      timeoutSeconds: _timeoutSeconds,
     );
     
     context.read<AppState>().updateLLMSettings(settings);

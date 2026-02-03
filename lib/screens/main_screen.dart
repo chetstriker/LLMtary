@@ -1,6 +1,8 @@
 import 'dart:io';
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:file_picker/file_picker.dart';
 import '../models/vulnerability.dart';
 import '../models/command_log.dart';
 import '../models/llm_provider.dart';
@@ -9,6 +11,8 @@ import '../services/exploit_executor.dart';
 import '../database/database_helper.dart';
 import 'settings_screen.dart';
 import '../widgets/app_state.dart';
+import '../widgets/admin_password_dialog.dart';
+import '../widgets/command_approval_widget.dart';
 
 class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
@@ -63,11 +67,22 @@ class _MainScreenState extends State<MainScreen> {
     }
   ]
 }''');
-  bool _requireApproval = false;
+  bool _requireApproval = true;
   bool _isAnalyzing = false;
   bool _isExecuting = false;
   final _logScrollController = ScrollController();
-  final Map<int, GlobalKey> _proofKeys = {}; // vulnIdx -> key
+  final Map<int, GlobalKey> _proofKeys = {};
+  bool _showLeftPanel = true;
+  bool _showRightPanel = true;
+  double _vulnTableHeight = 250;
+  Completer<String?>? _approvalCompleter;
+  bool _autoScrollPrompts = true;
+  bool _autoScrollDebug = true;
+  final _promptScrollController = ScrollController();
+  final _debugScrollController = ScrollController();
+  bool _selectAllVulns = false;
+  final _tableHeaderScrollController = ScrollController();
+  final _tableDataScrollController = ScrollController();
   
   static const _vulnColors = [
     Color(0xFFFF0080), // Pink
@@ -82,10 +97,40 @@ class _MainScreenState extends State<MainScreen> {
   
   Color _getVulnColor(int index) => _vulnColors[index % _vulnColors.length];
   
-  void _scrollToProof(int vulnIdx) {
+  void _scrollToProof(int vulnIdx) async {
+    final appState = context.read<AppState>();
+    appState.addDebugLog('Scroll to proof requested for vulnerability #${vulnIdx + 1}');
+    
     final key = _proofKeys[vulnIdx];
-    if (key?.currentContext != null) {
-      Scrollable.ensureVisible(key!.currentContext!, duration: const Duration(milliseconds: 300), curve: Curves.easeInOut);
+    if (key == null) {
+      appState.addDebugLog('ERROR: No proof key found for vulnerability #${vulnIdx + 1}');
+      appState.addDebugLog('Available proof keys: ${_proofKeys.keys.map((k) => '#${k + 1}').join(', ')}');
+      return;
+    }
+    
+    // Wait for widget to be rendered
+    await Future.delayed(const Duration(milliseconds: 100));
+    
+    if (key.currentContext == null) {
+      appState.addDebugLog('WARNING: Proof key context not ready for vulnerability #${vulnIdx + 1}, retrying...');
+      await Future.delayed(const Duration(milliseconds: 200));
+    }
+    
+    if (key.currentContext == null) {
+      appState.addDebugLog('ERROR: Proof key context still null for vulnerability #${vulnIdx + 1}');
+      return;
+    }
+    
+    try {
+      appState.addDebugLog('Scrolling to proof for vulnerability #${vulnIdx + 1}');
+      Scrollable.ensureVisible(
+        key.currentContext!,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeInOut,
+      );
+      appState.addDebugLog('Successfully scrolled to proof for vulnerability #${vulnIdx + 1}');
+    } catch (e) {
+      appState.addDebugLog('ERROR: Failed to scroll to proof for vulnerability #${vulnIdx + 1}: $e');
     }
   }
 
@@ -93,6 +138,26 @@ class _MainScreenState extends State<MainScreen> {
   void initState() {
     super.initState();
     _initTempFolder();
+    _loadApprovalSetting();
+    
+    _tableHeaderScrollController.addListener(() {
+      if (_tableDataScrollController.hasClients && _tableDataScrollController.offset != _tableHeaderScrollController.offset) {
+        _tableDataScrollController.jumpTo(_tableHeaderScrollController.offset);
+      }
+    });
+    
+    _tableDataScrollController.addListener(() {
+      if (_tableHeaderScrollController.hasClients && _tableHeaderScrollController.offset != _tableDataScrollController.offset) {
+        _tableHeaderScrollController.jumpTo(_tableDataScrollController.offset);
+      }
+    });
+  }
+
+  Future<void> _loadApprovalSetting() async {
+    final setting = await DatabaseHelper.getSetting('require_approval');
+    setState(() {
+      _requireApproval = setting == null ? true : setting == 'true';
+    });
   }
 
   Future<void> _initTempFolder() async {
@@ -110,6 +175,10 @@ class _MainScreenState extends State<MainScreen> {
   @override
   void dispose() {
     _logScrollController.dispose();
+    _promptScrollController.dispose();
+    _debugScrollController.dispose();
+    _tableHeaderScrollController.dispose();
+    _tableDataScrollController.dispose();
     super.dispose();
   }
 
@@ -155,7 +224,10 @@ class _MainScreenState extends State<MainScreen> {
                   scale: 0.8,
                   child: Switch(
                     value: _requireApproval,
-                    onChanged: (v) => setState(() => _requireApproval = v),
+                    onChanged: (v) {
+                      setState(() => _requireApproval = v);
+                      DatabaseHelper.saveSetting('require_approval', v.toString());
+                    },
                     activeColor: const Color(0xFF00F5FF),
                   ),
                 ),
@@ -170,12 +242,124 @@ class _MainScreenState extends State<MainScreen> {
           const SizedBox(width: 8),
         ],
       ),
-      body: Column(
+      body: Stack(
         children: [
-          _buildDeviceInput(),
-          _buildVulnerabilityTable(),
-          Expanded(
-            child: _buildCommandLog(),
+          Row(
+            children: [
+              if (_showLeftPanel)
+                SizedBox(
+                  width: 350,
+                  child: Column(
+                    children: [
+                      _buildDeviceInput(),
+                      Expanded(child: _buildPromptLog()),
+                    ],
+                  ),
+                ),
+              Expanded(
+                child: Column(
+                  children: [
+                    SizedBox(
+                      height: _vulnTableHeight,
+                      child: _buildVulnerabilityTable(),
+                    ),
+                    GestureDetector(
+                      onVerticalDragUpdate: (details) {
+                        setState(() {
+                          _vulnTableHeight = (_vulnTableHeight + details.delta.dy).clamp(150.0, 600.0);
+                        });
+                      },
+                      child: MouseRegion(
+                        cursor: SystemMouseCursors.resizeRow,
+                        child: Container(
+                          height: 8,
+                          color: Colors.transparent,
+                          alignment: Alignment.center,
+                          child: Container(
+                            width: 200,
+                            height: 8,
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF00F5FF).withOpacity(0.1),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Center(
+                              child: Container(
+                                width: 40,
+                                height: 4,
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF00F5FF),
+                                  borderRadius: BorderRadius.circular(2),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    Expanded(child: _buildCommandLog()),
+                  ],
+                ),
+              ),
+              if (_showRightPanel)
+                SizedBox(
+                  width: 350,
+                  child: _buildDebugLog(),
+                ),
+            ],
+          ),
+          Consumer<AppState>(
+            builder: (context, state, _) {
+              if (state.pendingCommand != null && _approvalCompleter != null) {
+                return Positioned(
+                  bottom: 0,
+                  left: 0,
+                  right: 0,
+                  child: Center(
+                    child: CommandApprovalWidget(
+                      command: state.pendingCommand!,
+                      onAllowOnce: () {
+                        _approvalCompleter?.complete('once');
+                        _approvalCompleter = null;
+                        state.setPendingCommand(null);
+                      },
+                      onAlwaysAllow: () {
+                        _approvalCompleter?.complete('always');
+                        _approvalCompleter = null;
+                        state.setPendingCommand(null);
+                      },
+                      onDeny: () {
+                        _approvalCompleter?.complete('deny');
+                        _approvalCompleter = null;
+                        state.setPendingCommand(null);
+                      },
+                    ),
+                  ),
+                );
+              }
+              return const SizedBox.shrink();
+            },
+          ),
+          Positioned(
+            left: 14,
+            bottom: 14,
+            child: FloatingActionButton(
+              heroTag: 'toggleLeft',
+              mini: true,
+              backgroundColor: const Color(0xFF1A1F3A),
+              onPressed: () => setState(() => _showLeftPanel = !_showLeftPanel),
+              child: Icon(_showLeftPanel ? Icons.chevron_right : Icons.chevron_left, color: const Color(0xFF00F5FF)),
+            ),
+          ),
+          Positioned(
+            right: 14,
+            bottom: 14,
+            child: FloatingActionButton(
+              heroTag: 'toggleRight',
+              mini: true,
+              backgroundColor: const Color(0xFF1A1F3A),
+              onPressed: () => setState(() => _showRightPanel = !_showRightPanel),
+              child: Icon(_showRightPanel ? Icons.chevron_left : Icons.chevron_right, color: const Color(0xFF00F5FF)),
+            ),
           ),
         ],
       ),
@@ -184,70 +368,49 @@ class _MainScreenState extends State<MainScreen> {
 
   Widget _buildDeviceInput() {
     return Container(
-      margin: const EdgeInsets.all(16),
-      padding: const EdgeInsets.all(16),
+      margin: const EdgeInsets.all(8),
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: const Color(0xFF1A1F3A),
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: const Color(0xFF00F5FF).withOpacity(0.3)),
-        boxShadow: [
-          BoxShadow(
-            color: const Color(0xFF00F5FF).withOpacity(0.1),
-            blurRadius: 20,
-            spreadRadius: 2,
-          ),
-        ],
       ),
-      child: Row(
+      child: Column(
         children: [
-          Expanded(
-            child: TextField(
-              controller: _deviceController,
-              maxLines: 4,
-              style: const TextStyle(color: Colors.white, fontFamily: 'monospace', fontSize: 12),
-              decoration: InputDecoration(
-                labelText: 'TARGET DEVICE DATA',
-                labelStyle: const TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 11),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                  borderSide: const BorderSide(color: Color(0xFF00F5FF)),
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                  borderSide: BorderSide(color: const Color(0xFF00F5FF).withOpacity(0.3)),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                  borderSide: const BorderSide(color: Color(0xFF00F5FF), width: 2),
-                ),
-                filled: true,
-                fillColor: const Color(0xFF0A0E27),
+          TextField(
+            controller: _deviceController,
+            maxLines: 6,
+            style: const TextStyle(color: Colors.white, fontFamily: 'monospace', fontSize: 10),
+            decoration: InputDecoration(
+              labelText: 'TARGET DEVICE DATA',
+              labelStyle: const TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 10),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: const BorderSide(color: Color(0xFF00F5FF)),
               ),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: BorderSide(color: const Color(0xFF00F5FF).withOpacity(0.3)),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: const BorderSide(color: Color(0xFF00F5FF), width: 2),
+              ),
+              filled: true,
+              fillColor: const Color(0xFF0A0E27),
+              contentPadding: const EdgeInsets.all(8),
             ),
           ),
-          const SizedBox(width: 16),
-          Container(
-            decoration: BoxDecoration(
-              gradient: const LinearGradient(
-                colors: [Color(0xFF00F5FF), Color(0xFF0080FF)],
-              ),
-              borderRadius: BorderRadius.circular(8),
-              boxShadow: [
-                BoxShadow(
-                  color: const Color(0xFF00F5FF).withOpacity(0.5),
-                  blurRadius: 20,
-                  spreadRadius: 2,
-                ),
-              ],
-            ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
             child: ElevatedButton.icon(
               onPressed: _isAnalyzing ? null : _analyzeDevice,
-              icon: _isAnalyzing ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2)) : const Icon(Icons.radar, color: Colors.white),
-              label: Text(_isAnalyzing ? 'ANALYZING...' : 'ANALYZE', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+              icon: _isAnalyzing ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2)) : const Icon(Icons.radar, color: Colors.white, size: 16),
+              label: Text(_isAnalyzing ? 'ANALYZING...' : 'ANALYZE', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12)),
               style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.transparent,
-                shadowColor: Colors.transparent,
-                padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 20),
+                backgroundColor: const Color(0xFF00F5FF),
+                padding: const EdgeInsets.symmetric(vertical: 12),
               ),
             ),
           ),
@@ -256,12 +419,232 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 
+  Widget _buildPromptLog() {
+    return Consumer<AppState>(
+      builder: (context, state, _) {
+        return Container(
+          margin: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+          decoration: BoxDecoration(
+            color: const Color(0xFF1A1F3A),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: const Color(0xFF00F5FF).withOpacity(0.3)),
+          ),
+          child: Column(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [const Color(0xFF00F5FF).withOpacity(0.1), Colors.transparent],
+                  ),
+                  borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.chat, color: Color(0xFF00F5FF), size: 16),
+                    const SizedBox(width: 8),
+                    const Text('PROMPTS', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 12)),
+                    const Spacer(),
+                    IconButton(
+                      icon: const Icon(Icons.download, color: Color(0xFF00F5FF), size: 16),
+                      onPressed: () => _exportPrompts(state),
+                      tooltip: 'Export Prompts',
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(),
+                    ),
+                    const SizedBox(width: 8),
+                    Transform.scale(
+                      scale: 0.7,
+                      child: Checkbox(
+                        value: _autoScrollPrompts,
+                        onChanged: (v) => setState(() => _autoScrollPrompts = v ?? true),
+                        activeColor: const Color(0xFF00F5FF),
+                      ),
+                    ),
+                    const Text('Auto-scroll', style: TextStyle(color: Colors.white70, fontSize: 10)),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: state.promptLogs.isEmpty
+                    ? Center(child: Text('No prompts yet', style: TextStyle(color: Colors.white.withOpacity(0.3), fontSize: 12)))
+                    : ListView.builder(
+                        controller: _promptScrollController,
+                        padding: const EdgeInsets.all(8),
+                        itemCount: state.promptLogs.length,
+                        itemBuilder: (context, i) {
+                          if (_autoScrollPrompts && i == state.promptLogs.length - 1) {
+                            WidgetsBinding.instance.addPostFrameCallback((_) {
+                              if (_promptScrollController.hasClients) {
+                                _promptScrollController.jumpTo(_promptScrollController.position.maxScrollExtent);
+                              }
+                            });
+                          }
+                          final log = state.promptLogs[i];
+                          return Container(
+                            margin: const EdgeInsets.only(bottom: 8),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF0A0E27),
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: const Color(0xFF00F5FF).withOpacity(0.2)),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Container(
+                                  padding: const EdgeInsets.all(8),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF00F5FF).withOpacity(0.1),
+                                    borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      const Icon(Icons.arrow_upward, color: Color(0xFF00F5FF), size: 12),
+                                      const SizedBox(width: 4),
+                                      const Text('PROMPT', style: TextStyle(color: Color(0xFF00F5FF), fontSize: 10, fontWeight: FontWeight.bold)),
+                                    ],
+                                  ),
+                                ),
+                                Padding(
+                                  padding: const EdgeInsets.all(8),
+                                  child: SelectableText(
+                                    log.prompt,
+                                    style: const TextStyle(color: Colors.white70, fontSize: 10, fontFamily: 'monospace'),
+                                  ),
+                                ),
+                                Container(
+                                  padding: const EdgeInsets.all(8),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF00FF88).withOpacity(0.1),
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      const Icon(Icons.arrow_downward, color: Color(0xFF00FF88), size: 12),
+                                      const SizedBox(width: 4),
+                                      const Text('RESPONSE', style: TextStyle(color: Color(0xFF00FF88), fontSize: 10, fontWeight: FontWeight.bold)),
+                                    ],
+                                  ),
+                                ),
+                                Padding(
+                                  padding: const EdgeInsets.all(8),
+                                  child: SelectableText(
+                                    log.response,
+                                    style: const TextStyle(color: Colors.white70, fontSize: 10, fontFamily: 'monospace'),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildDebugLog() {
+    return Consumer<AppState>(
+      builder: (context, state, _) {
+        return Container(
+          margin: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: const Color(0xFF1A1F3A),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: const Color(0xFF00F5FF).withOpacity(0.3)),
+          ),
+          child: Column(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [const Color(0xFF00F5FF).withOpacity(0.1), Colors.transparent],
+                  ),
+                  borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.bug_report, color: Color(0xFF00F5FF), size: 16),
+                    const SizedBox(width: 8),
+                    const Text('DEBUG', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 12)),
+                    const Spacer(),
+                    IconButton(
+                      icon: const Icon(Icons.download, color: Color(0xFF00F5FF), size: 16),
+                      onPressed: () => _exportDebug(state),
+                      tooltip: 'Export Debug',
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(),
+                    ),
+                    const SizedBox(width: 8),
+                    Transform.scale(
+                      scale: 0.7,
+                      child: Checkbox(
+                        value: _autoScrollDebug,
+                        onChanged: (v) => setState(() => _autoScrollDebug = v ?? true),
+                        activeColor: const Color(0xFF00F5FF),
+                      ),
+                    ),
+                    const Text('Auto-scroll', style: TextStyle(color: Colors.white70, fontSize: 10)),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: state.debugLogs.isEmpty
+                    ? Center(child: Text('No debug logs yet', style: TextStyle(color: Colors.white.withOpacity(0.3), fontSize: 12)))
+                    : SelectableRegion(
+                        focusNode: FocusNode(),
+                        selectionControls: materialTextSelectionControls,
+                        child: ListView.builder(
+                          controller: _debugScrollController,
+                          padding: const EdgeInsets.all(8),
+                          itemCount: state.debugLogs.length,
+                          itemBuilder: (context, i) {
+                            if (_autoScrollDebug && i == state.debugLogs.length - 1) {
+                              WidgetsBinding.instance.addPostFrameCallback((_) {
+                                if (_debugScrollController.hasClients) {
+                                  _debugScrollController.jumpTo(_debugScrollController.position.maxScrollExtent);
+                                }
+                              });
+                            }
+                            final log = state.debugLogs[i];
+                            final isError = log.message.toLowerCase().contains('error') || log.message.toLowerCase().contains('exception') || log.message.toLowerCase().contains('failed');
+                            return Container(
+                              margin: const EdgeInsets.only(bottom: 4),
+                              padding: const EdgeInsets.all(8),
+                              decoration: BoxDecoration(
+                                color: isError ? const Color(0xFFFF0080).withOpacity(0.15) : const Color(0xFF0A0E27),
+                                borderRadius: BorderRadius.circular(4),
+                                border: isError ? Border.all(color: const Color(0xFFFF0080), width: 1) : null,
+                              ),
+                              child: Text(
+                                '[${log.timestamp.toString().substring(11, 19)}] ${log.message}',
+                                style: TextStyle(
+                                  color: isError ? const Color(0xFFFF0080) : Colors.white70,
+                                  fontSize: 10,
+                                  fontFamily: 'monospace',
+                                  fontWeight: isError ? FontWeight.bold : FontWeight.normal,
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   Widget _buildVulnerabilityTable() {
     return Consumer<AppState>(
       builder: (context, state, _) {
         return Container(
-          height: 250,
-          margin: const EdgeInsets.symmetric(horizontal: 16),
+          margin: const EdgeInsets.fromLTRB(8, 8, 8, 0),
           decoration: BoxDecoration(
             color: const Color(0xFF1A1F3A),
             borderRadius: BorderRadius.circular(12),
@@ -277,50 +660,116 @@ class _MainScreenState extends State<MainScreen> {
                   ),
                   borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
                 ),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                child: Column(
                   children: [
                     Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        const Icon(Icons.bug_report, color: Color(0xFF00F5FF), size: 20),
-                        const SizedBox(width: 8),
-                        Text('VULNERABILITIES DETECTED', style: const TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 14)),
-                        const SizedBox(width: 12),
+                        Row(
+                          children: [
+                            const Icon(Icons.bug_report, color: Color(0xFF00F5FF), size: 20),
+                            const SizedBox(width: 8),
+                            Text('VULNERABILITIES DETECTED', style: const TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 14)),
+                            const SizedBox(width: 12),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF00F5FF).withOpacity(0.2),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(color: const Color(0xFF00F5FF)),
+                              ),
+                              child: Text('${state.vulnerabilities.length}', style: const TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold)),
+                            ),
+                          ],
+                        ),
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                           decoration: BoxDecoration(
-                            color: const Color(0xFF00F5FF).withOpacity(0.2),
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(color: const Color(0xFF00F5FF)),
+                            gradient: const LinearGradient(
+                              colors: [Color(0xFFFF0080), Color(0xFFFF0040)],
+                            ),
+                            borderRadius: BorderRadius.circular(8),
+                            boxShadow: [
+                              BoxShadow(
+                                color: const Color(0xFFFF0080).withOpacity(0.5),
+                                blurRadius: 15,
+                              ),
+                            ],
                           ),
-                          child: Text('${state.vulnerabilities.length}', style: const TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold)),
+                          child: ElevatedButton.icon(
+                            onPressed: _isExecuting ? null : _executeSelected,
+                            icon: _isExecuting ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2)) : const Icon(Icons.play_arrow, color: Colors.white),
+                            label: Text(_isExecuting ? 'EXECUTING...' : 'EXECUTE SELECTED', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12)),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.transparent,
+                              shadowColor: Colors.transparent,
+                              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                            ),
+                          ),
                         ),
                       ],
                     ),
-                    Container(
-                      decoration: BoxDecoration(
-                        gradient: const LinearGradient(
-                          colors: [Color(0xFFFF0080), Color(0xFFFF0040)],
-                        ),
-                        borderRadius: BorderRadius.circular(8),
-                        boxShadow: [
-                          BoxShadow(
-                            color: const Color(0xFFFF0080).withOpacity(0.5),
-                            blurRadius: 15,
+                    if (state.vulnerabilities.isNotEmpty) const SizedBox(height: 12),
+                    if (state.vulnerabilities.isNotEmpty)
+                      SingleChildScrollView(
+                        controller: _tableHeaderScrollController,
+                        scrollDirection: Axis.horizontal,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF0A0E27),
+                            borderRadius: BorderRadius.circular(8),
                           ),
-                        ],
-                      ),
-                      child: ElevatedButton.icon(
-                        onPressed: _isExecuting ? null : _executeSelected,
-                        icon: _isExecuting ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2)) : const Icon(Icons.play_arrow, color: Colors.white),
-                        label: Text(_isExecuting ? 'EXECUTING...' : 'EXECUTE SELECTED', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12)),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.transparent,
-                          shadowColor: Colors.transparent,
-                          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                          child: Row(
+                            children: [
+                              SizedBox(
+                                width: 48,
+                                child: Checkbox(
+                                  value: _selectAllVulns,
+                                  onChanged: (val) {
+                                    setState(() {
+                                      _selectAllVulns = val ?? false;
+                                      for (var v in state.vulnerabilities) {
+                                        if (v.status == VulnerabilityStatus.pending || v.status == VulnerabilityStatus.undetermined) {
+                                          v.selected = _selectAllVulns;
+                                        }
+                                      }
+                                    });
+                                  },
+                                  activeColor: const Color(0xFF00F5FF),
+                                ),
+                              ),
+                              const SizedBox(
+                                width: 48,
+                                child: Text('#', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 11)),
+                              ),
+                              const SizedBox(
+                                width: 80,
+                                child: Text('STATUS', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 11)),
+                              ),
+                              const SizedBox(
+                                width: 120,
+                                child: Text('TYPE', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 11)),
+                              ),
+                              const SizedBox(
+                                width: 100,
+                                child: Text('SEVERITY', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 11)),
+                              ),
+                              const SizedBox(
+                                width: 150,
+                                child: Text('CVE', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 11)),
+                              ),
+                              const SizedBox(
+                                width: 120,
+                                child: Text('CONFIDENCE', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 11)),
+                              ),
+                              const SizedBox(
+                                width: 300,
+                                child: Text('VULNERABILITY', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 11)),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
-                    ),
                   ],
                 ),
               ),
@@ -339,60 +788,81 @@ class _MainScreenState extends State<MainScreen> {
                         ),
                       )
                     : SingleChildScrollView(
-                        child: DataTable(
-                          headingRowColor: MaterialStateProperty.all(const Color(0xFF0A0E27)),
-                          dataRowColor: MaterialStateProperty.all(Colors.transparent),
-                          dividerThickness: 0.5,
-                          columns: const [
-                            DataColumn(label: Text('', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 11))),
-                            DataColumn(label: Text('#', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 11))),
-                            DataColumn(label: Text('STATUS', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 11))),
-                            DataColumn(label: Text('VULNERABILITY', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 11))),
-                            DataColumn(label: Text('TYPE', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 11))),
-                            DataColumn(label: Text('CVE', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 11))),
-                            DataColumn(label: Text('SEVERITY', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 11))),
-                            DataColumn(label: Text('CONFIDENCE', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 11))),
-                          ],
-                          rows: state.vulnerabilities.asMap().entries.map((entry) {
-                            final idx = entry.key;
-                            final v = entry.value;
-                            final color = _getVulnColor(idx);
-                            return DataRow(
-                              cells: [
-                                DataCell(Checkbox(
-                                  value: v.selected,
-                                  onChanged: (val) => _toggleSelection(v, val ?? false),
-                                  activeColor: const Color(0xFF00F5FF),
-                                )),
-                                DataCell(
-                                  InkWell(
-                                    onTap: () => _scrollToProof(idx),
-                                    child: Container(
-                                      width: 28,
-                                      height: 28,
-                                      decoration: BoxDecoration(
-                                        color: color.withOpacity(0.2),
-                                        shape: BoxShape.circle,
-                                        border: Border.all(color: color, width: 2),
+                        scrollDirection: Axis.vertical,
+                        child: SingleChildScrollView(
+                          controller: _tableDataScrollController,
+                          scrollDirection: Axis.horizontal,
+                          child: Column(
+                            children: state.vulnerabilities.asMap().entries.map((entry) {
+                              final idx = entry.key;
+                              final v = entry.value;
+                              final color = _getVulnColor(idx);
+                              final isTestable = v.status == VulnerabilityStatus.pending || v.status == VulnerabilityStatus.undetermined;
+                              return Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                                decoration: BoxDecoration(
+                                  border: Border(bottom: BorderSide(color: const Color(0xFF00F5FF).withOpacity(0.1))),
+                                ),
+                                child: Row(
+                                  children: [
+                                    SizedBox(
+                                      width: 48,
+                                      child: Checkbox(
+                                        value: v.selected,
+                                        onChanged: isTestable ? (val) => _toggleSelection(v, val ?? false) : null,
+                                        activeColor: const Color(0xFF00F5FF),
                                       ),
-                                      child: Center(
-                                        child: Text(
-                                          '${idx + 1}',
-                                          style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.bold),
+                                    ),
+                                    SizedBox(
+                                      width: 48,
+                                      child: InkWell(
+                                        onTap: () => _scrollToProof(idx),
+                                        child: Container(
+                                          width: 28,
+                                          height: 28,
+                                          decoration: BoxDecoration(
+                                            color: color.withOpacity(0.2),
+                                            shape: BoxShape.circle,
+                                            border: Border.all(color: color, width: 2),
+                                          ),
+                                          child: Center(
+                                            child: Text(
+                                              '${idx + 1}',
+                                              style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.bold),
+                                            ),
+                                          ),
                                         ),
                                       ),
                                     ),
-                                  ),
+                                    SizedBox(
+                                      width: 80,
+                                      child: _buildStatusIcon(v.status, v.statusReason, v.proofCommand, idx),
+                                    ),
+                                    SizedBox(
+                                      width: 120,
+                                      child: Text(v.vulnerabilityType.isEmpty ? '-' : v.vulnerabilityType, style: TextStyle(color: v.vulnerabilityType.isEmpty ? Colors.white30 : const Color(0xFF00F5FF), fontSize: 11)),
+                                    ),
+                                    SizedBox(
+                                      width: 100,
+                                      child: _buildSeverityBadge(v.severity),
+                                    ),
+                                    SizedBox(
+                                      width: 150,
+                                      child: Text(v.cve.isEmpty ? '-' : v.cve, style: TextStyle(color: v.cve.isEmpty ? Colors.white30 : const Color(0xFFFFAA00), fontSize: 11, fontFamily: 'monospace')),
+                                    ),
+                                    SizedBox(
+                                      width: 120,
+                                      child: Text(v.confidence, style: const TextStyle(color: Colors.white70, fontSize: 11)),
+                                    ),
+                                    SizedBox(
+                                      width: 300,
+                                      child: Text(v.problem, style: const TextStyle(color: Colors.white, fontSize: 12)),
+                                    ),
+                                  ],
                                 ),
-                                DataCell(_buildStatusIcon(v.status, v.statusReason, v.proofCommand)),
-                                DataCell(Text(v.problem, style: const TextStyle(color: Colors.white, fontSize: 12))),
-                                DataCell(Text(v.vulnerabilityType.isEmpty ? '-' : v.vulnerabilityType, style: TextStyle(color: v.vulnerabilityType.isEmpty ? Colors.white30 : const Color(0xFF00F5FF), fontSize: 11))),
-                                DataCell(Text(v.cve.isEmpty ? '-' : v.cve, style: TextStyle(color: v.cve.isEmpty ? Colors.white30 : const Color(0xFFFFAA00), fontSize: 11, fontFamily: 'monospace'))),
-                                DataCell(_buildSeverityBadge(v.severity)),
-                                DataCell(Text(v.confidence, style: const TextStyle(color: Colors.white70, fontSize: 11))),
-                              ],
-                            );
-                          }).toList(),
+                              );
+                            }).toList(),
+                          ),
                         ),
                       ),
               ),
@@ -429,7 +899,7 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 
-  Widget _buildStatusIcon(VulnerabilityStatus status, String reason, String? proofCommand) {
+  Widget _buildStatusIcon(VulnerabilityStatus status, String reason, String? proofCommand, int vulnIdx) {
     Widget icon;
     String tooltip;
     
@@ -492,7 +962,10 @@ class _MainScreenState extends State<MainScreen> {
     return Tooltip(
       message: tooltip,
       preferBelow: false,
-      child: icon,
+      child: InkWell(
+        onTap: () => _scrollToProof(vulnIdx),
+        child: icon,
+      ),
     );
   }
 
@@ -500,7 +973,7 @@ class _MainScreenState extends State<MainScreen> {
     return Consumer<AppState>(
       builder: (context, state, _) {
         return Container(
-          margin: const EdgeInsets.all(16),
+          margin: const EdgeInsets.fromLTRB(8, 0, 8, 8),
           decoration: BoxDecoration(
             color: const Color(0xFF0A0E27),
             borderRadius: BorderRadius.circular(12),
@@ -553,23 +1026,20 @@ class _MainScreenState extends State<MainScreen> {
                                (log.command.contains('Analysis Conclusion'))) && 
                               (vuln.status == VulnerabilityStatus.confirmed || vuln.status == VulnerabilityStatus.notVulnerable);
                           
-                          // Debug logging
-                          if (log.command.contains('Initial Evidence Analysis') || log.command.contains('Analysis Conclusion')) {
-                            print('DEBUG: [UI] Rendering log: cmd="${log.command}", vulnIdx=$vulnIdx, vulnStatus=${vuln?.status.name}, isProof=$isProof');
-                          }
-                          
-                          if (isProof && !_proofKeys.containsKey(vulnIdx)) {
+                          if (isProof) {
                             _proofKeys[vulnIdx] = GlobalKey();
                           }
+                          
+                          final vulnColor = vulnIdx >= 0 ? _getVulnColor(vulnIdx) : const Color(0xFF00F5FF);
                           
                           return Container(
                             key: isProof ? _proofKeys[vulnIdx] : null,
                             margin: const EdgeInsets.only(bottom: 12),
                             decoration: BoxDecoration(
-                              color: isProof ? const Color(0xFF00F5FF).withOpacity(0.15) : const Color(0xFF1A1F3A).withOpacity(0.5),
+                              color: isProof ? vulnColor.withOpacity(0.15) : const Color(0xFF1A1F3A).withOpacity(0.5),
                               borderRadius: BorderRadius.circular(8),
                               border: Border.all(
-                                color: isProof ? const Color(0xFF00F5FF) : const Color(0xFF00F5FF).withOpacity(0.2),
+                                color: isProof ? vulnColor : const Color(0xFF00F5FF).withOpacity(0.2),
                                 width: isProof ? 2 : 1,
                               ),
                             ),
@@ -609,9 +1079,9 @@ class _MainScreenState extends State<MainScreen> {
                                         ),
                                         const SizedBox(width: 6),
                                         if (isProof) ...[
-                                          const Icon(Icons.verified, color: Color(0xFF00F5FF), size: 12),
+                                          Icon(Icons.verified, color: vulnColor, size: 12),
                                           const SizedBox(width: 4),
-                                          const Text('PROOF', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 8)),
+                                          Text('PROOF', style: TextStyle(color: vulnColor, fontWeight: FontWeight.bold, fontSize: 8)),
                                           const SizedBox(width: 8),
                                         ],
                                       ],
@@ -712,20 +1182,30 @@ class _MainScreenState extends State<MainScreen> {
         throw Exception('Please configure API key in settings');
       }
       
-      // Clear previous vulnerabilities
+      appState.clearPromptLogs();
+      appState.clearDebugLogs();
+      appState.addDebugLog('Starting vulnerability analysis...');
+      
       await DatabaseHelper.clearVulnerabilities();
       appState.loadVulnerabilities();
       if (mounted) setState(() {});
       
-      final analyzer = VulnerabilityAnalyzer();
+      final analyzer = VulnerabilityAnalyzer(
+        onPromptResponse: (prompt, response) {
+          appState.addPromptLog(prompt, response);
+        },
+      );
       final vulns = await analyzer.analyzeDevice(_deviceController.text, appState.llmSettings);
       
+      appState.addDebugLog('Found ${vulns.length} vulnerabilities');
       for (final v in vulns) {
         await DatabaseHelper.insertVulnerability(v);
+        appState.addDebugLog('Added: ${v.problem}');
       }
       
       appState.loadVulnerabilities();
     } catch (e) {
+      context.read<AppState>().addDebugLog('Error: $e');
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
     } finally {
       setState(() => _isAnalyzing = false);
@@ -740,44 +1220,65 @@ class _MainScreenState extends State<MainScreen> {
   Future<void> _executeSelected() async {
     setState(() => _isExecuting = true);
     final appState = context.read<AppState>();
+    
+    // Request admin password if not already set
+    if (appState.adminPassword == null) {
+      final password = await showDialog<String>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => const AdminPasswordDialog(),
+      );
+      
+      if (password == null || password.isEmpty) {
+        setState(() => _isExecuting = false);
+        appState.addDebugLog('Execution cancelled - no admin password provided');
+        return;
+      }
+      
+      appState.setAdminPassword(password);
+      appState.addDebugLog('Admin password set for session');
+    }
+    
     final selected = appState.vulnerabilities.where((v) => v.selected).toList();
     
-    // Clear command logs before starting new test
     await DatabaseHelper.clearCommandLogs();
     await appState.loadCommandLogs();
     if (mounted) setState(() {});
     
     for (var i = 0; i < selected.length; i++) {
       final vuln = selected[i];
-      // Find current index by ID since object reference may be stale after reload
       final vulnIdx = appState.vulnerabilities.indexWhere((v) => v.id == vuln.id);
       if (vulnIdx == -1) {
-        print('DEBUG: ERROR - Could not find vulnerability with id=${vuln.id} in current list');
+        appState.addDebugLog('ERROR - Could not find vulnerability with id=${vuln.id}');
         continue;
       }
-      print('DEBUG: Processing vulnerability id=${vuln.id} at index=$vulnIdx');
+      appState.addDebugLog('Processing vulnerability id=${vuln.id} at index=$vulnIdx');
       
       final executor = ExploitExecutor(
         deviceData: _deviceController.text,
         vulnerabilityIndex: vulnIdx,
-        onProgress: (msg) => print('DEBUG: $msg'),
+        onProgress: (msg) => appState.addDebugLog(msg),
         onCommandExecuted: (cmd, output, idx) async {
-          print('DEBUG: Command executed: $cmd');
-          print('DEBUG: Output: ${output.substring(0, output.length > 100 ? 100 : output.length)}...');
+          appState.addDebugLog('Command executed: $cmd');
           await appState.loadCommandLogs();
-          if (mounted) {
-            setState(() {});
-          }
+          if (mounted) setState(() {});
         },
+        onPromptResponse: (prompt, response) {
+          appState.addPromptLog(prompt, response);
+        },
+        adminPassword: appState.adminPassword,
+        onApprovalNeeded: _requireApproval ? (command) async {
+          _approvalCompleter = Completer<String?>();
+          appState.setPendingCommand(command);
+          return await _approvalCompleter!.future;
+        } : null,
       );
       
       final maxIterations = int.tryParse(await DatabaseHelper.getSetting('max_iterations') ?? '10') ?? 10;
       final status = await executor.testVulnerability(vuln, appState.llmSettings, _requireApproval, maxIterations);
       vuln.status = status;
-      vuln.selected = false;
       await DatabaseHelper.updateVulnerability(vuln);
       
-      // Preserve selected state before reload
       final selectedStates = {for (var v in appState.vulnerabilities) v.id: v.selected};
       await appState.loadVulnerabilities();
       for (var v in appState.vulnerabilities) {
@@ -795,5 +1296,27 @@ class _MainScreenState extends State<MainScreen> {
     final logs = await DatabaseHelper.getCommandLogs();
     final content = logs.map((l) => '${l.timestamp}: ${l.command}\n${l.output}\n').join('\n---\n');
     print('Export logs: $content');
+  }
+
+  Future<void> _exportPrompts(AppState state) async {
+    final content = state.promptLogs.map((log) => '=== PROMPT ===\n${log.prompt}\n\n=== RESPONSE ===\n${log.response}\n').join('\n---\n\n');
+    final path = await FilePicker.platform.saveFile(
+      dialogTitle: 'Save Prompts',
+      fileName: 'PenExecute_Prompts.txt',
+    );
+    if (path != null) {
+      await File(path).writeAsString(content);
+    }
+  }
+
+  Future<void> _exportDebug(AppState state) async {
+    final content = state.debugLogs.map((log) => '[${log.timestamp.toString().substring(11, 19)}] ${log.message}').join('\n');
+    final path = await FilePicker.platform.saveFile(
+      dialogTitle: 'Save Debug Log',
+      fileName: 'PenExecute_Debug.txt',
+    );
+    if (path != null) {
+      await File(path).writeAsString(content);
+    }
   }
 }

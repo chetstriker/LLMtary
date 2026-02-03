@@ -23,10 +23,11 @@ class DatabaseHelper {
   static Future<Database> _initDatabase() async {
     final dbPath = await getDatabasesPath();
     final path = join(dbPath, 'penexecute.db');
+    print('Database path: $path');
     
     return await openDatabase(
       path,
-      version: 4,
+      version: 5,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE vulnerabilities (
@@ -70,6 +71,14 @@ class DatabaseHelper {
             value TEXT NOT NULL
           )
         ''');
+
+        await db.execute('''
+          CREATE TABLE command_whitelist (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            command TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            added_at TEXT NOT NULL
+          )
+        ''');
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -81,6 +90,15 @@ class DatabaseHelper {
         }
         if (oldVersion < 4) {
           await db.execute('ALTER TABLE command_logs ADD COLUMN vulnerabilityIndex INTEGER');
+        }
+        if (oldVersion < 5) {
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS command_whitelist (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              command TEXT NOT NULL UNIQUE COLLATE NOCASE,
+              added_at TEXT NOT NULL
+            )
+          ''');
         }
       },
     );
@@ -137,5 +155,43 @@ class DatabaseHelper {
     final db = await database;
     final maps = await db.query('settings', where: 'key = ?', whereArgs: [key]);
     return maps.isNotEmpty ? maps.first['value'] as String : null;
+  }
+
+  static Future<bool> isCommandWhitelisted(String command) async {
+    final db = await database;
+    // Extract base command, skipping sudo/echo prefixes
+    String baseCommand = command.trim();
+    if (baseCommand.startsWith('echo ')) {
+      baseCommand = baseCommand.substring(baseCommand.indexOf('|') + 1).trim();
+    }
+    if (baseCommand.startsWith('sudo ')) {
+      baseCommand = baseCommand.substring(5).trim();
+    }
+    if (baseCommand.startsWith('-S ')) {
+      baseCommand = baseCommand.substring(3).trim();
+    }
+    baseCommand = baseCommand.split(' ').first.toLowerCase();
+    final maps = await db.query('command_whitelist', where: 'LOWER(command) = ?', whereArgs: [baseCommand]);
+    return maps.isNotEmpty;
+  }
+
+  static Future<void> addToWhitelist(String command) async {
+    final db = await database;
+    // Extract base command, skipping sudo/echo prefixes
+    String baseCommand = command.trim();
+    if (baseCommand.startsWith('echo ')) {
+      baseCommand = baseCommand.substring(baseCommand.indexOf('|') + 1).trim();
+    }
+    if (baseCommand.startsWith('sudo ')) {
+      baseCommand = baseCommand.substring(5).trim();
+    }
+    if (baseCommand.startsWith('-S ')) {
+      baseCommand = baseCommand.substring(3).trim();
+    }
+    baseCommand = baseCommand.split(' ').first.toLowerCase();
+    await db.insert('command_whitelist', {
+      'command': baseCommand,
+      'added_at': DateTime.now().toIso8601String(),
+    }, conflictAlgorithm: ConflictAlgorithm.ignore);
   }
 }

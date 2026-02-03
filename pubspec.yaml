@@ -37,6 +37,7 @@ dependencies:
   provider: ^6.1.1
   process_run: ^1.1.0
   dropdown_button2: ^2.3.9
+  file_picker: ^8.1.6
 
 dev_dependencies:
   flutter_test:

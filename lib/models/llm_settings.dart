@@ -16,7 +16,7 @@ class LLMSettings {
     required this.modelName,
     this.temperature = 0.22,
     this.maxTokens = 32000,
-    this.timeoutSeconds = 120,
+    this.timeoutSeconds = 180,
   });
 
   Map<String, dynamic> toJson() => {
@@ -36,7 +36,7 @@ class LLMSettings {
     modelName: json['modelName'] as String? ?? '',
     temperature: (json['temperature'] as num?)?.toDouble() ?? 0.22,
     maxTokens: json['maxTokens'] as int? ?? 32000,
-    timeoutSeconds: json['timeoutSeconds'] as int? ?? 120,
+    timeoutSeconds: json['timeoutSeconds'] as int? ?? 180,
   );
 
   factory LLMSettings.defaultSettings() => LLMSettings(provider: LLMProvider.none, modelName: '');
