@@ -30,6 +30,7 @@ enum LLMProvider {
   }
 
   bool get requiresApiKey => this == LLMProvider.claude || this == LLMProvider.chatGPT || this == LLMProvider.gemini || this == LLMProvider.openRouter;
+  bool get supportsOptionalApiKey => this == LLMProvider.lmStudio;
   bool get requiresBaseUrl => this == LLMProvider.ollama || this == LLMProvider.lmStudio || this == LLMProvider.custom;
 
   String get defaultBaseUrl {

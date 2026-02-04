@@ -27,7 +27,7 @@ class DatabaseHelper {
     
     return await openDatabase(
       path,
-      version: 5,
+      version: 6,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE vulnerabilities (
@@ -79,6 +79,18 @@ class DatabaseHelper {
             added_at TEXT NOT NULL
           )
         ''');
+
+        await db.execute('''
+          CREATE TABLE provider_settings (
+            provider TEXT PRIMARY KEY,
+            baseUrl TEXT,
+            apiKey TEXT,
+            modelName TEXT,
+            temperature REAL,
+            maxTokens INTEGER,
+            timeoutSeconds INTEGER
+          )
+        ''');
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -97,6 +109,19 @@ class DatabaseHelper {
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               command TEXT NOT NULL UNIQUE COLLATE NOCASE,
               added_at TEXT NOT NULL
+            )
+          ''');
+        }
+        if (oldVersion < 6) {
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS provider_settings (
+              provider TEXT PRIMARY KEY,
+              baseUrl TEXT,
+              apiKey TEXT,
+              modelName TEXT,
+              temperature REAL,
+              maxTokens INTEGER,
+              timeoutSeconds INTEGER
             )
           ''');
         }
@@ -193,5 +218,19 @@ class DatabaseHelper {
       'command': baseCommand,
       'added_at': DateTime.now().toIso8601String(),
     }, conflictAlgorithm: ConflictAlgorithm.ignore);
+  }
+
+  static Future<void> saveProviderSettings(String provider, Map<String, dynamic> settings) async {
+    final db = await database;
+    await db.insert('provider_settings', {
+      'provider': provider,
+      ...settings,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  static Future<Map<String, dynamic>?> getProviderSettings(String provider) async {
+    final db = await database;
+    final maps = await db.query('provider_settings', where: 'provider = ?', whereArgs: [provider]);
+    return maps.isNotEmpty ? maps.first : null;
   }
 }

@@ -176,13 +176,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   underline: const SizedBox(),
                   padding: const EdgeInsets.symmetric(horizontal: 12),
                   items: LLMProvider.values.map((p) => DropdownMenuItem(value: p, child: Text(p.displayName))).toList(),
-                  onChanged: (v) {
+                  onChanged: (v) async {
                     if (v != null) {
                       setState(() {
                         _selectedProvider = v;
-                        if (v.requiresBaseUrl) {
-                          _baseUrlController.text = v.defaultBaseUrl;
+                      });
+                      // Load saved settings for this provider
+                      final providerSettings = await DatabaseHelper.getProviderSettings(v.name);
+                      setState(() {
+                        if (providerSettings != null) {
+                          _baseUrlController.text = providerSettings['baseUrl'] as String? ?? (v.requiresBaseUrl ? v.defaultBaseUrl : '');
+                          _apiKeyController.text = providerSettings['apiKey'] as String? ?? '';
+                          _modelController.text = providerSettings['modelName'] as String? ?? '';
+                          _temperature = (providerSettings['temperature'] as num?)?.toDouble() ?? 0.22;
+                          _maxTokens = providerSettings['maxTokens'] as int? ?? 32000;
+                          _timeoutSeconds = providerSettings['timeoutSeconds'] as int? ?? 180;
+                        } else {
+                          _baseUrlController.text = v.requiresBaseUrl ? v.defaultBaseUrl : '';
+                          _apiKeyController.text = '';
+                          _modelController.text = '';
                         }
+                        _availableModels = [];
                       });
                     }
                   },
@@ -222,6 +236,34 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   obscureText: true,
                   style: const TextStyle(color: Colors.white, fontFamily: 'monospace'),
                   decoration: InputDecoration(
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: const BorderSide(color: Color(0xFF00F5FF)),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: BorderSide(color: const Color(0xFF00F5FF).withOpacity(0.3)),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: const BorderSide(color: Color(0xFF00F5FF), width: 2),
+                    ),
+                    filled: true,
+                    fillColor: const Color(0xFF0A0E27),
+                  ),
+                ),
+                const SizedBox(height: 24),
+              ],
+              if (_selectedProvider.supportsOptionalApiKey) ...[
+                const Text('API KEY (Optional)', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 12)),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _apiKeyController,
+                  obscureText: true,
+                  style: const TextStyle(color: Colors.white, fontFamily: 'monospace'),
+                  decoration: InputDecoration(
+                    hintText: 'For MCP access',
+                    hintStyle: TextStyle(color: Colors.white.withOpacity(0.3)),
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(8),
                       borderSide: const BorderSide(color: Color(0xFF00F5FF)),
@@ -681,7 +723,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (context) => _TestDialog(settings: settings, llmService: _llmService),
+      builder: (context) => _TestDialog(settings: settings, llmService: LLMService(enableDebugLogging: true)),
     );
   }
 

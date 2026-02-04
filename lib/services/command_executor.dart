@@ -20,13 +20,76 @@ class CommandExecutor {
   // Cache for tool usage information to avoid repeated lookups
   static final Map<String, ToolUsageInfo> _toolUsageCache = {};
 
-  // Map tool names to their actual binary names
+  // Cache for tool setup verification results
+  static final Map<String, Map<String, dynamic>> _toolSetupCache = {};
+
+  // Track tools whose setup has failed (to avoid repeated attempts)
+  static final Set<String> _toolSetupFailures = {};
+
+  // Mark a tool's setup as failed so we don't retry
+  static void markToolSetupFailed(String tool) {
+    _toolSetupFailures.add(tool.toLowerCase());
+  }
+
+  // Map tool names to their actual binary names (avoids LLM calls for known tools)
   static const Map<String, String> _toolBinaryMap = {
     'metasploit': 'msfconsole',
     'metasploit-framework': 'msfconsole',
     'msf': 'msfconsole',
+    'msfconsole': 'msfconsole',
     'exploitdb': 'searchsploit',
     'exploit-db': 'searchsploit',
+    'searchsploit': 'searchsploit',
+    'sqlmap': 'sqlmap',
+    'nikto': 'nikto',
+    'hydra': 'hydra',
+    'nuclei': 'nuclei',
+    'scapy': 'scapy',
+    'dirb': 'dirb',
+    'gobuster': 'gobuster',
+    'ffuf': 'ffuf',
+    'smbclient': 'smbclient',
+    'smbmap': 'smbmap',
+    'enum4linux': 'enum4linux',
+    'wfuzz': 'wfuzz',
+    'john': 'john',
+    'hashcat': 'hashcat',
+    'masscan': 'masscan',
+    'responder': 'responder',
+    'crackmapexec': 'crackmapexec',
+    'netexec': 'netexec',
+    'wpscan': 'wpscan',
+    'feroxbuster': 'feroxbuster',
+    'testssl': 'testssl.sh',
+    'testssl.sh': 'testssl.sh',
+    'sslyze': 'sslyze',
+    'nmap': 'nmap',
+    'curl': 'curl',
+    'wget': 'wget',
+    'nc': 'nc',
+    'netcat': 'nc',
+    'python2': 'python2',
+    'python3': 'python3',
+    'python': 'python3',
+    'perl': 'perl',
+    'ruby': 'ruby',
+    'dig': 'dig',
+    'host': 'host',
+    'nslookup': 'nslookup',
+    'whois': 'whois',
+    'tcpdump': 'tcpdump',
+    'tshark': 'tshark',
+    'arp-scan': 'arp-scan',
+    'nbtscan': 'nbtscan',
+    'snmpwalk': 'snmpwalk',
+    'onesixtyone': 'onesixtyone',
+    'dnsrecon': 'dnsrecon',
+    'dnsenum': 'dnsenum',
+    'fierce': 'fierce',
+    'whatweb': 'whatweb',
+    'wafw00f': 'wafw00f',
+    'commix': 'commix',
+    'xxd': 'xxd',
   };
 
   // Get the actual binary name for a tool
@@ -99,15 +162,18 @@ class CommandExecutor {
     print('${_timestamp()} DEBUG: Looking up usage info for $primaryTool');
 
     final os = await getOsInfo();
+    final isWsl = Platform.isWindows && await isWslAvailable();
+    final executionEnv = isWsl ? 'WSL on Windows' : Platform.isMacOS ? 'macOS' : 'Native Linux';
     final version = await getToolVersion(primaryTool);
     final versionStr = version != null ? ' version $version' : '';
 
-    final prompt = '''You are a penetration testing expert. Provide accurate usage information for "$primaryTool"$versionStr on $os.
+    final prompt = '''You are a penetration testing expert. Provide accurate usage information for "$primaryTool"$versionStr on $os (running via $executionEnv).
 
 IMPORTANT: Search the web for current documentation if available, especially for:
 - Official documentation for this specific version
 - Common usage patterns and examples
 - Known issues or gotchas with this version
+- OS-specific differences for $os${isWsl ? ' (via WSL)' : ''}
 
 Respond with JSON:
 {
@@ -254,22 +320,39 @@ Respond ONLY with valid JSON.''';
   static void clearToolUsageCache() {
     _toolUsageCache.clear();
   }
+
+  // Clear all caches (useful on app restart or new scan)
+  static void clearAllCaches() {
+    _toolUsageCache.clear();
+    _toolSetupCache.clear();
+    _toolSetupFailures.clear();
+  }
   
   static Future<String> getOsInfo() async {
     if (_cachedOsInfo != null) return _cachedOsInfo!;
     
     try {
-      if (Platform.isWindows && await isWslAvailable()) {
-        final result = await Process.run('wsl', ['cat', '/etc/os-release']);
-        if (result.exitCode == 0) {
-          final output = result.stdout.toString();
-          final nameMatch = RegExp(r'PRETTY_NAME="([^"]+)"').firstMatch(output);
-          if (nameMatch != null) {
-            _cachedOsInfo = nameMatch.group(1)!;
-            return _cachedOsInfo!;
+      if (Platform.isWindows) {
+        if (await isWslAvailable()) {
+          final result = await Process.run('wsl', ['cat', '/etc/os-release']);
+          if (result.exitCode == 0) {
+            final output = result.stdout.toString();
+            final nameMatch = RegExp(r'PRETTY_NAME="([^"]+)"').firstMatch(output);
+            if (nameMatch != null) {
+              _cachedOsInfo = '${nameMatch.group(1)!} (via WSL on Windows)';
+              return _cachedOsInfo!;
+            }
+          }
+          _cachedOsInfo = 'Linux (WSL on Windows)';
+        } else {
+          // Native Windows without WSL
+          final result = await Process.run('cmd', ['/c', 'ver']);
+          if (result.exitCode == 0) {
+            _cachedOsInfo = 'Windows (Native)';
+          } else {
+            _cachedOsInfo = 'Windows';
           }
         }
-        _cachedOsInfo = 'Linux (WSL)';
       } else if (Platform.isLinux) {
         final result = await Process.run('cat', ['/etc/os-release']);
         if (result.exitCode == 0) {
@@ -282,12 +365,21 @@ Respond ONLY with valid JSON.''';
         }
         _cachedOsInfo = 'Linux';
       } else if (Platform.isMacOS) {
+        final result = await Process.run('sw_vers', ['-productVersion']);
+        if (result.exitCode == 0) {
+          _cachedOsInfo = 'macOS ${result.stdout.toString().trim()}';
+          return _cachedOsInfo!;
+        }
         _cachedOsInfo = 'macOS';
       } else {
         _cachedOsInfo = 'Unknown';
       }
     } catch (e) {
-      _cachedOsInfo = Platform.isWindows ? 'Linux (WSL)' : (Platform.isMacOS ? 'macOS' : 'Linux');
+      if (Platform.isWindows) {
+        _cachedOsInfo = await isWslAvailable() ? 'Linux (WSL on Windows)' : 'Windows';
+      } else {
+        _cachedOsInfo = Platform.isMacOS ? 'macOS' : 'Linux';
+      }
     }
     return _cachedOsInfo!;
   }
@@ -307,12 +399,24 @@ Respond ONLY with valid JSON.''';
   static Future<Map<String, dynamic>> verifyToolSetup(String tool, LLMSettings settings, LLMService llmService) async {
     try {
       // Skip setup verification for tools that don't need it
-      final noSetupTools = ['searchsploit', 'nmap', 'curl', 'wget', 'nc', 'netcat'];
+      final noSetupTools = ['searchsploit', 'nmap', 'curl', 'wget', 'nc', 'netcat', 'python', 'python2', 'python3', 'perl', 'ruby', 'nikto', 'sqlmap', 'hydra', 'dirb', 'gobuster', 'ffuf', 'smbclient', 'smbmap', 'nuclei', 'scapy'];
       if (noSetupTools.contains(tool.toLowerCase())) {
         print('${_timestamp()} DEBUG: $tool does not require setup');
         return {'needs_setup': false};
       }
-      
+
+      // Check if setup previously failed for this tool
+      if (_toolSetupFailures.contains(tool.toLowerCase())) {
+        print('${_timestamp()} DEBUG: $tool setup previously failed, skipping');
+        return {'needs_setup': true, 'setup_failed': true, 'reason': 'Setup previously failed for $tool'};
+      }
+
+      // Check setup cache
+      if (_toolSetupCache.containsKey(tool.toLowerCase())) {
+        print('${_timestamp()} DEBUG: Using cached setup result for $tool');
+        return _toolSetupCache[tool.toLowerCase()]!;
+      }
+
       final os = await getOsInfo();
       
       final prompt = '''Does "$tool" on $os require any initialization or setup after installation before it can be used effectively?
@@ -339,7 +443,9 @@ Respond ONLY with valid JSON.''';
       
       if (decision['needs_setup'] != true) {
         print('${_timestamp()} DEBUG: No setup needed for $tool');
-        return {'needs_setup': false};
+        final result = <String, dynamic>{'needs_setup': false};
+        _toolSetupCache[tool.toLowerCase()] = result;
+        return result;
       }
       
       final checkCmd = decision['check_command'];
@@ -380,10 +486,13 @@ Respond ONLY with valid JSON.''';
         // If check command succeeds, setup is already done
         if (exitCode == 0 && !stdout.toLowerCase().contains('disconnect') && !stdout.toLowerCase().contains('failed')) {
           print('${_timestamp()} DEBUG: Setup already complete for $tool');
-          return {'needs_setup': false};
+          final result = <String, dynamic>{'needs_setup': false};
+          _toolSetupCache[tool.toLowerCase()] = result;
+          return result;
         }
-        
+
         print('${_timestamp()} DEBUG: Setup required for $tool: ${decision['reason']}');
+        _toolSetupCache[tool.toLowerCase()] = decision;
         return decision;
       } on TimeoutException {
         print('${_timestamp()} DEBUG: Setup check timed out after 60s');
@@ -442,33 +551,9 @@ Respond ONLY with valid JSON.''';
       final primaryTool = tool.split(',').first.trim().split(' ').first.trim();
       if (primaryTool.isEmpty) return false;
 
-      final os = await getOsInfo();
-      print('${_timestamp()} DEBUG: Detected OS: $os');
-      print('${_timestamp()} DEBUG: Checking for primary tool: $primaryTool (from "$tool")');
-
-      final prompt = '''What is the exact binary/command name for "$primaryTool" on $os?
-
-Respond with JSON:
-{
-  "binary": "exact binary name to check with 'which'",
-  "explanation": "brief explanation"
-}
-
-IMPORTANT: Return ONLY the single primary binary name, not multiple tools.
-
-Examples:
-- For metasploit: {"binary": "msfconsole", "explanation": "msfconsole is the main Metasploit binary"}
-- For nmap: {"binary": "nmap", "explanation": "nmap is the binary name"}
-- For sqlmap: {"binary": "sqlmap", "explanation": "sqlmap is the binary name"}
-- For searchsploit: {"binary": "searchsploit", "explanation": "searchsploit is part of exploitdb"}
-- For hydra: {"binary": "hydra", "explanation": "hydra is the binary name"}
-- For nikto: {"binary": "nikto", "explanation": "nikto is the binary name"}
-
-Respond ONLY with valid JSON.''';
-
-      final response = await llmService.sendMessage(settings, prompt).timeout(Duration(seconds: 30));
-      final decision = _parseJson(response);
-      final binaryName = decision['binary'] ?? primaryTool;
+      // Use known binary mapping (avoids LLM call for common tools)
+      final binaryName = _getToolBinary(primaryTool);
+      print('${_timestamp()} DEBUG: Tool binary lookup: $primaryTool -> $binaryName');
 
       // Use simple 'which' check for single binary
       final checkCmd = 'which $binaryName';
@@ -523,15 +608,49 @@ Respond ONLY with valid JSON.''';
   }
 
   static Future<String> _detectPackageManager() async {
+    // Check for macOS first
+    if (Platform.isMacOS) {
+      try {
+        final result = await Process.run('which', ['brew']);
+        if (result.exitCode == 0) return 'brew';
+      } catch (e) {}
+      return 'brew'; // Default for macOS
+    }
+
+    // Check for Windows native (without WSL)
+    if (Platform.isWindows && !await isWslAvailable()) {
+      // Windows uses chocolatey, scoop, or winget
+      final managers = ['choco', 'scoop', 'winget'];
+      for (final manager in managers) {
+        try {
+          final result = await Process.run('where', [manager]);
+          if (result.exitCode == 0) return manager;
+        } catch (e) {}
+      }
+      return 'choco'; // Default for Windows (most common)
+    }
+
+    // For Linux (native or WSL)
     final managers = ['apt-get', 'yum', 'dnf', 'pacman', 'zypper', 'apk'];
     
-    for (final manager in managers) {
-      try {
-        final result = await Process.run('which', [manager]);
-        if (result.exitCode == 0) return manager;
-      } catch (e) {}
+    if (Platform.isWindows && await isWslAvailable()) {
+      // Check inside WSL
+      for (final manager in managers) {
+        try {
+          final result = await Process.run('wsl', ['which', manager]);
+          if (result.exitCode == 0) return manager;
+        } catch (e) {}
+      }
+    } else {
+      // Native Linux
+      for (final manager in managers) {
+        try {
+          final result = await Process.run('which', [manager]);
+          if (result.exitCode == 0) return manager;
+        } catch (e) {}
+      }
     }
-    return 'apt-get';
+    return 'apt-get'; // Default fallback
   }
 
   static Future<bool> installTool(String tool, LLMSettings settings, LLMService llmService) async {
@@ -549,30 +668,82 @@ Respond ONLY with valid JSON.''';
       }
 
       final os = await getOsInfo();
-      print('${_timestamp()} DEBUG: Installing on OS: $os');
+      final packageManager = await _detectPackageManager();
+      print('${_timestamp()} DEBUG: Installing on OS: $os (package manager: $packageManager)');
 
-      final prompt = '''What is the SINGLE apt package name to install "$primaryTool" on $os?
+      // Build OS-specific prompt
+      String packageManagerInfo;
+      String exampleCommand;
+      if (packageManager == 'brew') {
+        packageManagerInfo = 'macOS using Homebrew';
+        exampleCommand = 'brew install PACKAGE_NAME';
+      } else if (packageManager == 'choco') {
+        packageManagerInfo = 'Windows using Chocolatey';
+        exampleCommand = 'choco install -y PACKAGE_NAME';
+      } else if (packageManager == 'scoop') {
+        packageManagerInfo = 'Windows using Scoop';
+        exampleCommand = 'scoop install PACKAGE_NAME';
+      } else if (packageManager == 'winget') {
+        packageManagerInfo = 'Windows using winget';
+        exampleCommand = 'winget install --id PACKAGE_NAME --silent';
+      } else if (packageManager == 'apt-get') {
+        packageManagerInfo = 'Debian/Ubuntu using apt-get';
+        exampleCommand = 'sudo apt-get install -y PACKAGE_NAME';
+      } else if (packageManager == 'yum' || packageManager == 'dnf') {
+        packageManagerInfo = 'RedHat/CentOS/Fedora using $packageManager';
+        exampleCommand = 'sudo $packageManager install -y PACKAGE_NAME';
+      } else if (packageManager == 'pacman') {
+        packageManagerInfo = 'Arch Linux using pacman';
+        exampleCommand = 'sudo pacman -S --noconfirm PACKAGE_NAME';
+      } else {
+        packageManagerInfo = 'Linux using $packageManager';
+        exampleCommand = 'sudo $packageManager install PACKAGE_NAME';
+      }
+
+      final isWsl = Platform.isWindows && await isWslAvailable();
+      final wslInfo = isWsl ? 'WSL (Windows Subsystem for Linux)' : 
+                      Platform.isWindows ? 'Native Windows' : 'Native';
+
+      final prompt = '''What is the SINGLE package name to install "$primaryTool" on $os?
+
+SYSTEM INFO:
+- OS: $os
+- Package Manager: $packageManagerInfo
+- Running via: $wslInfo
 
 Respond with JSON:
 {
-  "command": "sudo apt-get install -y PACKAGE_NAME",
+  "command": "$exampleCommand",
   "package": "exact package name"
 }
 
 IMPORTANT RULES:
 1. Return ONLY ONE package name, not multiple
-2. Do NOT include 'apt-get update' - just the install command
-3. Use the standard package name from apt repositories
-4. Do NOT suggest git clone unless the tool is not in apt
+2. For apt-get: Do NOT include 'apt-get update' - just the install command
+3. For brew: Use the standard Homebrew formula name (often different from Linux package names)
+4. For Windows (choco/scoop/winget): Use Windows-compatible package names
+5. Use the standard package name from the appropriate repository
+6. Do NOT suggest git clone unless the tool is not available in the package manager
 
-Examples:
-- For metasploit: {"command": "sudo apt-get install -y metasploit-framework", "package": "metasploit-framework"}
-- For nmap: {"command": "sudo apt-get install -y nmap", "package": "nmap"}
-- For smbmap: {"command": "sudo apt-get install -y smbmap", "package": "smbmap"}
-- For sqlmap: {"command": "sudo apt-get install -y sqlmap", "package": "sqlmap"}
-- For hydra: {"command": "sudo apt-get install -y hydra", "package": "hydra"}
-- For nikto: {"command": "sudo apt-get install -y nikto", "package": "nikto"}
-- For searchsploit: {"command": "sudo apt-get install -y exploitdb", "package": "exploitdb"}
+EXAMPLES FOR DIFFERENT SYSTEMS:
+
+Debian/Ubuntu (apt-get):
+- metasploit: {"command": "sudo apt-get install -y metasploit-framework", "package": "metasploit-framework"}
+- nmap: {"command": "sudo apt-get install -y nmap", "package": "nmap"}
+- searchsploit: {"command": "sudo apt-get install -y exploitdb", "package": "exploitdb"}
+
+macOS (brew):
+- metasploit: {"command": "brew install metasploit", "package": "metasploit"}
+- nmap: {"command": "brew install nmap", "package": "nmap"}
+- Note: searchsploit/exploitdb requires: {"command": "brew install exploitdb", "package": "exploitdb"}
+
+Windows (choco):
+- nmap: {"command": "choco install -y nmap", "package": "nmap"}
+- curl: {"command": "choco install -y curl", "package": "curl"}
+- Note: Many pentesting tools are not available on Windows - suggest WSL installation
+
+RedHat/CentOS (yum/dnf):
+- nmap: {"command": "sudo yum install -y nmap", "package": "nmap"}
 
 Respond ONLY with valid JSON.''';
       
@@ -589,19 +760,33 @@ Respond ONLY with valid JSON.''';
       installCmd = installCmd.replaceAll(RegExp(r'sudo\s+apt-get\s+update\s*&&\s*'), '');
       installCmd = installCmd.replaceAll(RegExp(r'apt-get\s+update\s*&&\s*'), '');
 
-      // Ensure -y flag is present
+      // Ensure -y flag is present for apt-get
       if (installCmd.contains('apt-get install') && !installCmd.contains('-y')) {
         installCmd = installCmd.replaceAll('apt-get install', 'apt-get install -y');
       }
 
+      // For brew, no sudo needed (and it will fail with sudo)
+      if (packageManager == 'brew' && installCmd.contains('sudo')) {
+        installCmd = installCmd.replaceAll('sudo ', '');
+      }
+
+      // For Windows package managers, handle elevation differently
+      final isWindowsNative = Platform.isWindows && !isWsl;
+      if (isWindowsNative && (packageManager == 'choco' || packageManager == 'scoop' || packageManager == 'winget')) {
+        // Windows package managers need to run elevated - will be handled by executeCommand
+        // Remove any sudo that LLM might have added
+        installCmd = installCmd.replaceAll('sudo ', '');
+      }
+
       // Use sudo -n (non-interactive) to fail fast if password required
-      // instead of hanging forever waiting for password input
-      if (installCmd.contains('sudo ') && !installCmd.contains('sudo -n') && !installCmd.contains('sudo -S')) {
+      // Skip for brew (doesn't use sudo), Windows (no sudo), and if adminPassword is provided
+      if (packageManager != 'brew' && !isWindowsNative &&
+          installCmd.contains('sudo ') && !installCmd.contains('sudo -n') && !installCmd.contains('sudo -S')) {
         installCmd = installCmd.replaceAll('sudo ', 'sudo -n ');
       }
 
-      // Check if sudo requires password (would cause hang)
-      if (installCmd.contains('sudo')) {
+      // Check if sudo requires password (would cause hang) - skip for Windows native
+      if (installCmd.contains('sudo') && !isWindowsNative) {
         print('${_timestamp()} DEBUG: Checking sudo access...');
         try {
           ProcessResult sudoCheck;
@@ -624,9 +809,20 @@ Respond ONLY with valid JSON.''';
       print('${_timestamp()} DEBUG: Running install command: $installCmd');
 
       Process process;
-      if (Platform.isWindows && await isWslAvailable()) {
+      if (isWsl) {
         print('${_timestamp()} DEBUG: Running install command in WSL');
         process = await Process.start('wsl', ['bash', '-c', installCmd]);
+      } else if (isWindowsNative) {
+        print('${_timestamp()} DEBUG: Running install command on Windows');
+        // For Windows, use PowerShell with elevation if needed
+        if (packageManager == 'choco' || packageManager == 'winget') {
+          // These require elevation - use Start-Process with -Verb RunAs
+          final psCommand = 'Start-Process powershell -ArgumentList "-Command","$installCmd" -Verb RunAs -Wait';
+          process = await Process.start('powershell', ['-Command', psCommand]);
+        } else {
+          // Scoop doesn't require elevation
+          process = await Process.start('powershell', ['-Command', installCmd]);
+        }
       } else if (Platform.isLinux || Platform.isMacOS) {
         print('${_timestamp()} DEBUG: Running install command');
         process = await Process.start('bash', ['-c', installCmd]);
@@ -666,8 +862,16 @@ Respond ONLY with valid JSON.''';
 
   static String _getInstallCommand(String packageManager, String package) {
     switch (packageManager) {
+      case 'brew':
+        return 'brew install $package';
+      case 'choco':
+        return 'choco install -y $package';
+      case 'scoop':
+        return 'scoop install $package';
+      case 'winget':
+        return 'winget install --id $package --silent';
       case 'apt-get':
-        return 'sudo apt-get update && sudo apt-get install -y $package';
+        return 'sudo apt-get install -y $package';
       case 'yum':
         return 'sudo yum install -y $package';
       case 'dnf':
@@ -729,15 +933,20 @@ Respond ONLY with valid JSON.''';
 
       CommandResult result;
       
-      if (Platform.isWindows && await isWslAvailable()) {
-        result = await _executeInWsl(execCommand);
+      if (Platform.isWindows) {
+        if (await isWslAvailable()) {
+          result = await _executeInWsl(execCommand);
+        } else {
+          // Native Windows without WSL
+          result = await _executeInPowerShell(execCommand);
+        }
       } else if (Platform.isLinux || Platform.isMacOS) {
         result = await _executeInShell(execCommand);
       } else {
         return {
           'exitCode': -1,
-          'output': 'No execution environment available',
-          'error': 'WSL not available on Windows',
+          'output': 'Unsupported platform',
+          'error': 'Platform not supported',
         };
       }
       
@@ -764,6 +973,39 @@ Respond ONLY with valid JSON.''';
       final stderrBuffer = StringBuffer();
 
       // Use Utf8Decoder with allowMalformed to handle invalid UTF-8 sequences
+      final decoder = Utf8Decoder(allowMalformed: true);
+
+      process.stdout.transform(decoder).listen((data) {
+        final sanitized = _sanitizeOutput(data);
+        print('[STDOUT] $sanitized');
+        stdoutBuffer.write(sanitized);
+      });
+
+      process.stderr.transform(decoder).listen((data) {
+        final sanitized = _sanitizeOutput(data);
+        print('[STDERR] $sanitized');
+        stderrBuffer.write(sanitized);
+      });
+
+      final exitCode = await process.exitCode;
+      return CommandResult(exitCode, stdoutBuffer.toString(), stderrBuffer.toString());
+    } on TimeoutException {
+      return CommandResult(-1, "", "Command timed out.");
+    } catch (e) {
+      return CommandResult(-1, "", "Error: $e");
+    }
+  }
+
+  static Future<CommandResult> _executeInPowerShell(String command) async {
+    try {
+      // For commands that need elevation, use Start-Process with -Verb RunAs
+      // For now, execute as-is and let Windows UAC handle elevation prompts
+      final process = await Process.start('powershell', ['-Command', command])
+          .timeout(const Duration(minutes: 5));
+
+      final stdoutBuffer = StringBuffer();
+      final stderrBuffer = StringBuffer();
+
       final decoder = Utf8Decoder(allowMalformed: true);
 
       process.stdout.transform(decoder).listen((data) {

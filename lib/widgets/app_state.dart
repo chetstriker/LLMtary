@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import '../models/vulnerability.dart';
 import '../models/command_log.dart';
 import '../models/llm_settings.dart';
+import '../models/llm_provider.dart';
 import '../database/database_helper.dart';
 
 class PromptLog {
@@ -75,16 +76,37 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> loadLLMSettings() async {
-    final settingsJson = await DatabaseHelper.getSetting('llm_settings');
-    if (settingsJson != null) {
-      _llmSettings = LLMSettings.fromJson(json.decode(settingsJson));
+    final currentProvider = await DatabaseHelper.getSetting('current_provider');
+    if (currentProvider != null) {
+      final providerSettings = await DatabaseHelper.getProviderSettings(currentProvider);
+      if (providerSettings != null) {
+        _llmSettings = LLMSettings(
+          provider: LLMProvider.values.firstWhere((e) => e.name == currentProvider, orElse: () => LLMProvider.none),
+          baseUrl: providerSettings['baseUrl'] as String?,
+          apiKey: providerSettings['apiKey'] as String?,
+          modelName: providerSettings['modelName'] as String? ?? '',
+          temperature: (providerSettings['temperature'] as num?)?.toDouble() ?? 0.22,
+          maxTokens: providerSettings['maxTokens'] as int? ?? 32000,
+          timeoutSeconds: providerSettings['timeoutSeconds'] as int? ?? 180,
+        );
+      }
     }
     notifyListeners();
   }
 
   Future<void> updateLLMSettings(LLMSettings settings) async {
     _llmSettings = settings;
-    await DatabaseHelper.saveSetting('llm_settings', json.encode(settings.toJson()));
+    // Save current provider
+    await DatabaseHelper.saveSetting('current_provider', settings.provider.name);
+    // Save provider-specific settings
+    await DatabaseHelper.saveProviderSettings(settings.provider.name, {
+      'baseUrl': settings.baseUrl,
+      'apiKey': settings.apiKey,
+      'modelName': settings.modelName,
+      'temperature': settings.temperature,
+      'maxTokens': settings.maxTokens,
+      'timeoutSeconds': settings.timeoutSeconds,
+    });
     notifyListeners();
   }
 
@@ -94,6 +116,7 @@ class AppState extends ChangeNotifier {
   }
 
   void addDebugLog(String message) {
+    print('DEBUG: $message');
     _debugLogs.add(DebugLog(message, DateTime.now()));
     notifyListeners();
   }

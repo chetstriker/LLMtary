@@ -5,8 +5,9 @@ import '../models/llm_provider.dart';
 
 class LLMService {
   final Function(String, String)? onPromptResponse;
+  bool enableDebugLogging;
 
-  LLMService({this.onPromptResponse});
+  LLMService({this.onPromptResponse, this.enableDebugLogging = false});
   // System prompt establishing expertise and enabling web search behavior
   static const String _securityExpertSystemPrompt = '''You are an elite penetration tester and cybersecurity expert with deep expertise in:
 - Vulnerability assessment and exploitation techniques
@@ -39,6 +40,11 @@ When analyzing vulnerabilities, you SHOULD search for:
     final timeout = Duration(seconds: settings.timeoutSeconds);
     final systemPrompt = useSystemPrompt ? _securityExpertSystemPrompt : null;
 
+    print('\n=== LLM REQUEST ===');
+    print('Provider: ${settings.provider.displayName}');
+    print('Model: ${settings.modelName}');
+    print('Prompt: ${message.substring(0, message.length > 200 ? 200 : message.length)}...');
+
     String response;
     switch (settings.provider) {
       case LLMProvider.ollama:
@@ -63,6 +69,10 @@ When analyzing vulnerabilities, you SHOULD search for:
         throw Exception('No AI provider selected');
     }
 
+    print('\n=== LLM RESPONSE ===');
+    print('Response: ${response.substring(0, response.length > 500 ? 500 : response.length)}...');
+    print('==================\n');
+
     onPromptResponse?.call(message, response);
     return response;
   }
@@ -84,11 +94,25 @@ When analyzing vulnerabilities, you SHOULD search for:
       body['system'] = systemPrompt;
     }
 
+    final url = '${settings.baseUrl}/api/generate';
+    if (enableDebugLogging) {
+      print('DEBUG [Ollama]: POST $url');
+      print('DEBUG [Ollama]: Model: ${settings.modelName}');
+    }
+
     final response = await http.post(
-      Uri.parse('${settings.baseUrl}/api/generate'),
+      Uri.parse(url),
       headers: {'Content-Type': 'application/json'},
       body: json.encode(body),
     ).timeout(timeout);
+    
+    if (enableDebugLogging) {
+      print('DEBUG [Ollama]: Response status: ${response.statusCode}');
+      if (response.statusCode != 200) {
+        print('DEBUG [Ollama]: Response body: ${response.body}');
+      }
+    }
+    
     if (response.statusCode == 200) {
       return json.decode(response.body)['response'] as String? ?? 'No response';
     }
@@ -110,12 +134,32 @@ When analyzing vulnerabilities, you SHOULD search for:
       'max_tokens': settings.maxTokens,
     };
 
+    final headers = <String, String>{'Content-Type': 'application/json'};
+    if (settings.apiKey != null && settings.apiKey!.trim().isNotEmpty) {
+      headers['Authorization'] = 'Bearer ${settings.apiKey}';
+    }
+
     final baseUrl = settings.baseUrl?.replaceAll(RegExp(r'/v1/?$'), '') ?? '';
+    final url = '$baseUrl/v1/chat/completions';
+    if (enableDebugLogging) {
+      print('DEBUG [LM Studio]: POST $url');
+      print('DEBUG [LM Studio]: Model: ${settings.modelName}');
+      print('DEBUG [LM Studio]: Headers: ${headers.keys.join(", ")}');
+    }
+    
     final response = await http.post(
-      Uri.parse('$baseUrl/v1/chat/completions'),
-      headers: {'Content-Type': 'application/json'},
+      Uri.parse(url),
+      headers: headers,
       body: json.encode(body),
     ).timeout(timeout);
+    
+    if (enableDebugLogging) {
+      print('DEBUG [LM Studio]: Response status: ${response.statusCode}');
+      if (response.statusCode != 200) {
+        print('DEBUG [LM Studio]: Response body: ${response.body}');
+      }
+    }
+    
     if (response.statusCode == 200) {
       final data = json.decode(response.body);
       final choices = data['choices'] as List?;
@@ -144,8 +188,14 @@ When analyzing vulnerabilities, you SHOULD search for:
       body['temperature'] = settings.temperature;
     }
 
+    final url = 'https://api.anthropic.com/v1/messages';
+    if (enableDebugLogging) {
+      print('DEBUG [Claude]: POST $url');
+      print('DEBUG [Claude]: Model: ${settings.modelName}');
+    }
+
     final response = await http.post(
-      Uri.parse('https://api.anthropic.com/v1/messages'),
+      Uri.parse(url),
       headers: {
         'Content-Type': 'application/json',
         'x-api-key': settings.apiKey ?? '',
@@ -153,6 +203,13 @@ When analyzing vulnerabilities, you SHOULD search for:
       },
       body: json.encode(body),
     ).timeout(timeout);
+
+    if (enableDebugLogging) {
+      print('DEBUG [Claude]: Response status: ${response.statusCode}');
+      if (response.statusCode != 200) {
+        print('DEBUG [Claude]: Response body: ${response.body}');
+      }
+    }
 
     if (response.statusCode == 200) {
       final content = json.decode(response.body)['content'] as List?;
@@ -188,14 +245,28 @@ When analyzing vulnerabilities, you SHOULD search for:
       body['response_format'] = {'type': 'json_object'};
     }
 
+    final url = 'https://api.openai.com/v1/chat/completions';
+    if (enableDebugLogging) {
+      print('DEBUG [ChatGPT]: POST $url');
+      print('DEBUG [ChatGPT]: Model: ${settings.modelName}');
+    }
+
     final response = await http.post(
-      Uri.parse('https://api.openai.com/v1/chat/completions'),
+      Uri.parse(url),
       headers: {
         'Content-Type': 'application/json',
         'Authorization': 'Bearer ${settings.apiKey ?? ''}'
       },
       body: json.encode(body),
     ).timeout(timeout);
+    
+    if (enableDebugLogging) {
+      print('DEBUG [ChatGPT]: Response status: ${response.statusCode}');
+      if (response.statusCode != 200) {
+        print('DEBUG [ChatGPT]: Response body: ${response.body}');
+      }
+    }
+    
     if (response.statusCode == 200) {
       final choices = json.decode(response.body)['choices'] as List?;
       return choices?[0]['message']['content'] as String? ?? 'No response';
@@ -241,11 +312,25 @@ When analyzing vulnerabilities, you SHOULD search for:
       }
     ];
 
+    final url = 'https://generativelanguage.googleapis.com/v1beta/models/${settings.modelName}:generateContent?key=${settings.apiKey}';
+    if (enableDebugLogging) {
+      print('DEBUG [Gemini]: POST $url');
+      print('DEBUG [Gemini]: Model: ${settings.modelName}');
+    }
+
     final response = await http.post(
-      Uri.parse('https://generativelanguage.googleapis.com/v1beta/models/${settings.modelName}:generateContent?key=${settings.apiKey}'),
+      Uri.parse(url),
       headers: {'Content-Type': 'application/json'},
       body: json.encode(body),
     ).timeout(timeout);
+    
+    if (enableDebugLogging) {
+      print('DEBUG [Gemini]: Response status: ${response.statusCode}');
+      if (response.statusCode != 200) {
+        print('DEBUG [Gemini]: Response body: ${response.body}');
+      }
+    }
+    
     if (response.statusCode == 200) {
       final responseBody = json.decode(response.body);
       final candidates = responseBody['candidates'] as List?;
@@ -268,22 +353,36 @@ When analyzing vulnerabilities, you SHOULD search for:
       'messages': messages,
       'temperature': settings.temperature,
       'max_tokens': settings.maxTokens,
-      'response_format': {'type': 'json_object'},
       'provider': {
         'data_collection': 'deny',
       },
     };
 
+    final baseUrl = settings.baseUrl?.isNotEmpty == true ? settings.baseUrl : 'https://openrouter.ai/api/v1';
+    final url = '$baseUrl/chat/completions';
+    final headers = {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ${settings.apiKey ?? ''}',
+      'HTTP-Referer': 'https://penexecute.app',
+      'X-Title': 'PenExecute Security Scanner',
+    };
+    
+    if (enableDebugLogging) {
+      print('DEBUG [OpenRouter]: POST $url');
+      print('DEBUG [OpenRouter]: Model: ${settings.modelName}');
+      print('DEBUG [OpenRouter]: Headers: ${headers.keys.join(", ")}');
+    }
+    
     final response = await http.post(
-      Uri.parse('${settings.baseUrl}/chat/completions'),
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ${settings.apiKey ?? ''}',
-        'HTTP-Referer': 'https://penexecute.app',
-        'X-Title': 'PenExecute Security Scanner',
-      },
+      Uri.parse(url),
+      headers: headers,
       body: json.encode(body),
     ).timeout(timeout);
+    
+    if (enableDebugLogging) {
+      print('DEBUG [OpenRouter]: Response status: ${response.statusCode}');
+      print('DEBUG [OpenRouter]: Response body: ${response.body}');
+    }    
     if (response.statusCode == 200) {
       final choices = json.decode(response.body)['choices'] as List?;
       final content = choices?[0]['message']['content'] as String? ?? '';
@@ -300,45 +399,113 @@ When analyzing vulnerabilities, you SHOULD search for:
       print('DEBUG: fetchAvailableModels called for ${settings.provider}');
       switch (settings.provider) {
         case LLMProvider.ollama:
-          final response = await http.get(Uri.parse('${settings.baseUrl}/api/tags'));
+          print('DEBUG: Fetching Ollama models from ${settings.baseUrl}');
+          final url = '${settings.baseUrl}/api/tags';
+          print('DEBUG [Ollama Models]: GET $url');
+          
+          final response = await http.get(Uri.parse(url));
+          print('DEBUG [Ollama Models]: Response status: ${response.statusCode}');
+          
           if (response.statusCode == 200) {
             final data = json.decode(response.body);
-            return (data['models'] as List?)?.map((m) => m['name'] as String).toList() ?? [];
+            final models = (data['models'] as List?)?.map((m) => m['name'] as String).toList() ?? [];
+            print('DEBUG: Ollama returned ${models.length} models');
+            return models;
           }
-          return ['llama2', 'mistral', 'codellama'];
+          
+          print('DEBUG: Ollama API failed');
+          return [];
         case LLMProvider.lmStudio:
-          final response = await http.get(Uri.parse('${settings.baseUrl}/models'));
+          print('DEBUG: Fetching LM Studio models from ${settings.baseUrl}');
+          final headers = <String, String>{};
+          if (settings.apiKey != null && settings.apiKey!.trim().isNotEmpty) {
+            headers['Authorization'] = 'Bearer ${settings.apiKey}';
+          }
+          final baseUrl = settings.baseUrl?.replaceAll(RegExp(r'/v1/?$'), '') ?? '';
+          final url = '$baseUrl/v1/models';
+          print('DEBUG [LM Studio Models]: GET $url');
+          
+          final response = await http.get(
+            Uri.parse(url),
+            headers: headers,
+          );
+          print('DEBUG [LM Studio Models]: Response status: ${response.statusCode}');
+          
           if (response.statusCode == 200) {
             final data = json.decode(response.body);
-            return (data['data'] as List?)?.map((m) => m['id'] as String).toList() ?? [];
+            final models = (data['data'] as List?)?.map((m) => m['id'] as String).toList() ?? [];
+            print('DEBUG: LM Studio returned ${models.length} models');
+            return models;
           }
+          
+          print('DEBUG: LM Studio API failed, returning empty list');
           return [];
         case LLMProvider.claude:
-          return [
-            'claude-opus-4-5-20251101',
-            'claude-sonnet-4-5-20250929',
-            'claude-haiku-4-5-20251001',
-            'claude-3-5-sonnet-20241022',
-            'claude-3-5-haiku-20241022',
-          ];
-        case LLMProvider.chatGPT:
+          print('DEBUG: Fetching Claude models with API key: ${settings.apiKey?.substring(0, 10)}...');
+          final url = 'https://api.anthropic.com/v1/models';
+          print('DEBUG [Claude Models]: GET $url');
+          
           final response = await http.get(
-            Uri.parse('https://api.openai.com/v1/models'),
-            headers: {'Authorization': 'Bearer ${settings.apiKey ?? ''}'},
+            Uri.parse(url),
+            headers: {
+              'x-api-key': settings.apiKey ?? '',
+              'anthropic-version': '2023-06-01',
+            },
           );
+          print('DEBUG [Claude Models]: Response status: ${response.statusCode}');
+          
           if (response.statusCode == 200) {
             final data = json.decode(response.body);
-            return (data['data'] as List?)?.map((m) => m['id'] as String).where((id) => id.startsWith('gpt')).toList() ?? [];
+            final models = (data['data'] as List?)?.map((m) => m['id'] as String).toList() ?? [];
+            print('DEBUG: Claude returned ${models.length} models');
+            return models;
           }
-          return ['gpt-4o', 'gpt-4-turbo', 'gpt-4', 'gpt-3.5-turbo'];
+          
+          print('DEBUG: Claude API failed');
+          return [];
+        case LLMProvider.chatGPT:
+          print('DEBUG: Fetching ChatGPT models with API key: ${settings.apiKey?.substring(0, 10)}...');
+          final url = 'https://api.openai.com/v1/models';
+          print('DEBUG [ChatGPT Models]: GET $url');
+          
+          final response = await http.get(
+            Uri.parse(url),
+            headers: {'Authorization': 'Bearer ${settings.apiKey ?? ''}'},
+          );
+          print('DEBUG [ChatGPT Models]: Response status: ${response.statusCode}');
+          
+          if (response.statusCode == 200) {
+            final data = json.decode(response.body);
+            final models = (data['data'] as List?)?.map((m) => m['id'] as String).where((id) => id.startsWith('gpt')).toList() ?? [];
+            print('DEBUG: ChatGPT returned ${models.length} models');
+            return models;
+          }
+          
+          print('DEBUG: ChatGPT API failed');
+          return [];
         case LLMProvider.gemini:
-          return [
-            'gemini-2.0-flash-exp',    // Latest with enhanced capabilities
-            'gemini-1.5-pro-latest',   // Best for complex analysis
-            'gemini-1.5-pro',
-            'gemini-1.5-flash-latest', // Fast with web search
-            'gemini-1.5-flash',
-          ];
+          print('DEBUG: Fetching Gemini models with API key: ${settings.apiKey?.substring(0, 10)}...');
+          final url = 'https://generativelanguage.googleapis.com/v1beta/models?key=${settings.apiKey}';
+          print('DEBUG [Gemini Models]: GET $url');
+          
+          final response = await http.get(Uri.parse(url));
+          print('DEBUG [Gemini Models]: Response status: ${response.statusCode}');
+          
+          if (response.statusCode == 200) {
+            final data = json.decode(response.body);
+            print('DEBUG [Gemini Models]: Response body: ${response.body.substring(0, response.body.length > 500 ? 500 : response.body.length)}...');
+            
+            final models = (data['models'] as List?)
+                ?.where((m) => (m['supportedGenerationMethods'] as List?)?.contains('generateContent') ?? false)
+                ?.map((m) => (m['name'] as String).replaceFirst('models/', ''))
+                ?.toList() ?? [];
+            
+            print('DEBUG: Gemini returned ${models.length} models');
+            return models;
+          }
+          
+          print('DEBUG: Gemini API failed');
+          return [];
         case LLMProvider.openRouter:
           print('DEBUG: Fetching OpenRouter models with API key: ${settings.apiKey?.substring(0, 10)}...');
           final response = await http.get(
@@ -352,14 +519,8 @@ When analyzing vulnerabilities, you SHOULD search for:
             print('DEBUG: OpenRouter returned ${models.length} models');
             return models;
           }
-          print('DEBUG: OpenRouter API failed, returning fallback models');
-          return [
-            'perplexity/llama-3.1-sonar-huge-128k-online',  // Best for web search
-            'perplexity/llama-3.1-sonar-large-128k-online', // Fast web search
-            'anthropic/claude-3.5-sonnet',
-            'openai/gpt-4o',
-            'google/gemini-pro-1.5-exp',
-          ];
+          print('DEBUG: OpenRouter API failed');
+          return [];
         default:
           return [];
       }
