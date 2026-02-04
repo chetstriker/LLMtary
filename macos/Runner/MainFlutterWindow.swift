@@ -11,5 +11,10 @@ class MainFlutterWindow: NSWindow {
     RegisterGeneratedPlugins(registry: flutterViewController)
 
     super.awakeFromNib()
+    
+    // Set minimum and default window size for macOS
+    self.setContentSize(NSSize(width: 1375, height: 700))
+    self.minSize = NSSize(width: 1375, height: 700)
+    self.center()
   }
 }

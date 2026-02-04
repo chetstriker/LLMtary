@@ -1012,11 +1012,14 @@ class _MainScreenState extends State<MainScreen> {
                     ? Center(
                         child: Text('No commands executed yet', style: TextStyle(color: Colors.white.withOpacity(0.3), fontSize: 12)),
                       )
-                    : ListView.builder(
-                        controller: _logScrollController,
-                        padding: const EdgeInsets.all(8),
-                        itemCount: state.commandLogs.length,
-                        itemBuilder: (context, i) {
+                    : SelectableRegion(
+                        focusNode: FocusNode(),
+                        selectionControls: materialTextSelectionControls,
+                        child: ListView.builder(
+                          controller: _logScrollController,
+                          padding: const EdgeInsets.all(8),
+                          itemCount: state.commandLogs.length,
+                          itemBuilder: (context, i) {
                           final log = state.commandLogs[i];
                           final vulnIdx = log.vulnerabilityIndex ?? -1;
                           final vuln = vulnIdx >= 0 && vulnIdx < state.vulnerabilities.length ? state.vulnerabilities[vulnIdx] : null;
@@ -1153,6 +1156,7 @@ class _MainScreenState extends State<MainScreen> {
                           );
                         },
                       ),
+                    ),
               ),
             ],
           ),
@@ -1218,8 +1222,21 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   Future<void> _executeSelected() async {
-    setState(() => _isExecuting = true);
     final appState = context.read<AppState>();
+    appState.addDebugLog('Execute Selected button clicked');
+    
+    final selected = appState.vulnerabilities.where((v) => v.selected).toList();
+    appState.addDebugLog('Found ${selected.length} selected vulnerabilities');
+    
+    if (selected.isEmpty) {
+      appState.addDebugLog('No vulnerabilities selected - aborting execution');
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please select at least one vulnerability to test')),
+      );
+      return;
+    }
+    
+    setState(() => _isExecuting = true);
     
     // Request admin password if not already set
     if (appState.adminPassword == null) {
@@ -1238,8 +1255,6 @@ class _MainScreenState extends State<MainScreen> {
       appState.setAdminPassword(password);
       appState.addDebugLog('Admin password set for session');
     }
-    
-    final selected = appState.vulnerabilities.where((v) => v.selected).toList();
     
     await DatabaseHelper.clearCommandLogs();
     await appState.loadCommandLogs();

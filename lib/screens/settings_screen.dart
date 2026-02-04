@@ -21,9 +21,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _modelController = TextEditingController();
   final _modelSearchController = TextEditingController();
   double _temperature = 0.22;
-  int _maxTokens = 32000;
+  int _maxTokens = 4096;
   int _maxIterations = 10;
-  int _timeoutSeconds = 180;
+  int _timeoutSeconds = 240;
   List<String> _availableModels = [];
   bool _isLoadingModels = false;
   final _llmService = LLMService();
@@ -189,8 +189,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           _apiKeyController.text = providerSettings['apiKey'] as String? ?? '';
                           _modelController.text = providerSettings['modelName'] as String? ?? '';
                           _temperature = (providerSettings['temperature'] as num?)?.toDouble() ?? 0.22;
-                          _maxTokens = providerSettings['maxTokens'] as int? ?? 32000;
-                          _timeoutSeconds = providerSettings['timeoutSeconds'] as int? ?? 180;
+                          _maxTokens = providerSettings['maxTokens'] as int? ?? 4096;
+                          _timeoutSeconds = providerSettings['timeoutSeconds'] as int? ?? 240;
                         } else {
                           _baseUrlController.text = v.requiresBaseUrl ? v.defaultBaseUrl : '';
                           _apiKeyController.text = '';
@@ -447,7 +447,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   filled: true,
                   fillColor: const Color(0xFF0A0E27),
                 ),
-                onChanged: (v) => _maxTokens = int.tryParse(v) ?? 32000,
+                onChanged: (v) => _maxTokens = int.tryParse(v) ?? 4096,
               ),
               const SizedBox(height: 24),
               Tooltip(

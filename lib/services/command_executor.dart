@@ -93,7 +93,7 @@ class CommandExecutor {
   };
 
   // Get the actual binary name for a tool
-  static String _getToolBinary(String tool) {
+  static String getToolBinary(String tool) {
     final normalized = tool.toLowerCase().trim();
     return _toolBinaryMap[normalized] ?? tool;
   }
@@ -105,7 +105,7 @@ class CommandExecutor {
       if (primaryTool.isEmpty) return null;
 
       // Get the actual binary name (e.g., "metasploit" -> "msfconsole")
-      final binaryName = _getToolBinary(primaryTool);
+      final binaryName = getToolBinary(primaryTool);
 
       // Common version flags to try
       final versionFlags = ['--version', '-version', '-v', '-V', 'version'];
@@ -552,7 +552,7 @@ Respond ONLY with valid JSON.''';
       if (primaryTool.isEmpty) return false;
 
       // Use known binary mapping (avoids LLM call for common tools)
-      final binaryName = _getToolBinary(primaryTool);
+      final binaryName = getToolBinary(primaryTool);
       print('${_timestamp()} DEBUG: Tool binary lookup: $primaryTool -> $binaryName');
 
       // Use simple 'which' check for single binary
@@ -653,7 +653,7 @@ Respond ONLY with valid JSON.''';
     return 'apt-get'; // Default fallback
   }
 
-  static Future<bool> installTool(String tool, LLMSettings settings, LLMService llmService) async {
+  static Future<bool> installTool(String tool, LLMSettings settings, LLMService llmService, {String? adminPassword}) async {
     try {
       // Handle comma-separated tool names - install the PRIMARY tool only
       final primaryTool = tool.split(',').first.trim().split(' ').first.trim();
@@ -811,7 +811,13 @@ Respond ONLY with valid JSON.''';
       Process process;
       if (isWsl) {
         print('${_timestamp()} DEBUG: Running install command in WSL');
-        process = await Process.start('wsl', ['bash', '-c', installCmd]);
+        // Use admin password if provided
+        if (adminPassword != null && adminPassword.isNotEmpty && installCmd.contains('sudo')) {
+          final sudoCmd = 'echo "$adminPassword" | sudo -S bash -c "${installCmd.replaceFirst('sudo', '')}"';
+          process = await Process.start('wsl', ['bash', '-c', sudoCmd]);
+        } else {
+          process = await Process.start('wsl', ['bash', '-c', installCmd]);
+        }
       } else if (isWindowsNative) {
         print('${_timestamp()} DEBUG: Running install command on Windows');
         // For Windows, use PowerShell with elevation if needed
@@ -825,7 +831,39 @@ Respond ONLY with valid JSON.''';
         }
       } else if (Platform.isLinux || Platform.isMacOS) {
         print('${_timestamp()} DEBUG: Running install command');
-        process = await Process.start('bash', ['-c', installCmd]);
+        // Never use sudo for brew on macOS
+        if (packageManager == 'brew') {
+          // For brew casks that need sudo, set SUDO_ASKPASS
+          if (adminPassword != null && adminPassword.isNotEmpty) {
+            // Create a temporary askpass script with restricted permissions
+            final tempDir = Directory.systemTemp;
+            final askpassScript = File('${tempDir.path}/.askpass_${DateTime.now().millisecondsSinceEpoch}.sh');
+            await askpassScript.writeAsString('#!/bin/bash\necho "$adminPassword"');
+            // Set permissions to 700 (owner read/write/execute only)
+            await Process.run('chmod', ['700', askpassScript.path]);
+            
+            final envVars = Map<String, String>.from(Platform.environment);
+            envVars['SUDO_ASKPASS'] = askpassScript.path;
+            
+            process = await Process.start('bash', ['-c', installCmd], environment: envVars);
+            
+            // Delete askpass script after installation completes (3 minutes timeout)
+            Future.delayed(Duration(minutes: 3), () async {
+              try {
+                if (await askpassScript.exists()) {
+                  await askpassScript.delete();
+                }
+              } catch (_) {}
+            });
+          } else {
+            process = await Process.start('bash', ['-c', installCmd]);
+          }
+        } else if (adminPassword != null && adminPassword.isNotEmpty && installCmd.contains('sudo')) {
+          final sudoCmd = 'echo "$adminPassword" | sudo -S bash -c "${installCmd.replaceFirst('sudo', '')}"';
+          process = await Process.start('bash', ['-c', sudoCmd]);
+        } else {
+          process = await Process.start('bash', ['-c', installCmd]);
+        }
       } else {
         return false;
       }
@@ -845,7 +883,84 @@ Respond ONLY with valid JSON.''';
 
       // Increased timeout to 3 minutes for package installation
       final exitCode = await process.exitCode.timeout(const Duration(minutes: 3));
+      final stdout = stdoutBuffer.toString();
+      final stderr = stderrBuffer.toString();
       print('${_timestamp()} DEBUG: Install exit code: $exitCode');
+
+      // Check for missing dependencies in output
+      if (exitCode != 0 || stdout.contains('requires') || stderr.contains('requires')) {
+        // Check for Rosetta 2 requirement on Apple Silicon
+        if ((stdout.contains('Rosetta 2') || stderr.contains('Rosetta 2')) && 
+            (stdout.contains('softwareupdate --install-rosetta') || stderr.contains('softwareupdate --install-rosetta'))) {
+          print('${_timestamp()} DEBUG: Rosetta 2 required, installing...');
+          
+          final rosettaCmd = 'softwareupdate --install-rosetta --agree-to-license';
+          final rosettaProcess = await Process.start('bash', ['-c', rosettaCmd]);
+          final rosettaStdout = StringBuffer();
+          final rosettaStderr = StringBuffer();
+          
+          rosettaProcess.stdout.transform(utf8.decoder).listen((data) {
+            print('${_timestamp()} [ROSETTA STDOUT] $data');
+            rosettaStdout.write(data);
+          });
+          rosettaProcess.stderr.transform(utf8.decoder).listen((data) {
+            print('${_timestamp()} [ROSETTA STDERR] $data');
+            rosettaStderr.write(data);
+          });
+          
+          final rosettaExit = await rosettaProcess.exitCode.timeout(const Duration(minutes: 5));
+          print('${_timestamp()} DEBUG: Rosetta 2 install exit code: $rosettaExit');
+          
+          if (rosettaExit == 0) {
+            print('${_timestamp()} DEBUG: Rosetta 2 installed, retrying tool installation...');
+            
+            // Recreate askpass script and environment for retry if needed
+            Map<String, String>? retryEnv;
+            File? retryAskpass;
+            
+            if (adminPassword != null && adminPassword.isNotEmpty && packageManager == 'brew') {
+              final tempDir = Directory.systemTemp;
+              retryAskpass = File('${tempDir.path}/.askpass_retry_${DateTime.now().millisecondsSinceEpoch}.sh');
+              await retryAskpass.writeAsString('#!/bin/bash\necho "$adminPassword"');
+              await Process.run('chmod', ['700', retryAskpass.path]);
+              
+              retryEnv = Map<String, String>.from(Platform.environment);
+              retryEnv['SUDO_ASKPASS'] = retryAskpass.path;
+            }
+            
+            // Retry the original installation
+            final retryProcess = retryEnv != null 
+                ? await Process.start('bash', ['-c', installCmd], environment: retryEnv)
+                : await Process.start('bash', ['-c', installCmd]);
+            final retryStdout = StringBuffer();
+            final retryStderr = StringBuffer();
+            
+            retryProcess.stdout.transform(utf8.decoder).listen((data) {
+              print('${_timestamp()} [RETRY STDOUT] $data');
+              retryStdout.write(data);
+            });
+            retryProcess.stderr.transform(utf8.decoder).listen((data) {
+              print('${_timestamp()} [RETRY STDERR] $data');
+              retryStderr.write(data);
+            });
+            
+            final retryExit = await retryProcess.exitCode.timeout(const Duration(minutes: 3));
+            
+            // Clean up retry askpass script
+            if (retryAskpass != null) {
+              try {
+                if (await retryAskpass.exists()) await retryAskpass.delete();
+              } catch (_) {}
+            }
+            
+            if (retryExit == 0) {
+              final verified = await checkToolExists(primaryTool, settings, llmService);
+              print('${_timestamp()} DEBUG: Post-retry verification: ${verified ? "SUCCESS" : "FAILED"}');
+              return verified;
+            }
+          }
+        }
+      }
 
       // Verify the tool was actually installed
       if (exitCode == 0) {
