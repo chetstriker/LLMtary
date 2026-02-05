@@ -71,7 +71,6 @@ class _MainScreenState extends State<MainScreen> {
   bool _isAnalyzing = false;
   bool _isExecuting = false;
   final _logScrollController = ScrollController();
-  final Map<int, GlobalKey> _proofKeys = {};
   bool _showLeftPanel = true;
   bool _showRightPanel = true;
   double _vulnTableHeight = 250;
@@ -101,36 +100,36 @@ class _MainScreenState extends State<MainScreen> {
     final appState = context.read<AppState>();
     appState.addDebugLog('Scroll to proof requested for vulnerability #${vulnIdx + 1}');
     
-    final key = _proofKeys[vulnIdx];
-    if (key == null) {
-      appState.addDebugLog('ERROR: No proof key found for vulnerability #${vulnIdx + 1}');
-      appState.addDebugLog('Available proof keys: ${_proofKeys.keys.map((k) => '#${k + 1}').join(', ')}');
+    // Find the first proof log for this vulnerability
+    final logIndex = appState.commandLogs.indexWhere((log) {
+      if (log.vulnerabilityIndex != vulnIdx) return false;
+      
+      final vuln = appState.vulnerabilities[vulnIdx];
+      return (vuln.proofCommand == log.command) || 
+             (log.command.contains('Initial Evidence Analysis')) || 
+             (log.command.contains('Analysis Conclusion'));
+    });
+    
+    if (logIndex == -1) {
+      appState.addDebugLog('ERROR: No proof log found for vulnerability #${vulnIdx + 1}');
       return;
     }
     
-    // Wait for widget to be rendered
-    await Future.delayed(const Duration(milliseconds: 100));
+    // Calculate approximate scroll position
+    final itemHeight = 150.0; // Approximate height per log item
+    final targetOffset = logIndex * itemHeight;
     
-    if (key.currentContext == null) {
-      appState.addDebugLog('WARNING: Proof key context not ready for vulnerability #${vulnIdx + 1}, retrying...');
-      await Future.delayed(const Duration(milliseconds: 200));
-    }
+    appState.addDebugLog('Scrolling to proof at index $logIndex for vulnerability #${vulnIdx + 1}');
     
-    if (key.currentContext == null) {
-      appState.addDebugLog('ERROR: Proof key context still null for vulnerability #${vulnIdx + 1}');
-      return;
-    }
-    
-    try {
-      appState.addDebugLog('Scrolling to proof for vulnerability #${vulnIdx + 1}');
-      Scrollable.ensureVisible(
-        key.currentContext!,
+    if (_logScrollController.hasClients) {
+      await _logScrollController.animateTo(
+        targetOffset.clamp(0.0, _logScrollController.position.maxScrollExtent),
         duration: const Duration(milliseconds: 300),
         curve: Curves.easeInOut,
       );
       appState.addDebugLog('Successfully scrolled to proof for vulnerability #${vulnIdx + 1}');
-    } catch (e) {
-      appState.addDebugLog('ERROR: Failed to scroll to proof for vulnerability #${vulnIdx + 1}: $e');
+    } else {
+      appState.addDebugLog('ERROR: Scroll controller not attached');
     }
   }
 
@@ -1029,14 +1028,9 @@ class _MainScreenState extends State<MainScreen> {
                                (log.command.contains('Analysis Conclusion'))) && 
                               (vuln.status == VulnerabilityStatus.confirmed || vuln.status == VulnerabilityStatus.notVulnerable);
                           
-                          if (isProof) {
-                            _proofKeys[vulnIdx] = GlobalKey();
-                          }
-                          
                           final vulnColor = vulnIdx >= 0 ? _getVulnColor(vulnIdx) : const Color(0xFF00F5FF);
                           
                           return Container(
-                            key: isProof ? _proofKeys[vulnIdx] : null,
                             margin: const EdgeInsets.only(bottom: 12),
                             decoration: BoxDecoration(
                               color: isProof ? vulnColor.withOpacity(0.15) : const Color(0xFF1A1F3A).withOpacity(0.5),
