@@ -6,11 +6,13 @@
 .DS_Store
 .atom/
 .build/
+.claude/
 .buildlog/
 .history
 .svn/
 .swiftpm/
 migrate_working_dir/
+NUL
 
 # IntelliJ related
 *.iml
