@@ -6,6 +6,7 @@ import '../models/llm_settings.dart';
 import '../services/llm_service.dart';
 import '../widgets/app_state.dart';
 import '../database/database_helper.dart';
+import '../constants/app_constants.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -20,10 +21,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _apiKeyController = TextEditingController();
   final _modelController = TextEditingController();
   final _modelSearchController = TextEditingController();
-  double _temperature = 0.22;
-  int _maxTokens = 4096;
-  int _maxIterations = 10;
-  int _timeoutSeconds = 240;
+  double _temperature = ConfigDefaults.temperature;
+  int _maxTokens = ConfigDefaults.maxTokens;
+  int _maxIterations = ConfigDefaults.maxIterations;
+  int _timeoutSeconds = ConfigDefaults.timeoutSeconds;
   List<String> _availableModels = [];
   bool _isLoadingModels = false;
   final _llmService = LLMService();
@@ -53,8 +54,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _loadMaxIterations() async {
-    final value = await DatabaseHelper.getSetting('max_iterations');
-    setState(() => _maxIterations = int.tryParse(value ?? '10') ?? 10);
+    final value = await DatabaseHelper.getSetting(SettingsKeys.maxIterations);
+    setState(() => _maxIterations = int.tryParse(value ?? '${ConfigDefaults.maxIterations}') ?? ConfigDefaults.maxIterations);
   }
 
   @override
@@ -739,7 +740,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
     
     context.read<AppState>().updateLLMSettings(settings);
-    DatabaseHelper.saveSetting('max_iterations', _maxIterations.toString());
+    DatabaseHelper.saveSetting(SettingsKeys.maxIterations, _maxIterations.toString());
     Navigator.pop(context);
   }
 }

@@ -3,7 +3,11 @@
     "allow": [
       "Bash(flutter analyze:*)",
       "Bash(flutter pub get:*)",
-      "Bash(dart analyze:*)"
+      "Bash(dart analyze:*)",
+      "Bash(dart fix:*)",
+      "Bash(findstr:*)",
+      "Bash(wc:*)",
+      "mcp__plugin_claude-mem_mcp-search__save_memory"
     ]
   }
 }

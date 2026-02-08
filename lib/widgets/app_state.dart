@@ -1,10 +1,10 @@
-import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import '../models/vulnerability.dart';
 import '../models/command_log.dart';
 import '../models/llm_settings.dart';
 import '../models/llm_provider.dart';
 import '../database/database_helper.dart';
+import '../constants/app_constants.dart';
 
 class PromptLog {
   final String prompt;
@@ -49,7 +49,7 @@ class AppState extends ChangeNotifier {
 
   void setRequireApproval(bool value) {
     _requireApproval = value;
-    DatabaseHelper.saveSetting('require_approval', value.toString());
+    DatabaseHelper.saveSetting(SettingsKeys.requireApproval, value.toString());
     notifyListeners();
   }
 
@@ -60,7 +60,7 @@ class AppState extends ChangeNotifier {
     await loadVulnerabilities();
     await loadCommandLogs();
     
-    final approvalSetting = await DatabaseHelper.getSetting('require_approval');
+    final approvalSetting = await DatabaseHelper.getSetting(SettingsKeys.requireApproval);
     _requireApproval = approvalSetting == null ? true : approvalSetting == 'true';
     notifyListeners();
   }

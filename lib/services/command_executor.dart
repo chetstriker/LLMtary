@@ -3,7 +3,13 @@ import 'dart:async';
 import 'dart:convert';
 import '../models/llm_settings.dart';
 import '../database/database_helper.dart';
+import '../utils/json_parser.dart';
+import '../utils/output_sanitizer.dart';
 import 'llm_service.dart';
+import 'tool_manager.dart';
+
+// Re-export tool_manager types so existing callers don't need to change imports
+export 'tool_manager.dart' show ToolUsageInfo, ToolOption, ToolExample;
 
 class CommandResult {
   final int exitCode;
@@ -228,20 +234,8 @@ Respond ONLY with valid JSON.''';
 
   static ToolUsageInfo _parseToolUsageResponse(String response, String tool, String? version) {
     try {
-      String cleaned = response.trim();
-      if (cleaned.startsWith('```')) {
-        cleaned = cleaned.replaceAll(RegExp(r'^```json\s*'), '');
-        cleaned = cleaned.replaceAll(RegExp(r'^```\s*'), '');
-        cleaned = cleaned.replaceAll(RegExp(r'```\s*$'), '');
-      }
-
-      final jsonStart = cleaned.indexOf('{');
-      final jsonEnd = cleaned.lastIndexOf('}');
-      if (jsonStart != -1 && jsonEnd != -1 && jsonEnd > jsonStart) {
-        cleaned = cleaned.substring(jsonStart, jsonEnd + 1);
-      }
-
-      final data = json.decode(cleaned);
+      final data = JsonParser.tryParseJson(response);
+      if (data == null) throw FormatException('No valid JSON in response');
 
       return ToolUsageInfo(
         tool: data['tool'] ?? tool,
@@ -430,7 +424,7 @@ Respond with JSON:
 {
   "needs_setup": true/false,
   "reason": "explanation of what needs to be done",
-  "check_command": "command to verify if setup is needed (e.g., 'msfconsole -q -x \"db_status; exit\"' for metasploit)",
+  "check_command": "command to verify if setup is needed (e.g., 'msfconsole -q -x "db_status; exit"' for metasploit)",
   "setup_command": "command to run if setup is needed (e.g., 'msfdb init' for metasploit)"
 }
 
@@ -505,17 +499,7 @@ Respond ONLY with valid JSON.''';
   }
 
   static Map<String, dynamic> _parseJson(String response) {
-    try {
-      String cleaned = response.trim();
-      if (cleaned.startsWith('```')) {
-        cleaned = cleaned.replaceAll(RegExp(r'^```json\s*'), '');
-        cleaned = cleaned.replaceAll(RegExp(r'^```\s*'), '');
-        cleaned = cleaned.replaceAll(RegExp(r'```\s*$'), '');
-      }
-      return json.decode(cleaned);
-    } catch (e) {
-      return {};
-    }
+    return JsonParser.tryParseJson(response) ?? {};
   }
 
   static Future<bool> isWslAvailable() async {
@@ -1091,13 +1075,13 @@ Respond ONLY with valid JSON.''';
       final decoder = Utf8Decoder(allowMalformed: true);
 
       process.stdout.transform(decoder).listen((data) {
-        final sanitized = _sanitizeOutput(data);
+        final sanitized = OutputSanitizer.sanitize(data);
         print('[STDOUT] $sanitized');
         stdoutBuffer.write(sanitized);
       });
 
       process.stderr.transform(decoder).listen((data) {
-        final sanitized = _sanitizeOutput(data);
+        final sanitized = OutputSanitizer.sanitize(data);
         print('[STDERR] $sanitized');
         stderrBuffer.write(sanitized);
       });
@@ -1124,13 +1108,13 @@ Respond ONLY with valid JSON.''';
       final decoder = Utf8Decoder(allowMalformed: true);
 
       process.stdout.transform(decoder).listen((data) {
-        final sanitized = _sanitizeOutput(data);
+        final sanitized = OutputSanitizer.sanitize(data);
         print('[STDOUT] $sanitized');
         stdoutBuffer.write(sanitized);
       });
 
       process.stderr.transform(decoder).listen((data) {
-        final sanitized = _sanitizeOutput(data);
+        final sanitized = OutputSanitizer.sanitize(data);
         print('[STDERR] $sanitized');
         stderrBuffer.write(sanitized);
       });
@@ -1144,27 +1128,7 @@ Respond ONLY with valid JSON.''';
     }
   }
 
-  // Sanitize output to remove/replace non-printable and problematic characters
-  static String _sanitizeOutput(String input) {
-    // Remove control characters except newline, carriage return, and tab
-    // Replace non-ASCII printable characters with ?
-    final buffer = StringBuffer();
-    for (int i = 0; i < input.length; i++) {
-      final code = input.codeUnitAt(i);
-      if (code == 0x0A || code == 0x0D || code == 0x09) {
-        // Keep newline, carriage return, tab
-        buffer.writeCharCode(code);
-      } else if (code >= 0x20 && code <= 0x7E) {
-        // Keep printable ASCII
-        buffer.writeCharCode(code);
-      } else if (code > 0x7E) {
-        // Replace non-ASCII with ?
-        buffer.write('?');
-      }
-      // Skip other control characters (0x00-0x1F except tab/newline/cr)
-    }
-    return buffer.toString();
-  }
+  // Output sanitization moved to OutputSanitizer class
 
   static Future<CommandResult> _executeInShell(String command) async {
     try {
@@ -1177,13 +1141,13 @@ Respond ONLY with valid JSON.''';
       final decoder = Utf8Decoder(allowMalformed: true);
 
       process.stdout.transform(decoder).listen((data) {
-        final sanitized = _sanitizeOutput(data);
+        final sanitized = OutputSanitizer.sanitize(data);
         print('[STDOUT] $sanitized');
         stdoutBuffer.write(sanitized);
       });
 
       process.stderr.transform(decoder).listen((data) {
-        final sanitized = _sanitizeOutput(data);
+        final sanitized = OutputSanitizer.sanitize(data);
         print('[STDERR] $sanitized');
         stderrBuffer.write(sanitized);
       });
@@ -1212,52 +1176,5 @@ Respond ONLY with valid JSON.''';
   }
 }
 
-// Data classes for tool usage information
-class ToolUsageInfo {
-  final String tool;
-  final String? version;
-  final String description;
-  final String basicSyntax;
-  final List<ToolOption> commonOptions;
-  final List<ToolExample> exampleCommands;
-  final List<String> requirements;
-  final List<String> gotchas;
-  final List<String> relatedTools;
-
-  ToolUsageInfo({
-    required this.tool,
-    this.version,
-    required this.description,
-    required this.basicSyntax,
-    required this.commonOptions,
-    required this.exampleCommands,
-    required this.requirements,
-    required this.gotchas,
-    required this.relatedTools,
-  });
-
-  @override
-  String toString() => 'ToolUsageInfo($tool v$version)';
-}
-
-class ToolOption {
-  final String option;
-  final String description;
-  final String example;
-
-  ToolOption({
-    required this.option,
-    required this.description,
-    this.example = '',
-  });
-}
-
-class ToolExample {
-  final String purpose;
-  final String command;
-
-  ToolExample({
-    required this.purpose,
-    required this.command,
-  });
-}
+// Data classes ToolUsageInfo, ToolOption, ToolExample moved to tool_manager.dart
+// and re-exported via this file's export statement.
