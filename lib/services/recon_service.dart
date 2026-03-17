@@ -135,7 +135,7 @@ class ReconService {
     final scope = DeviceUtils.classifyTarget(address);
     final maxIter = scope == TargetScope.external ? _maxIterationsExternal : _maxIterations;
     final outputDir = await StorageService.getTargetPath(projectName, address);
-    final outDir = env.outputPath(outputDir);
+    final outDir = StorageService.toShellPath(env.outputPath(outputDir));
     onProgress?.call('[$address] Target classified as ${scope.name.toUpperCase()}');
 
     final findings = <String, dynamic>{
@@ -377,9 +377,18 @@ Every command must be read-only and purely informational.
 ## ATTACKER SYSTEM:
 - OS: ${env.osInfo}
 - Execution environment: ${env.label}
-- Output directory: $outDir
+- Output directory: $outDir (ALL files MUST be saved here — use full absolute path)
 
 ${env.shellRules}
+
+## FILE OUTPUT RULES (CRITICAL):
+- ALL tool output files MUST use the full absolute path: $outDir
+- NEVER use relative paths like temp/, ./temp/, or just a filename
+- Examples:
+  * gobuster -o output.txt → gobuster ... -o "$outDir/output.txt"
+  * curl -o file.txt URL → curl -o "$outDir/file.txt" URL
+  * wget URL → wget -P "$outDir" URL
+  * command > file.txt → command > "$outDir/file.txt"
 
 ## WHAT YOU HAVE FOUND SO FAR:
 ${json.encode(findings)}

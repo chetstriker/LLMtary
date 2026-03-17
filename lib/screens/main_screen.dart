@@ -24,6 +24,7 @@ import '../widgets/vulnerability_table.dart';
 import '../widgets/results_modal.dart';
 import '../constants/app_constants.dart';
 import '../utils/app_exceptions.dart';
+import '../services/storage_service.dart';
 
 class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
@@ -436,6 +437,8 @@ class _MainScreenState extends State<MainScreen> {
         appState.addDebugLog('Found ${vulns.length} vulnerabilities for ${target.address}');
         for (final v in vulns) {
           v.targetAddress = target.address;
+          v.targetId = target.id;
+          v.projectId = appState.currentProject?.id;
           await DatabaseHelper.insertVulnerability(v);
           appState.addDebugLog('Added: ${v.problem}');
         }
@@ -528,9 +531,18 @@ class _MainScreenState extends State<MainScreen> {
           ? await File(selectedTarget.jsonFilePath).readAsString()
           : '{}';
 
+      final targetForVuln = appState.targets.firstWhere(
+        (t) => t.address == vuln.targetAddress,
+        orElse: () => appState.selectedTarget ?? appState.targets.first,
+      );
+      final vulnOutputDir = StorageService.toShellPath(
+        await StorageService.getTargetPath(
+          appState.currentProjectName, targetForVuln.address));
+
       final executor = ExploitExecutor(
         deviceData: deviceJson,
         vulnerabilityIndex: vulnIdx,
+        outputDir: vulnOutputDir,
         onProgress: (msg) => appState.addDebugLog(msg),
         onCommandExecuted: (cmd, output, idx) async {
           appState.addDebugLog('Command executed: $cmd');
@@ -651,7 +663,7 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   Future<void> _exportLogs() async {
-    final logs = await DatabaseHelper.getCommandLogs();
+    final logs = context.read<AppState>().commandLogs;
     if (logs.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('No command logs to export')),

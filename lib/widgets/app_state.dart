@@ -96,8 +96,8 @@ class AppState extends ChangeNotifier {
     _analysisComplete = project.analysisComplete || _targets.any((t) => t.analysisComplete);
     _hasResults = project.hasResults;
 
-    _vulnerabilities = await DatabaseHelper.getVulnerabilities();
-    _commandLogs = await DatabaseHelper.getCommandLogs();
+    _vulnerabilities = await DatabaseHelper.getVulnerabilities(project.id!);
+    _commandLogs = await DatabaseHelper.getCommandLogs(project.id!);
 
     final promptMaps = await DatabaseHelper.getPromptLogs(project.id!);
     _promptLogs.clear();
@@ -252,12 +252,14 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> loadVulnerabilities() async {
-    _vulnerabilities = await DatabaseHelper.getVulnerabilities();
+    if (_currentProject?.id == null) return;
+    _vulnerabilities = await DatabaseHelper.getVulnerabilities(_currentProject!.id!);
     notifyListeners();
   }
 
   Future<void> loadCommandLogs() async {
-    _commandLogs = await DatabaseHelper.getCommandLogs();
+    if (_currentProject?.id == null) return;
+    _commandLogs = await DatabaseHelper.getCommandLogs(_currentProject!.id!);
     notifyListeners();
   }
 

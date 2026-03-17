@@ -48,3 +48,8 @@ app.*.map.json
 
 # PenExecute temp files
 temp/
+
+# Misplaced output directories (should never be committed)
+C/
+C Users*/
+CUsers*/

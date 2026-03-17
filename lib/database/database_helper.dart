@@ -277,9 +277,9 @@ class DatabaseHelper {
     return await db.insert('vulnerabilities', vuln.toMap());
   }
 
-  static Future<List<Vulnerability>> getVulnerabilities() async {
+  static Future<List<Vulnerability>> getVulnerabilities(int projectId) async {
     final db = await database;
-    final maps = await db.query('vulnerabilities');
+    final maps = await db.query('vulnerabilities', where: 'projectId = ?', whereArgs: [projectId]);
     return maps.map((map) => Vulnerability.fromMap(map)).toList();
   }
 
@@ -303,9 +303,9 @@ class DatabaseHelper {
     return await db.insert('command_logs', log.toMap());
   }
 
-  static Future<List<CommandLog>> getCommandLogs() async {
+  static Future<List<CommandLog>> getCommandLogs(int projectId) async {
     final db = await database;
-    final maps = await db.query('command_logs', orderBy: 'timestamp DESC');
+    final maps = await db.query('command_logs', where: 'projectId = ?', whereArgs: [projectId], orderBy: 'timestamp DESC');
     return maps.map((map) => CommandLog.fromMap(map)).toList();
   }
 

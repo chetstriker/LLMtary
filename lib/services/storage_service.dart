@@ -32,6 +32,20 @@ class StorageService {
     return path;
   }
 
+  /// Converts a native path to the form usable inside the shell that will
+  /// actually execute commands (WSL bash on Windows, native path elsewhere).
+  static String toShellPath(String nativePath) {
+    if (!Platform.isWindows) return nativePath;
+    // Convert Windows path to WSL mount path:
+    // C:\Users\foo\bar  ->  /mnt/c/Users/foo/bar
+    final normalized = nativePath.replaceAll('\\', '/');
+    final match = RegExp(r'^([A-Za-z]):(.*)').firstMatch(normalized);
+    if (match == null) return normalized;
+    final drive = match.group(1)!.toLowerCase();
+    final rest = match.group(2)!;
+    return '/mnt/$drive$rest';
+  }
+
   static Future<List<String>> listProjects() async {
     final base = await getBasePath();
     final dir = Directory(base);

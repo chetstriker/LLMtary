@@ -93,8 +93,8 @@ class ProjectPorter {
   static Future<Uint8List> _buildZip(Project project) async {
     final projectId = project.id!;
     final targets = await DatabaseHelper.getTargets(projectId);
-    final vulns = await DatabaseHelper.getVulnerabilities();
-    final cmdLogs = await DatabaseHelper.getCommandLogs();
+    final vulns = await DatabaseHelper.getVulnerabilities(projectId);
+    final cmdLogs = await DatabaseHelper.getCommandLogs(projectId);
     final promptMaps = await DatabaseHelper.getPromptLogs(projectId);
     final debugMaps = await DatabaseHelper.getDebugLogs(projectId);
 
@@ -120,7 +120,6 @@ class ProjectPorter {
     final addressById = {for (final t in targets) t.id: t.address};
 
     final vulnEntries = vulns
-        .where((v) => v.projectId == projectId)
         .map((v) => {
               'targetAddress': v.targetAddress,
               'problem': v.problem,
@@ -146,7 +145,6 @@ class ProjectPorter {
         .toList();
 
     final cmdEntries = cmdLogs
-        .where((c) => c.projectId == projectId)
         .map((c) => {
               'targetAddress': addressById[c.targetId] ?? '',
               'timestamp': c.timestamp.toIso8601String(),
