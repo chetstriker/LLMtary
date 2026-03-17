@@ -13,11 +13,13 @@ class DebugLogPanel extends StatefulWidget {
 
 class _DebugLogPanelState extends State<DebugLogPanel> {
   final _scrollController = ScrollController();
+  final _focusNode = FocusNode();
   bool _autoScroll = true;
 
   @override
   void dispose() {
     _scrollController.dispose();
+    _focusNode.dispose();
     super.dispose();
   }
 
@@ -73,7 +75,7 @@ class _DebugLogPanelState extends State<DebugLogPanel> {
                 child: state.debugLogs.isEmpty
                     ? Center(child: Text('No debug logs yet', style: TextStyle(color: Colors.white.withOpacity(0.3), fontSize: 12)))
                     : SelectableRegion(
-                        focusNode: FocusNode(),
+                        focusNode: _focusNode,
                         selectionControls: materialTextSelectionControls,
                         child: ListView.builder(
                           controller: _scrollController,

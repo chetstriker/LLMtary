@@ -3,6 +3,8 @@ import 'package:path/path.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import '../models/vulnerability.dart';
 import '../models/command_log.dart';
+import '../models/target.dart';
+import '../models/project.dart';
 
 class DatabaseHelper {
   static Database? _database;
@@ -27,7 +29,7 @@ class DatabaseHelper {
     
     return await openDatabase(
       path,
-      version: 6,
+      version: 9,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE vulnerabilities (
@@ -50,6 +52,9 @@ class DatabaseHelper {
             vulnerabilityType TEXT,
             statusReason TEXT,
             proofCommand TEXT,
+            targetAddress TEXT DEFAULT '',
+            targetId INTEGER DEFAULT 0,
+            projectId INTEGER DEFAULT 0,
             status TEXT NOT NULL
           )
         ''');
@@ -61,7 +66,56 @@ class DatabaseHelper {
             command TEXT NOT NULL,
             output TEXT NOT NULL,
             exitCode INTEGER NOT NULL,
-            vulnerabilityIndex INTEGER
+            vulnerabilityIndex INTEGER,
+            projectId INTEGER DEFAULT 0,
+            targetId INTEGER DEFAULT 0
+          )
+        ''');
+
+        await db.execute('''
+          CREATE TABLE projects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            folderPath TEXT NOT NULL,
+            createdAt TEXT NOT NULL,
+            lastOpenedAt TEXT NOT NULL,
+            scanComplete INTEGER NOT NULL DEFAULT 0,
+            analysisComplete INTEGER NOT NULL DEFAULT 0,
+            hasResults INTEGER NOT NULL DEFAULT 0
+          )
+        ''');
+
+        await db.execute('''
+          CREATE TABLE targets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            projectId INTEGER NOT NULL,
+            address TEXT NOT NULL,
+            jsonFilePath TEXT NOT NULL,
+            summary TEXT,
+            status TEXT NOT NULL,
+            analysisComplete INTEGER NOT NULL DEFAULT 0,
+            executionComplete INTEGER NOT NULL DEFAULT 0
+          )
+        ''');
+
+        await db.execute('''
+          CREATE TABLE prompt_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            projectId INTEGER NOT NULL,
+            targetId INTEGER NOT NULL,
+            prompt TEXT NOT NULL,
+            response TEXT NOT NULL,
+            timestamp TEXT NOT NULL
+          )
+        ''');
+
+        await db.execute('''
+          CREATE TABLE debug_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            projectId INTEGER NOT NULL,
+            targetId INTEGER NOT NULL,
+            message TEXT NOT NULL,
+            timestamp TEXT NOT NULL
           )
         ''');
 
@@ -124,6 +178,58 @@ class DatabaseHelper {
               timeoutSeconds INTEGER
             )
           ''');
+        }
+        if (oldVersion < 8) {
+          await db.execute('ALTER TABLE vulnerabilities ADD COLUMN targetAddress TEXT DEFAULT \'\'');
+          await db.execute('ALTER TABLE vulnerabilities ADD COLUMN targetId INTEGER DEFAULT 0');
+          await db.execute('ALTER TABLE vulnerabilities ADD COLUMN projectId INTEGER DEFAULT 0');
+          await db.execute('ALTER TABLE command_logs ADD COLUMN projectId INTEGER DEFAULT 0');
+          await db.execute('ALTER TABLE command_logs ADD COLUMN targetId INTEGER DEFAULT 0');
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS projects (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              name TEXT NOT NULL UNIQUE,
+              folderPath TEXT NOT NULL,
+              createdAt TEXT NOT NULL,
+              lastOpenedAt TEXT NOT NULL,
+              scanComplete INTEGER NOT NULL DEFAULT 0,
+              analysisComplete INTEGER NOT NULL DEFAULT 0,
+              hasResults INTEGER NOT NULL DEFAULT 0
+            )
+          ''');
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS targets (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              projectId INTEGER NOT NULL,
+              address TEXT NOT NULL,
+              jsonFilePath TEXT NOT NULL,
+              summary TEXT,
+              status TEXT NOT NULL
+            )
+          ''');
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS prompt_logs (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              projectId INTEGER NOT NULL,
+              targetId INTEGER NOT NULL,
+              prompt TEXT NOT NULL,
+              response TEXT NOT NULL,
+              timestamp TEXT NOT NULL
+            )
+          ''');
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS debug_logs (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              projectId INTEGER NOT NULL,
+              targetId INTEGER NOT NULL,
+              message TEXT NOT NULL,
+              timestamp TEXT NOT NULL
+            )
+          ''');
+        }
+        if (oldVersion < 9) {
+          await db.execute('ALTER TABLE targets ADD COLUMN analysisComplete INTEGER NOT NULL DEFAULT 0');
+          await db.execute('ALTER TABLE targets ADD COLUMN executionComplete INTEGER NOT NULL DEFAULT 0');
         }
       },
     );
@@ -232,5 +338,128 @@ class DatabaseHelper {
     final db = await database;
     final maps = await db.query('provider_settings', where: 'provider = ?', whereArgs: [provider]);
     return maps.isNotEmpty ? maps.first : null;
+  }
+
+  // --- Projects ---
+
+  static Future<int> insertProject(Project p) async {
+    final db = await database;
+    final map = Map<String, dynamic>.from(p.toMap())..remove('id');
+    return await db.insert('projects', map);
+  }
+
+  static Future<List<Project>> getProjects() async {
+    final db = await database;
+    final maps = await db.query('projects', orderBy: 'lastOpenedAt DESC');
+    return maps.map((m) => Project.fromMap(m)).toList();
+  }
+
+  static Future<void> updateProjectLastOpened(int id) async {
+    final db = await database;
+    await db.update('projects', {'lastOpenedAt': DateTime.now().toIso8601String()}, where: 'id = ?', whereArgs: [id]);
+  }
+
+  static Future<void> updateProjectFlags(int id, {bool? scanComplete, bool? analysisComplete, bool? hasResults}) async {
+    final db = await database;
+    final updates = <String, dynamic>{};
+    if (scanComplete != null) updates['scanComplete'] = scanComplete ? 1 : 0;
+    if (analysisComplete != null) updates['analysisComplete'] = analysisComplete ? 1 : 0;
+    if (hasResults != null) updates['hasResults'] = hasResults ? 1 : 0;
+    if (updates.isNotEmpty) await db.update('projects', updates, where: 'id = ?', whereArgs: [id]);
+  }
+
+  static Future<void> deleteProject(int id) async {
+    final db = await database;
+    await db.delete('vulnerabilities', where: 'projectId = ?', whereArgs: [id]);
+    await db.delete('command_logs', where: 'projectId = ?', whereArgs: [id]);
+    await db.delete('prompt_logs', where: 'projectId = ?', whereArgs: [id]);
+    await db.delete('debug_logs', where: 'projectId = ?', whereArgs: [id]);
+    await db.delete('targets', where: 'projectId = ?', whereArgs: [id]);
+    await db.delete('projects', where: 'id = ?', whereArgs: [id]);
+  }
+
+  // --- Targets ---
+
+  static Future<int> insertTarget(int projectId, Target t) async {
+    final db = await database;
+    return await db.insert('targets', {
+      'projectId': projectId,
+      'address': t.address,
+      'jsonFilePath': t.jsonFilePath,
+      'summary': t.summary,
+      'status': t.status.name,
+      'analysisComplete': t.analysisComplete ? 1 : 0,
+      'executionComplete': t.executionComplete ? 1 : 0,
+    });
+  }
+
+  static Future<List<Target>> getTargets(int projectId) async {
+    final db = await database;
+    final maps = await db.query('targets', where: 'projectId = ?', whereArgs: [projectId]);
+    return maps.map((m) => Target.fromMap(m)).toList();
+  }
+
+  static Future<void> updateTarget(Target t) async {
+    final db = await database;
+    await db.update('targets', t.toMap(), where: 'id = ?', whereArgs: [t.id]);
+  }
+
+  // --- Prompt logs ---
+
+  static Future<int> insertPromptLog(int projectId, int targetId, String prompt, String response) async {
+    final db = await database;
+    return await db.insert('prompt_logs', {
+      'projectId': projectId,
+      'targetId': targetId,
+      'prompt': prompt,
+      'response': response,
+      'timestamp': DateTime.now().toIso8601String(),
+    });
+  }
+
+  static Future<List<Map<String, dynamic>>> getPromptLogs(int projectId, {int? targetId}) async {
+    final db = await database;
+    if (targetId != null) {
+      return await db.query('prompt_logs', where: 'projectId = ? AND targetId = ?', whereArgs: [projectId, targetId], orderBy: 'timestamp ASC');
+    }
+    return await db.query('prompt_logs', where: 'projectId = ?', whereArgs: [projectId], orderBy: 'timestamp ASC');
+  }
+
+  static Future<void> clearPromptLogs(int projectId, {int? targetId}) async {
+    final db = await database;
+    if (targetId != null) {
+      await db.delete('prompt_logs', where: 'projectId = ? AND targetId = ?', whereArgs: [projectId, targetId]);
+    } else {
+      await db.delete('prompt_logs', where: 'projectId = ?', whereArgs: [projectId]);
+    }
+  }
+
+  // --- Debug logs ---
+
+  static Future<int> insertDebugLog(int projectId, int targetId, String message) async {
+    final db = await database;
+    return await db.insert('debug_logs', {
+      'projectId': projectId,
+      'targetId': targetId,
+      'message': message,
+      'timestamp': DateTime.now().toIso8601String(),
+    });
+  }
+
+  static Future<List<Map<String, dynamic>>> getDebugLogs(int projectId, {int? targetId}) async {
+    final db = await database;
+    if (targetId != null) {
+      return await db.query('debug_logs', where: 'projectId = ? AND targetId = ?', whereArgs: [projectId, targetId], orderBy: 'timestamp ASC');
+    }
+    return await db.query('debug_logs', where: 'projectId = ?', whereArgs: [projectId], orderBy: 'timestamp ASC');
+  }
+
+  static Future<void> clearDebugLogs(int projectId, {int? targetId}) async {
+    final db = await database;
+    if (targetId != null) {
+      await db.delete('debug_logs', where: 'projectId = ? AND targetId = ?', whereArgs: [projectId, targetId]);
+    } else {
+      await db.delete('debug_logs', where: 'projectId = ?', whereArgs: [projectId]);
+    }
   }
 }

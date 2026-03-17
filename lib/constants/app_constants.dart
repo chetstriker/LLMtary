@@ -24,6 +24,7 @@ class SettingsKeys {
   static const provider = 'provider';
   static const baseUrl = 'baseUrl';
   static const apiKey = 'apiKey';
+  static const storageBasePath = 'storage_base_path';
 }
 
 /// Default configuration values.

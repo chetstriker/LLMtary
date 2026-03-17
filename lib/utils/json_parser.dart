@@ -36,6 +36,7 @@ class JsonParser {
       // Find JSON object by bracket matching
       final extracted = _extractBalancedJson(cleaned, '{', '}');
       if (extracted != null) {
+        if (extracted.length > 50000) return null; // Degenerate response — skip parse
         final fixed = _fixJsonString(extracted);
         return json.decode(fixed) as Map<String, dynamic>;
       }
@@ -61,6 +62,7 @@ class JsonParser {
       // Find JSON array by bracket matching
       final extracted = _extractBalancedJson(cleaned, '[', ']');
       if (extracted != null) {
+        if (extracted.length > 50000) return null; // Degenerate response — skip parse
         final fixed = _fixJsonString(extracted);
         return json.decode(fixed) as List<dynamic>;
       }

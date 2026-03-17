@@ -3,7 +3,9 @@ class CommandLog {
   final String command;
   final String output;
   final int exitCode;
-  final int? vulnerabilityIndex; // Track which vulnerability this command is for
+  final int? vulnerabilityIndex;
+  final int projectId;
+  final int targetId;
 
   CommandLog({
     required this.timestamp,
@@ -11,6 +13,8 @@ class CommandLog {
     required this.output,
     required this.exitCode,
     this.vulnerabilityIndex,
+    this.projectId = 0,
+    this.targetId = 0,
   });
 
   Map<String, dynamic> toMap() => {
@@ -19,6 +23,8 @@ class CommandLog {
     'output': output,
     'exitCode': exitCode,
     'vulnerabilityIndex': vulnerabilityIndex,
+    'projectId': projectId,
+    'targetId': targetId,
   };
 
   factory CommandLog.fromMap(Map<String, dynamic> map) => CommandLog(
@@ -27,5 +33,7 @@ class CommandLog {
     output: map['output'] as String,
     exitCode: map['exitCode'] as int,
     vulnerabilityIndex: map['vulnerabilityIndex'] as int?,
+    projectId: map['projectId'] as int? ?? 0,
+    targetId: map['targetId'] as int? ?? 0,
   );
 }

@@ -17,7 +17,7 @@ const vulnColors = [
 
 Color getVulnColor(int index) => vulnColors[index % vulnColors.length];
 
-class CommandLogPanel extends StatelessWidget {
+class CommandLogPanel extends StatefulWidget {
   final ScrollController scrollController;
   final VoidCallback onExport;
 
@@ -26,6 +26,19 @@ class CommandLogPanel extends StatelessWidget {
     required this.scrollController,
     required this.onExport,
   });
+
+  @override
+  State<CommandLogPanel> createState() => _CommandLogPanelState();
+}
+
+class _CommandLogPanelState extends State<CommandLogPanel> {
+  final _focusNode = FocusNode();
+
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -60,7 +73,7 @@ class CommandLogPanel extends StatelessWidget {
                     ),
                     IconButton(
                       icon: const Icon(Icons.download, color: Color(0xFF00F5FF), size: 18),
-                      onPressed: onExport,
+                      onPressed: widget.onExport,
                       tooltip: 'Export Logs',
                     ),
                   ],
@@ -72,10 +85,10 @@ class CommandLogPanel extends StatelessWidget {
                         child: Text('No commands executed yet', style: TextStyle(color: Colors.white.withOpacity(0.3), fontSize: 12)),
                       )
                     : SelectableRegion(
-                        focusNode: FocusNode(),
+                        focusNode: _focusNode,
                         selectionControls: materialTextSelectionControls,
                         child: ListView.builder(
-                          controller: scrollController,
+                          controller: widget.scrollController,
                           padding: const EdgeInsets.all(8),
                           itemCount: state.commandLogs.length,
                           itemBuilder: (context, i) {

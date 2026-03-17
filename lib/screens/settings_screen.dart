@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:dropdown_button2/dropdown_button2.dart';
+import 'package:file_picker/file_picker.dart';
 import '../models/llm_provider.dart';
 import '../models/llm_settings.dart';
 import '../services/llm_service.dart';
+import '../services/storage_service.dart';
 import '../widgets/app_state.dart';
 import '../database/database_helper.dart';
 import '../constants/app_constants.dart';
@@ -29,6 +31,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _isLoadingModels = false;
   final _llmService = LLMService();
   List<String> _whitelistedCommands = [];
+  String _storagePath = '';
 
   @override
   void initState() {
@@ -43,6 +46,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _timeoutSeconds = settings.timeoutSeconds;
     _loadMaxIterations();
     _loadWhitelist();
+    _loadStoragePath();
+  }
+
+  Future<void> _loadStoragePath() async {
+    final path = await StorageService.getBasePath();
+    if (mounted) setState(() => _storagePath = path);
+  }
+
+  Future<void> _changeStoragePath() async {
+    final picked = await FilePicker.platform.getDirectoryPath(dialogTitle: 'Select PenExecute storage folder');
+    if (picked == null) return;
+    StorageService.setCustomBasePath(picked);
+    await DatabaseHelper.saveSetting(SettingsKeys.storageBasePath, picked);
+    setState(() => _storagePath = picked);
   }
 
   Future<void> _loadWhitelist() async {
@@ -580,6 +597,53 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ],
               ),
             ),
+            const SizedBox(height: 16),
+          Container(
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(
+              color: const Color(0xFF1A1F3A),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: const Color(0xFF00F5FF).withOpacity(0.3)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('STORAGE', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 14, letterSpacing: 1)),
+                const SizedBox(height: 16),
+                const Text('BASE PATH', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 12)),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF0A0E27),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: const Color(0xFF00F5FF).withOpacity(0.2)),
+                        ),
+                        child: Text(
+                          _storagePath.isEmpty ? 'Loading...' : _storagePath,
+                          style: const TextStyle(color: Colors.white70, fontFamily: 'monospace', fontSize: 11),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    ElevatedButton(
+                      onPressed: _changeStoragePath,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF1A1F3A),
+                        side: const BorderSide(color: Color(0xFF00F5FF)),
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                      ),
+                      child: const Text('CHANGE', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 11)),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
             const SizedBox(height: 16),
           Container(
             padding: const EdgeInsets.all(24),

@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'dart:io';
-import 'screens/main_screen.dart';
+import 'screens/home_screen.dart';
 import 'widgets/app_state.dart';
 
 void main() {
@@ -27,7 +27,7 @@ class MyApp extends StatelessWidget {
           brightness: Brightness.dark,
           primaryColor: const Color(0xFF00F5FF),
         ),
-        home: const MainScreen(),
+        home: const HomeScreen(),
       ),
     );
   }

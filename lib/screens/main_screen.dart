@@ -1,22 +1,27 @@
 import 'dart:io';
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:file_picker/file_picker.dart';
 import '../models/vulnerability.dart';
+import '../models/command_log.dart';
 import '../models/llm_provider.dart';
+import '../models/target.dart';
 import '../services/vulnerability_analyzer.dart';
 import '../services/exploit_executor.dart';
+import '../services/command_executor.dart';
 import '../database/database_helper.dart';
 import 'settings_screen.dart';
 import '../widgets/app_state.dart';
 import '../widgets/admin_password_dialog.dart';
 import '../widgets/command_approval_widget.dart';
-import '../widgets/device_input_panel.dart';
+import '../widgets/target_input_panel.dart';
 import '../widgets/prompt_log_panel.dart';
 import '../widgets/debug_log_panel.dart';
 import '../widgets/command_log_panel.dart';
 import '../widgets/vulnerability_table.dart';
+import '../widgets/results_modal.dart';
 import '../constants/app_constants.dart';
 import '../utils/app_exceptions.dart';
 
@@ -28,51 +33,6 @@ class MainScreen extends StatefulWidget {
 }
 
 class _MainScreenState extends State<MainScreen> {
-  final _deviceController = TextEditingController(text: '''{
-  "device": {
-    "id": 3556,
-    "name": "192.168.50.53",
-    "ip_address": "192.168.50.53",
-    "mac_address": "04:17:B6:F2:4E:D1",
-    "vendor": "Smart Innovation"
-  },
-  "open_ports": [
-    {
-      "port": 53,
-      "protocol": "tcp",
-      "service": "domain",
-      "product": "dnsmasq",
-      "version": "2.40"
-    },
-    {
-      "port": 80,
-      "protocol": "tcp",
-      "service": "http",
-      "product": "",
-      "version": ""
-    },
-    {
-      "port": 554,
-      "protocol": "tcp",
-      "service": "rtsp",
-      "product": "",
-      "version": ""
-    },
-    {
-      "port": 9000,
-      "protocol": "tcp",
-      "service": "cslistener",
-      "product": "",
-      "version": ""
-    }
-  ],
-  "nmap_scripts": [
-    {
-      "script_id": "vulners",
-      "output": "High-severity CVEs (CVSS >= 7.0):\n  CVE-2017-14493 (CVSS 9.8)\n  CVE-2017-14492 (CVSS 9.8)\n  CVE-2017-14491 (CVSS 9.8)\n  CVE-2020-25682 (CVSS 8.3)\n  CVE-2020-25681 (CVSS 8.3)"
-    }
-  ]
-}''');
   bool _isAnalyzing = false;
   bool _isExecuting = false;
   final _logScrollController = ScrollController();
@@ -118,19 +78,19 @@ class _MainScreenState extends State<MainScreen> {
   @override
   void initState() {
     super.initState();
-    _initTempFolder();
   }
 
-  Future<void> _initTempFolder() async {
-    try {
-      final tempDir = Directory('temp');
-      if (await tempDir.exists()) {
-        await tempDir.delete(recursive: true);
-      }
-      await tempDir.create();
-    } catch (e) {
-      print('Temp folder init error: $e');
-    }
+  Future<bool> _ensureSessionPassword() async {
+    final appState = context.read<AppState>();
+    if (appState.sessionPasswordEntered) return true;
+    final password = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const AdminPasswordDialog(),
+    );
+    if (password == null || password.isEmpty) return false;
+    appState.setAdminPassword(password);
+    return true;
   }
 
   @override
@@ -153,12 +113,36 @@ class _MainScreenState extends State<MainScreen> {
                   width: 350,
                   child: Column(
                     children: [
-                      DeviceInputPanel(
-                        controller: _deviceController,
-                        isAnalyzing: _isAnalyzing,
-                        onAnalyze: _analyzeDevice,
-                      ),
-                      Expanded(child: PromptLogPanel(onExport: _exportPrompts)),
+                      Flexible(
+                        child: Consumer<AppState>(
+                        builder: (context, appState, _) => TargetInputPanel(
+                          llmSettings: appState.llmSettings,
+                          requireApproval: appState.requireApproval,
+                          adminPassword: appState.adminPassword,
+                          onPasswordNeeded: () => _ensureSessionPassword(),
+                          onApprovalNeeded: appState.requireApproval
+                              ? (command) async {
+                                  _approvalCompleter = Completer<String?>();
+                                  appState.setPendingCommand(command);
+                                  return await _approvalCompleter!.future;
+                                }
+                              : null,
+                          onProgress: (msg) => appState.addDebugLog(msg),
+                          onPromptResponse: (p, r) => appState.addPromptLog(p, r),
+                          onCommandExecuted: (cmd, output) async {
+                            await appState.loadCommandLogs();
+                          },
+                          onTargetsDiscovered: (targets) async => await appState.setTargets(targets),
+                          onTargetDeleted: (target) => appState.deleteTarget(target),
+                          onScanComplete: () => appState.setScanComplete(true),
+                          targets: appState.targets,
+                          existingTargets: appState.targets,
+                          selectedTarget: appState.selectedTarget,
+                          onTargetSelected: (t) => appState.selectTarget(t),
+                          projectName: appState.currentProjectName,
+                        ),
+                      ),),
+                      Flexible(child: PromptLogPanel(onExport: _exportPrompts)),
                     ],
                   ),
                 ),
@@ -167,11 +151,17 @@ class _MainScreenState extends State<MainScreen> {
                   children: [
                     SizedBox(
                       height: _vulnTableHeight,
-                      child: VulnerabilityTable(
-                        isExecuting: _isExecuting,
-                        onExecuteSelected: _executeSelected,
-                        onToggleSelection: _toggleSelection,
-                        onScrollToProof: _scrollToProof,
+                      child: Consumer<AppState>(
+                        builder: (context, appState, _) => VulnerabilityTable(
+                          isExecuting: _isExecuting,
+                          onExecuteSelected: _executeSelected,
+                          onToggleSelection: _toggleSelection,
+                          onScrollToProof: _scrollToProof,
+                          onAnalyze: _analyzeDevice,
+                          isAnalyzing: _isAnalyzing,
+                          analyzeEnabled: appState.scanComplete,
+                          executeEnabled: appState.analysisComplete,
+                        ),
                       ),
                     ),
                     _buildResizeHandle(),
@@ -199,9 +189,18 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   AppBar _buildAppBar() {
+    final appState = context.read<AppState>();
     return AppBar(
       backgroundColor: const Color(0xFF1A1F3A),
       elevation: 0,
+      leading: IconButton(
+        icon: const Icon(Icons.arrow_back, color: Color(0xFF00F5FF)),
+        onPressed: () {
+          context.read<AppState>().setCurrentProject(null);
+          Navigator.of(context).pop();
+        },
+        tooltip: 'Back to projects',
+      ),
       title: Row(
         children: [
           Container(
@@ -213,7 +212,13 @@ class _MainScreenState extends State<MainScreen> {
             child: const Icon(Icons.security, color: Colors.white, size: 20),
           ),
           const SizedBox(width: 12),
-          const Text('PenExecute', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 20)),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('PenExecute', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 18)),
+              Text(appState.currentProjectName, style: const TextStyle(color: Color(0xFF00F5FF), fontSize: 11)),
+            ],
+          ),
         ],
       ),
       actions: [
@@ -245,6 +250,28 @@ class _MainScreenState extends State<MainScreen> {
           ),
         ),
         const SizedBox(width: 12),
+        Consumer<AppState>(
+          builder: (context, appState, _) => TextButton.icon(
+            icon: Icon(
+              Icons.bar_chart,
+              size: 16,
+              color: appState.hasResults ? const Color(0xFF00F5FF) : Colors.white24,
+            ),
+            label: Text(
+              'RESULTS',
+              style: TextStyle(
+                color: appState.hasResults ? const Color(0xFF00F5FF) : Colors.white24,
+                fontSize: 12,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 0.8,
+              ),
+            ),
+            onPressed: appState.hasResults
+                ? () => _showResults(appState)
+                : null,
+          ),
+        ),
+        const SizedBox(width: 4),
         IconButton(
           icon: const Icon(Icons.settings, color: Color(0xFF00F5FF)),
           onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsScreen())),
@@ -357,6 +384,7 @@ class _MainScreenState extends State<MainScreen> {
   // --- Business logic ---
 
   Future<void> _analyzeDevice() async {
+    if (!await _ensureSessionPassword()) return;
     setState(() => _isAnalyzing = true);
     try {
       final appState = context.read<AppState>();
@@ -374,28 +402,49 @@ class _MainScreenState extends State<MainScreen> {
         throw const ConfigurationException('Please configure API key in settings');
       }
 
-      appState.clearPromptLogs();
-      appState.clearDebugLogs();
-      appState.addDebugLog('Starting vulnerability analysis...');
-
-      await DatabaseHelper.clearVulnerabilities();
-      appState.loadVulnerabilities();
-      if (mounted) setState(() {});
-
-      final analyzer = VulnerabilityAnalyzer(
-        onPromptResponse: (prompt, response) {
-          appState.addPromptLog(prompt, response);
-        },
-      );
-      final vulns = await analyzer.analyzeDevice(_deviceController.text, appState.llmSettings);
-
-      appState.addDebugLog('Found ${vulns.length} vulnerabilities');
-      for (final v in vulns) {
-        await DatabaseHelper.insertVulnerability(v);
-        appState.addDebugLog('Added: ${v.problem}');
+      final completedTargets = appState.targets.where((t) => t.status == TargetStatus.complete).toList();
+      if (completedTargets.isEmpty) {
+        throw const ConfigurationException('No scanned targets available to analyze');
       }
 
-      appState.loadVulnerabilities();
+      // Only analyze targets not yet analyzed
+      final targetsToAnalyze = completedTargets.where((t) => !t.analysisComplete).toList();
+      if (targetsToAnalyze.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('All targets already analyzed')),
+        );
+        setState(() => _isAnalyzing = false);
+        return;
+      }
+
+      for (final target in targetsToAnalyze) {
+        appState.addDebugLog('Starting vulnerability analysis for ${target.address}...');
+
+        final deviceJson = await File(target.jsonFilePath).readAsString();
+
+        final analyzer = VulnerabilityAnalyzer(
+          onPromptResponse: (prompt, response) {
+            appState.addPromptLog(prompt, response);
+          },
+        );
+        final vulns = await analyzer.analyzeDevice(deviceJson, appState.llmSettings);
+
+        appState.addDebugLog('Found ${vulns.length} vulnerabilities for ${target.address}');
+        for (final v in vulns) {
+          v.targetAddress = target.address;
+          await DatabaseHelper.insertVulnerability(v);
+          appState.addDebugLog('Added: ${v.problem}');
+        }
+
+        // Mark this target's analysis as complete
+        target.analysisComplete = true;
+        await DatabaseHelper.updateTarget(target);
+
+        appState.loadVulnerabilities();
+        if (mounted) setState(() {});
+      }
+
+      appState.setAnalysisComplete(true);
     } catch (e) {
       context.read<AppState>().addDebugLog('Error: $e');
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
@@ -410,6 +459,7 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   Future<void> _executeSelected() async {
+    if (!await _ensureSessionPassword()) return;
     final appState = context.read<AppState>();
     appState.addDebugLog('Execute Selected button clicked');
 
@@ -424,31 +474,44 @@ class _MainScreenState extends State<MainScreen> {
       return;
     }
 
-    setState(() => _isExecuting = true);
+    // Filter out vulns whose target already has executionComplete
+    final targetMap = {for (final t in appState.targets) t.address: t};
+    final toExecute = selected.where((v) {
+      final t = targetMap[v.targetAddress];
+      return t == null || !t.executionComplete;
+    }).toList();
 
-    if (appState.adminPassword == null) {
-      final password = await showDialog<String>(
-        context: context,
-        barrierDismissible: false,
-        builder: (context) => const AdminPasswordDialog(),
+    // Also skip individual vulns that already have a non-pending status
+    final pendingVulns = toExecute.where((v) => v.status == VulnerabilityStatus.pending).toList();
+
+    if (pendingVulns.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('All selected vulnerabilities already executed')),
       );
-
-      if (password == null || password.isEmpty) {
-        setState(() => _isExecuting = false);
-        appState.addDebugLog('Execution cancelled - no admin password provided');
-        return;
-      }
-
-      appState.setAdminPassword(password);
-      appState.addDebugLog('Admin password set for session');
+      return;
     }
 
-    await DatabaseHelper.clearCommandLogs();
-    await appState.loadCommandLogs();
-    if (mounted) setState(() {});
+    setState(() => _isExecuting = true);
 
-    for (var i = 0; i < selected.length; i++) {
-      final vuln = selected[i];
+    // --- Pre-flight checks (run once before all vulnerabilities) ---
+    CommandExecutor.clearAllCaches();
+
+    appState.addDebugLog('Running metasploit preflight check...');
+    await ExploitExecutor.preflightMetasploit();
+    appState.addDebugLog('Metasploit available: ${ExploitExecutor.metasploitAvailable}');
+
+    try {
+      final selectedTarget = appState.selectedTarget;
+      if (selectedTarget != null) {
+        final deviceJson = await File(selectedTarget.jsonFilePath).readAsString();
+        await _bannerGrabUnknownPorts(deviceJson, appState);
+      }
+    } catch (e) {
+      appState.addDebugLog('Banner grab preflight error: $e');
+    }
+
+    for (var i = 0; i < pendingVulns.length; i++) {
+      final vuln = pendingVulns[i];
       final vulnIdx = appState.vulnerabilities.indexWhere((v) => v.id == vuln.id);
       if (vulnIdx == -1) {
         appState.addDebugLog('ERROR - Could not find vulnerability with id=${vuln.id}');
@@ -456,8 +519,13 @@ class _MainScreenState extends State<MainScreen> {
       }
       appState.addDebugLog('Processing vulnerability id=${vuln.id} at index=$vulnIdx');
 
+      final selectedTarget = appState.selectedTarget;
+      final deviceJson = selectedTarget != null
+          ? await File(selectedTarget.jsonFilePath).readAsString()
+          : '{}';
+
       final executor = ExploitExecutor(
-        deviceData: _deviceController.text,
+        deviceData: deviceJson,
         vulnerabilityIndex: vulnIdx,
         onProgress: (msg) => appState.addDebugLog(msg),
         onCommandExecuted: (cmd, output, idx) async {
@@ -493,13 +561,104 @@ class _MainScreenState extends State<MainScreen> {
       if (mounted) setState(() {});
     }
 
+    // Mark executionComplete on targets whose vulns were all just run
+    final executedAddresses = pendingVulns.map((v) => v.targetAddress).toSet();
+    for (final addr in executedAddresses) {
+      final target = targetMap[addr];
+      if (target != null) {
+        final remaining = appState.vulnerabilities
+            .where((v) => v.targetAddress == addr && v.status == VulnerabilityStatus.pending)
+            .length;
+        if (remaining == 0) {
+          target.executionComplete = true;
+          await DatabaseHelper.updateTarget(target);
+        }
+      }
+    }
+
     setState(() => _isExecuting = false);
+
+    appState.setHasResults(true);
+    if (mounted) _showResults(appState);
+  }
+
+  void _showResults(AppState appState) {
+    final target = appState.selectedTarget;
+    ResultsModal.show(
+      context,
+      appState.vulnerabilities,
+      appState.commandLogs,
+      target?.address ?? 'unknown',
+    );
+  }
+
+  /// Banner-grab ports with unknown/unidentified services before vulnerability testing.
+  Future<void> _bannerGrabUnknownPorts(String deviceJson, AppState appState) async {
+    try {
+      final decoded = await Future(() {
+        try { return (Map<String, dynamic>.from(Map.from(jsonDecode(deviceJson)))); } catch (_) { return null; }
+      });
+      if (decoded == null) return;
+
+      final ports = (decoded['open_ports'] as List?) ?? [];
+      final unknownPorts = <int>[];
+      for (final p in ports) {
+        final service = (p['service'] ?? '').toString().toLowerCase();
+        final product = (p['product'] ?? '').toString();
+        if ((service.isEmpty || service == 'unknown' || service == 'tcpwrapped') && product.isEmpty) {
+          final port = p['port'];
+          if (port is int) unknownPorts.add(port);
+        }
+      }
+
+      if (unknownPorts.isEmpty) return;
+
+      appState.addDebugLog('Banner-grabbing ${unknownPorts.length} unknown ports: ${unknownPorts.join(", ")}');
+      final ip = decoded['device']?['ip_address'] ?? '';
+      if (ip.isEmpty) return;
+
+      // Batch nmap banner grab for all unknown ports at once
+      final portList = unknownPorts.join(',');
+      final cmd = 'nmap -sV --version-intensity 5 -p $portList $ip';
+      final result = await CommandExecutor.executeCommand(cmd, false)
+          .timeout(const Duration(seconds: 60));
+      final output = (result['output'] ?? '').toString();
+      appState.addDebugLog('Banner grab results:\n$output');
+
+      final log = CommandLog(
+        timestamp: DateTime.now(),
+        command: cmd,
+        output: output,
+        exitCode: result['exitCode'] ?? -1,
+        vulnerabilityIndex: -1,
+      );
+      await DatabaseHelper.insertCommandLog(log);
+      await appState.loadCommandLogs();
+    } catch (e) {
+      appState.addDebugLog('Banner grab error: $e');
+    }
   }
 
   Future<void> _exportLogs() async {
     final logs = await DatabaseHelper.getCommandLogs();
-    final content = logs.map((l) => '${l.timestamp}: ${l.command}\n${l.output}\n').join('\n---\n');
-    print('Export logs: $content');
+    if (logs.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No command logs to export')),
+      );
+      return;
+    }
+    final content = logs.map((l) =>
+      '[${l.timestamp.toString().substring(0, 19)}] Exit:${l.exitCode}\n'
+      '> ${l.command}\n'
+      '${l.output}'
+    ).join('\n---\n\n');
+    final path = await FilePicker.platform.saveFile(
+      dialogTitle: 'Save Command Logs',
+      fileName: 'PenExecute_CommandLogs.txt',
+    );
+    if (path != null) {
+      await File(path).writeAsString(content);
+    }
   }
 
   Future<void> _exportPrompts(AppState state) async {

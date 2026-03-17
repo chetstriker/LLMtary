@@ -38,6 +38,9 @@ dependencies:
   process_run: ^1.1.0
   dropdown_button2: ^2.3.9
   file_picker: ^8.1.6
+  path_provider: ^2.1.0
+  archive: ^3.4.0
+  pointycastle: ^3.7.0
 
 dev_dependencies:
   flutter_test:

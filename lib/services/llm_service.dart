@@ -23,19 +23,13 @@ class LLMService {
 3. PRECISION: Provide exact commands, exact versions, exact CVE IDs
 4. SAFETY: Focus on proof-of-concept, avoid destructive actions
 
-## WEB SEARCH BEHAVIOR:
-When analyzing vulnerabilities, you SHOULD search for:
-- CVE details: "CVE-XXXX-XXXXX details affected versions"
-- Exploits: "[CVE] exploit poc github"
-- Metasploit modules: "[CVE] metasploit"
-- Tool usage: "[product] [version] exploitation"
-- Patches: "[product] [version] security patch"
-
 ## RESPONSE REQUIREMENTS:
 - Always respond with valid JSON when requested
 - Cite specific evidence for all claims
 - Include exact version numbers and CVE IDs
-- Provide working, non-interactive commands''';
+- Provide working, non-interactive commands
+- Do NOT suggest curling Google, MITRE, or NVD websites — they return CAPTCHAs or block automated requests
+- Use your training knowledge for CVE details and exploit techniques''';
 
   Future<String> sendMessage(LLMSettings settings, String message, {bool useSystemPrompt = true}) async {
     final timeout = Duration(seconds: settings.timeoutSeconds);

@@ -96,6 +96,9 @@ class CommandExecutor {
     'wafw00f': 'wafw00f',
     'commix': 'commix',
     'xxd': 'xxd',
+    'mysql': 'mysql',
+    'mysql-client': 'mysql',
+    'mariadb-client': 'mysql',
   };
 
   // Get the actual binary name for a tool
@@ -174,12 +177,6 @@ class CommandExecutor {
     final versionStr = version != null ? ' version $version' : '';
 
     final prompt = '''You are a penetration testing expert. Provide accurate usage information for "$primaryTool"$versionStr on $os (running via $executionEnv).
-
-IMPORTANT: Search the web for current documentation if available, especially for:
-- Official documentation for this specific version
-- Common usage patterns and examples
-- Known issues or gotchas with this version
-- OS-specific differences for $os${isWsl ? ' (via WSL)' : ''}
 
 Respond with JSON:
 {
@@ -380,15 +377,18 @@ Respond ONLY with valid JSON.''';
   
   static bool? _wslAvailable;
   
-  static final _dangerousCommands = [
-    'rm -rf /',
-    'format',
-    'del /f /q c:',
-    'rmdir /s /q c:',
-    'mkfs',
-    'dd if=/dev/zero',
-    ':(){:|:&};:',
+  // Each entry is a RegExp pattern matched against the full command (case-insensitive).
+  // Use word-boundary / anchored patterns to avoid false positives like 'rfi' matching 'rm -rf /'.
+  static final _dangerousPatterns = [
+    RegExp(r'rm\s+-[a-z]*r[a-z]*f[a-z]*\s+/', caseSensitive: false),  // rm -rf /
+    RegExp(r'\bformat\s+[a-z]:', caseSensitive: false),                 // format C:
+    RegExp(r'del\s+/f\s+/[sq]\s+[a-z]:', caseSensitive: false),        // del /f /q c:
+    RegExp(r'rmdir\s+/s\s+/q\s+[a-z]:', caseSensitive: false),         // rmdir /s /q c:
+    RegExp(r'\bmkfs\b', caseSensitive: false),                          // mkfs
+    RegExp(r'dd\s+if=/dev/zero\s+of=/dev/', caseSensitive: false),      // dd if=/dev/zero of=/dev/...
+    RegExp(r':\(\)\{:\|:&\};:', caseSensitive: false),                  // fork bomb
   ];
+
 
   static Future<Map<String, dynamic>> verifyToolSetup(String tool, LLMSettings settings, LLMService llmService) async {
     try {
@@ -546,40 +546,23 @@ Respond ONLY with valid JSON.''';
       if (Platform.isWindows && await isWslAvailable()) {
         print('${_timestamp()} DEBUG: Running command: wsl bash -c "$checkCmd"');
         final process = await Process.start('wsl', ['bash', '-c', checkCmd]);
-        
-        final stdoutBuffer = StringBuffer();
-        final stderrBuffer = StringBuffer();
-        
-        process.stdout.transform(utf8.decoder).listen((data) {
-          print('${_timestamp()} [CHECK STDOUT] $data');
-          stdoutBuffer.write(data);
-        });
-        
-        process.stderr.transform(utf8.decoder).listen((data) {
-          print('${_timestamp()} [CHECK STDERR] $data');
-          stderrBuffer.write(data);
-        });
-        
+        process.stdout.transform(utf8.decoder).listen((_) {});
+        process.stderr.transform(utf8.decoder).listen((_) {});
         final exitCode = await process.exitCode;
         print('${_timestamp()} DEBUG: Exit code: $exitCode');
         return exitCode == 0;
+      } else if (Platform.isWindows) {
+        // Native Windows – use 'where' (cmd equivalent of 'which')
+        print('${_timestamp()} DEBUG: Native Windows check: where $binaryName');
+        final result = await Process.run('where', [binaryName])
+            .timeout(const Duration(seconds: 5));
+        print('${_timestamp()} DEBUG: Exit code: ${result.exitCode}');
+        return result.exitCode == 0;
       } else if (Platform.isLinux || Platform.isMacOS) {
         print('${_timestamp()} DEBUG: Running command: $checkCmd');
         final process = await Process.start('bash', ['-c', checkCmd]);
-        
-        final stdoutBuffer = StringBuffer();
-        final stderrBuffer = StringBuffer();
-        
-        process.stdout.transform(utf8.decoder).listen((data) {
-          print('${_timestamp()} [CHECK STDOUT] $data');
-          stdoutBuffer.write(data);
-        });
-        
-        process.stderr.transform(utf8.decoder).listen((data) {
-          print('${_timestamp()} [CHECK STDERR] $data');
-          stderrBuffer.write(data);
-        });
-        
+        process.stdout.transform(utf8.decoder).listen((_) {});
+        process.stderr.transform(utf8.decoder).listen((_) {});
         final exitCode = await process.exitCode;
         print('${_timestamp()} DEBUG: Exit code: $exitCode');
         return exitCode == 0;
@@ -987,12 +970,12 @@ Respond ONLY with valid JSON.''';
   }
 
   static Future<Map<String, dynamic>> executeCommand(String command, bool requireApproval, {String? adminPassword, Future<String?> Function(String)? onApprovalNeeded}) async {
-    for (final dangerous in _dangerousCommands) {
-      if (command.toLowerCase().contains(dangerous.toLowerCase())) {
+    for (final pattern in _dangerousPatterns) {
+      if (pattern.hasMatch(command)) {
         return {
           'exitCode': -1,
           'output': 'BLOCKED: Dangerous command detected',
-          'error': 'Command contains dangerous pattern: $dangerous',
+          'error': 'Command matches dangerous pattern: ${pattern.pattern}',
         };
       }
     }
@@ -1016,18 +999,16 @@ Respond ONLY with valid JSON.''';
     }
 
     try {
-      // Prepend sudo with password if provided and command doesn't already have sudo
+      // Inject sudo password only when the command itself starts with 'sudo'.
+      // Wrapping arbitrary commands in 'bash -c "..."' breaks single-quoted
+      // strings inside the command (e.g. curl -d '{"key":"val"}').
       String execCommand = command;
       if (adminPassword != null && adminPassword.isNotEmpty) {
-        if (!command.trim().startsWith('sudo') && !command.contains('echo') && !command.contains('|')) {
-          if (Platform.isWindows && await isWslAvailable()) {
-            execCommand = 'echo "$adminPassword" | sudo -S bash -c "$command"';
-          } else if (Platform.isLinux || Platform.isMacOS) {
-            execCommand = 'echo "$adminPassword" | sudo -S bash -c "$command"';
-          }
-        } else if (command.trim().startsWith('sudo') && !command.contains('sudo -S')) {
+        if (command.trim().startsWith('sudo') && !command.contains('sudo -S')) {
           execCommand = command.replaceFirst('sudo', 'echo "$adminPassword" | sudo -S');
         }
+        // For commands that don't start with sudo, run as-is.
+        // The LLM is responsible for including sudo where needed.
       }
 
       CommandResult result;
@@ -1065,8 +1046,14 @@ Respond ONLY with valid JSON.''';
 
   static Future<CommandResult> _executeInWsl(String command) async {
     try {
+      // nmap -p- scans can take 10+ minutes; other commands are fast.
+      // Use a longer timeout for full port scans.
+      final isFullPortScan = command.contains('nmap') && command.contains('-p-');
+      final timeout = isFullPortScan
+          ? const Duration(minutes: 15)
+          : const Duration(minutes: 5);
       final process = await Process.start('wsl', ['bash', '-c', command])
-          .timeout(const Duration(minutes: 5));
+          .timeout(timeout);
 
       final stdoutBuffer = StringBuffer();
       final stderrBuffer = StringBuffer();
