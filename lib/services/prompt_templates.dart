@@ -1,3 +1,5 @@
+import '../utils/device_utils.dart';
+
 /// Centralized prompt templates and knowledge bases for the exploit executor.
 ///
 /// Separates the large prompt text from orchestration logic to keep
@@ -9,11 +11,21 @@ class PromptTemplates {
 
   /// Web-application focused analysis prompt.
   /// Only fire when HTTP/HTTPS ports are present.
-  static String webAppAnalysisPrompt(String deviceJson) => '''
+  static String webAppAnalysisPrompt(String deviceJson, {TargetScope scope = TargetScope.internal}) {
+    final isExternal = scope == TargetScope.external;
+    final extraScope = isExternal ? '''
+
+## EXTERNAL TARGET CONTEXT:
+- WAF/CDN may be present — note any WAF-related headers (cf-ray, x-sucuri, x-cache)
+- Focus on: CMS CVEs, exposed APIs, JWT issues, GraphQL introspection, subdomain takeover
+- API testing: check /api, /api/v1, /graphql, /swagger, /openapi.json for unauthenticated access
+- JWT: if tokens are present, check for alg:none, weak secrets, or missing expiry
+- Do NOT generate SMB/RDP/internal-network findings for this target''' : '';
+    return '''
 You are an expert web-application penetration tester. Analyze the device data below and identify EXPLOITABLE web-application vulnerabilities only.
 
 ## DEVICE DATA:
-$deviceJson
+$deviceJson$extraScope
 
 ## SCOPE — only web attack classes:
 - SQL Injection (login forms, search fields, URL params)
@@ -28,6 +40,7 @@ $deviceJson
 - Deserialization (Java, PHP, .NET)
 - CSRF-aware testing: GET page → extract token → POST with token
 - Post-auth attack surface: after login, test every input for injection
+${isExternal ? "- API security: unauthenticated endpoints, GraphQL introspection, JWT weaknesses\n- CMS-specific CVEs (WordPress plugins, Drupal modules, Joomla extensions)" : ""}
 
 ## RULES:
 - Only include findings for HTTP/HTTPS ports
@@ -39,6 +52,7 @@ $deviceJson
 ${_outputFormatBlock()}
 
 Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+  }
 
   /// Network-service focused analysis prompt.
   /// Only fire when non-web service ports are present.
@@ -72,11 +86,16 @@ ${_outputFormatBlock()}
 Respond ONLY with a valid JSON array. No markdown, no explanations.''';
 
   /// CVE / version-matching analysis prompt. Fires for all scans.
-  static String cveVersionAnalysisPrompt(String deviceJson) => '''
+  static String cveVersionAnalysisPrompt(String deviceJson, {TargetScope scope = TargetScope.internal}) {
+    final isExternal = scope == TargetScope.external;
+    final scopeNote = isExternal
+        ? '\n## EXTERNAL TARGET: Do NOT generate SMB (445), RDP (3389), or other LAN-only service findings unless those ports are explicitly listed as open in the device data.'
+        : '';
+    return '''
 You are an expert CVE researcher and penetration tester. Analyze the device data below and identify vulnerabilities through strict product+version matching and architectural reasoning.
 
 ## DEVICE DATA:
-$deviceJson
+$deviceJson$scopeNote
 
 ## TASKS:
 
@@ -98,6 +117,37 @@ For services where the exact CVE is unknown or version is ambiguous:
 - Never assume product from port number alone
 - Unknown/generic banners: LOW confidence on CVEs, MEDIUM on generic attack classes
 - Each CVE is a separate entry
+
+${_outputFormatBlock()}
+
+Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+  }
+
+  /// SSL/TLS focused analysis prompt — only fired for external targets with web ports.
+  static String sslTlsAnalysisPrompt(String deviceJson) => '''
+You are an expert in SSL/TLS security. Analyze the device data below and identify EXPLOITABLE SSL/TLS vulnerabilities only.
+
+## DEVICE DATA:
+$deviceJson
+
+## SCOPE — only SSL/TLS attack classes:
+- Heartbleed (CVE-2014-0160): OpenSSL < 1.0.1g
+- POODLE (CVE-2014-3566): SSLv3 enabled
+- BEAST (CVE-2011-3389): TLS 1.0 with CBC ciphers
+- CRIME/BREACH: TLS compression enabled
+- DROWN (CVE-2016-0800): SSLv2 enabled
+- ROBOT (CVE-2017-13099): RSA PKCS#1 v1.5 padding oracle
+- Weak cipher suites: RC4, DES, 3DES, NULL, EXPORT ciphers
+- Expired or self-signed certificates
+- Certificate CN/SAN mismatch
+- Missing HSTS header
+- TLS 1.0/1.1 still enabled (deprecated)
+- Weak key sizes (RSA < 2048, ECC < 256)
+
+## RULES:
+- Only include findings backed by evidence in the device data (cipher lists, version strings, script output)
+- Each issue is a SEPARATE entry
+- Description MUST include the specific cipher/protocol and concrete test command
 
 ${_outputFormatBlock()}
 

@@ -29,7 +29,7 @@ class DatabaseHelper {
     
     return await openDatabase(
       path,
-      version: 9,
+      version: 11,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE vulnerabilities (
@@ -135,6 +135,23 @@ class DatabaseHelper {
         ''');
 
         await db.execute('''
+          CREATE TABLE executed_commands (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            projectId INTEGER NOT NULL,
+            targetId INTEGER NOT NULL,
+            command_normalized TEXT NOT NULL,
+            output TEXT NOT NULL DEFAULT '',
+            exit_code INTEGER NOT NULL DEFAULT -1,
+            executed_at TEXT NOT NULL,
+            UNIQUE(projectId, targetId, command_normalized)
+          )
+        ''');
+
+        await db.execute(
+          'CREATE INDEX IF NOT EXISTS idx_exec_cmds ON executed_commands(projectId, targetId)'
+        );
+
+        await db.execute('''
           CREATE TABLE provider_settings (
             provider TEXT PRIMARY KEY,
             baseUrl TEXT,
@@ -230,6 +247,26 @@ class DatabaseHelper {
         if (oldVersion < 9) {
           await db.execute('ALTER TABLE targets ADD COLUMN analysisComplete INTEGER NOT NULL DEFAULT 0');
           await db.execute('ALTER TABLE targets ADD COLUMN executionComplete INTEGER NOT NULL DEFAULT 0');
+        }
+        if (oldVersion < 10) {
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS executed_commands (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              projectId INTEGER NOT NULL,
+              targetId INTEGER NOT NULL,
+              command_normalized TEXT NOT NULL,
+              executed_at TEXT NOT NULL,
+              UNIQUE(projectId, targetId, command_normalized)
+            )
+          ''');
+          await db.execute(
+            'CREATE INDEX IF NOT EXISTS idx_exec_cmds ON executed_commands(projectId, targetId)'
+          );
+        }
+        if (oldVersion < 11) {
+          // Add output caching columns — ignore errors if columns already exist
+          try { await db.execute('ALTER TABLE executed_commands ADD COLUMN output TEXT NOT NULL DEFAULT \'\''); } catch (_) {}
+          try { await db.execute('ALTER TABLE executed_commands ADD COLUMN exit_code INTEGER NOT NULL DEFAULT -1'); } catch (_) {}
         }
       },
     );
@@ -461,5 +498,95 @@ class DatabaseHelper {
     } else {
       await db.delete('debug_logs', where: 'projectId = ?', whereArgs: [projectId]);
     }
+  }
+
+  // --- Executed commands deduplication ---
+
+  /// Normalize a command string for deduplication storage.
+  static String _normalizeForStorage(String command) {
+    return command
+        .trim()
+        .toLowerCase()
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .replaceAll(RegExp(r'\d{4}-\d{2}-\d{2}'), 'DATE')
+        .replaceAll(RegExp(r'\d{2}:\d{2}:\d{2}'), 'TIME');
+  }
+
+  /// Returns true if this exact (normalized) command has already been run
+  /// for the given project+target combination.
+  static Future<bool> wasCommandExecuted(int projectId, int targetId, String command) async {
+    return (await getCachedCommandResult(projectId, targetId, command)) != null;
+  }
+
+  /// Record that a command was executed for a project+target, storing its output.
+  /// On conflict (same normalized command), updates the output with the latest result.
+  static Future<void> recordExecutedCommand(
+    int projectId,
+    int targetId,
+    String command, {
+    String output = '',
+    int exitCode = -1,
+  }) async {
+    final db = await database;
+    final normalized = _normalizeForStorage(command);
+    // INSERT OR REPLACE so we always have the latest output stored
+    await db.insert(
+      'executed_commands',
+      {
+        'projectId': projectId,
+        'targetId': targetId,
+        'command_normalized': normalized,
+        'output': output,
+        'exit_code': exitCode,
+        'executed_at': DateTime.now().toIso8601String(),
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  /// Returns the cached output for a previously executed command, or null if
+  /// the command has never been run for this project+target.
+  static Future<({String output, int exitCode})?> getCachedCommandResult(
+    int projectId,
+    int targetId,
+    String command,
+  ) async {
+    final db = await database;
+    final normalized = _normalizeForStorage(command);
+    final rows = await db.query(
+      'executed_commands',
+      columns: ['output', 'exit_code'],
+      where: 'projectId = ? AND targetId = ? AND command_normalized = ?',
+      whereArgs: [projectId, targetId, normalized],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return (
+      output: rows.first['output'] as String? ?? '',
+      exitCode: rows.first['exit_code'] as int? ?? -1,
+    );
+  }
+
+  /// Load all previously executed command normalized strings for a project+target.
+  /// Used to pre-populate the in-memory dedup set at the start of a run.
+  static Future<Set<String>> getExecutedCommands(int projectId, int targetId) async {
+    final db = await database;
+    final rows = await db.query(
+      'executed_commands',
+      columns: ['command_normalized'],
+      where: 'projectId = ? AND targetId = ?',
+      whereArgs: [projectId, targetId],
+    );
+    return rows.map((r) => r['command_normalized'] as String).toSet();
+  }
+
+  /// Clear executed commands for a target (e.g. when re-running recon).
+  static Future<void> clearExecutedCommands(int projectId, int targetId) async {
+    final db = await database;
+    await db.delete(
+      'executed_commands',
+      where: 'projectId = ? AND targetId = ?',
+      whereArgs: [projectId, targetId],
+    );
   }
 }

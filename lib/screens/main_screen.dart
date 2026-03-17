@@ -140,6 +140,10 @@ class _MainScreenState extends State<MainScreen> {
                           selectedTarget: appState.selectedTarget,
                           onTargetSelected: (t) => appState.selectTarget(t),
                           projectName: appState.currentProjectName,
+                          projectId: appState.currentProject?.id ?? 0,
+                          getTargetId: (addr) => appState.targets
+                              .firstWhere((t) => t.address == addr, orElse: () => Target(address: addr))
+                              .id ?? 0,
                         ),
                       ),),
                       Flexible(child: PromptLogPanel(onExport: _exportPrompts)),
@@ -547,7 +551,14 @@ class _MainScreenState extends State<MainScreen> {
       );
 
       final maxIterations = int.tryParse(await DatabaseHelper.getSetting(SettingsKeys.maxIterations) ?? '10') ?? 10;
-      final status = await executor.testVulnerability(vuln, appState.llmSettings, appState.requireApproval, maxIterations);
+      final targetId = appState.targets
+          .firstWhere((t) => t.address == vuln.targetAddress, orElse: () => appState.selectedTarget ?? appState.targets.first)
+          .id ?? 0;
+      final status = await executor.testVulnerability(
+        vuln, appState.llmSettings, appState.requireApproval, maxIterations,
+        projectId: appState.currentProject?.id ?? 0,
+        targetId: targetId,
+      );
       vuln.status = status;
       await DatabaseHelper.updateVulnerability(vuln);
 

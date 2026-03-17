@@ -5,6 +5,7 @@ import '../models/command_log.dart';
 import '../utils/json_parser.dart';
 import '../utils/command_utils.dart';
 import '../database/database_helper.dart';
+import '../utils/device_utils.dart';
 import 'command_executor.dart';
 import 'llm_service.dart';
 import 'storage_service.dart';
@@ -79,6 +80,7 @@ class ReconService {
   final Function(String, String)? onCommandExecuted;
 
   static const int _maxIterations = 20;
+  static const int _maxIterationsExternal = 25;
 
   ReconService({
     required this.settings,
@@ -127,11 +129,14 @@ class ReconService {
   // Main recon loop
   // ---------------------------------------------------------------------------
 
-  Future<String?> reconTarget(String address, String projectName) async {
+  Future<String?> reconTarget(String address, String projectName, {int projectId = 0, int targetId = 0}) async {
     final llmService = LLMService(onPromptResponse: onPromptResponse);
     final env = await _ExecEnv.detect();
+    final scope = DeviceUtils.classifyTarget(address);
+    final maxIter = scope == TargetScope.external ? _maxIterationsExternal : _maxIterations;
     final outputDir = await StorageService.getTargetPath(projectName, address);
     final outDir = env.outputPath(outputDir);
+    onProgress?.call('[$address] Target classified as ${scope.name.toUpperCase()}');
 
     final findings = <String, dynamic>{
       'device': {'ip_address': address, 'name': address},
@@ -140,18 +145,23 @@ class ReconService {
       'web_findings': <dynamic>[],
       'smb_findings': <dynamic>[],
       'dns_findings': <dynamic>[],
+      'waf_findings': <dynamic>[],
       'other_findings': <dynamic>[],
     };
 
     String history = '';
-    final executedCommands = <String>{};
+    // Pre-load commands already run for this target from the DB so we never
+    // repeat work across separate runs.
+    final executedCommands = projectId > 0 && targetId > 0
+        ? await DatabaseHelper.getExecutedCommands(projectId, targetId)
+        : <String>{};
     final unavailableTools = <String>{};
     int consecutiveFailures = 0;
 
     onProgress?.call('[$address] Starting recon loop (${env.label})...');
 
-    for (int iteration = 0; iteration < _maxIterations; iteration++) {
-      onProgress?.call('[$address] Iteration ${iteration + 1}/$_maxIterations');
+    for (int iteration = 0; iteration < maxIter; iteration++) {
+      onProgress?.call('[$address] Iteration ${iteration + 1}/$maxIter');
 
       String historyHint = '';
       if (executedCommands.isNotEmpty || unavailableTools.isNotEmpty) {
@@ -170,6 +180,7 @@ class ReconService {
       final prompt = _buildCommandPrompt(
         address: address,
         env: env,
+        scope: scope,
         outDir: outDir,
         findings: findings,
         history: history,
@@ -193,8 +204,8 @@ class ReconService {
         final useful = decision['host_useful'] == true;
         final reason = decision['conclude_reason'] ?? 'Recon complete';
         // Don't conclude early if there are still unprobed ports/services
-        final focusHints = _buildFocusHints(address, findings, env);
-        if (focusHints.isNotEmpty && iteration < _maxIterations - 3) {
+        final focusHints = _buildFocusHints(address, findings, env, scope);
+        if (focusHints.isNotEmpty && iteration < maxIter - 3) {
           history += 'Iteration ${iteration + 1}: LLM tried to CONCLUDE but unprobed services remain — continuing.\n\n';
           onProgress?.call('[$address] Overriding early conclude — unprobed services remain');
           consecutiveFailures = 0;
@@ -227,6 +238,17 @@ class ReconService {
 
       if (CommandUtils.isSimilarCommand(command, executedCommands)) {
         history += 'Iteration ${iteration + 1}: SKIPPED duplicate: $command\n\n';
+        consecutiveFailures++;
+        if (consecutiveFailures >= 2) break;
+        continue;
+      }
+
+      // Also check DB for commands run in previous sessions — skip silently
+      // (recon already merged the output into findings on the prior run)
+      if (projectId > 0 && targetId > 0 &&
+          await DatabaseHelper.wasCommandExecuted(projectId, targetId, command)) {
+        history += 'Iteration ${iteration + 1}: SKIPPED (already run in prior session): $command\n\n';
+        onProgress?.call('[$address] Skipping previously run command...');
         consecutiveFailures++;
         if (consecutiveFailures >= 2) break;
         continue;
@@ -286,6 +308,12 @@ class ReconService {
       final output = (result['output'] as String? ?? '').trim();
       final exitCode = result['exitCode'] ?? -1;
 
+      // Persist to DB now that we have the output
+      if (projectId > 0 && targetId > 0) {
+        await DatabaseHelper.recordExecutedCommand(projectId, targetId, command,
+            output: output, exitCode: exitCode as int);
+      }
+
       // Log to command log panel (same as exploit executor)
       final log = CommandLog(
         timestamp: DateTime.now(),
@@ -293,6 +321,8 @@ class ReconService {
         output: output.isEmpty ? '(no output)' : output,
         exitCode: exitCode as int,
         vulnerabilityIndex: null,
+        projectId: projectId,
+        targetId: targetId,
       );
       await DatabaseHelper.insertCommandLog(log);
       onCommandExecuted?.call(log.command, log.output);
@@ -328,13 +358,19 @@ class ReconService {
   String _buildCommandPrompt({
     required String address,
     required _ExecEnv env,
+    required TargetScope scope,
     required String outDir,
     required Map<String, dynamic> findings,
     required String history,
     required String historyHint,
   }) {
-    final focusHints = _buildFocusHints(address, findings, env);
+    final focusHints = _buildFocusHints(address, findings, env, scope);
+    final baseline = scope == TargetScope.external
+        ? _externalBaseline(address, env)
+        : _internalBaseline(address, env);
+    final scopeLabel = scope == TargetScope.external ? 'EXTERNAL (internet-facing)' : 'INTERNAL (LAN)';
     return '''You are an expert penetration tester performing RECONNAISSANCE ONLY on target: $address
+Target scope: $scopeLabel
 Your sole goal is to COLLECT DATA. Do NOT test exploits, do NOT attempt logins, do NOT modify anything on the target.
 Every command must be read-only and purely informational.
 
@@ -354,14 +390,15 @@ $historyHint
 
 $focusHints
 
-## BASELINE RECON (if nothing found yet):
-- First: FULL port scan across ALL 65535 ports with service/version detection — do NOT wrap nmap in timeout, it needs several minutes
-  Unix/WSL: nmap -sV -sC --open -T4 -p- $address
-  Windows (no nmap): Test-NetConnection $address -Port 80,443,22,21,445,3389,8080,8443,3306,5432
-- CRITICAL: A partial port scan (e.g. top 1000 ports only) will miss services on non-standard ports.
-  Always use -p- to scan all ports. Services like web apps, databases, and admin panels frequently
-  run on non-standard ports (e.g. 666, 667, 668, 8888, 9090, etc.).
-- Then follow the PRIORITY TARGETS above based on what you find
+$baseline
+
+## NUCLEI USAGE (CRITICAL — wrong syntax wastes iterations):
+- CORRECT: nuclei -u http://$address -id CVE-2021-41773  (use -id for specific CVEs)
+- CORRECT: nuclei -u http://$address -tags drupal  (use -tags for technology-based scans)
+- CORRECT: nuclei -u http://$address -tags cve,drupal  (combine tags)
+- WRONG: nuclei -u http://$address -t cves/2023/CVE-2023-1234.yaml  (file paths don't exist locally)
+- WRONG: nuclei -u http://$address -t CVE-2023-1234  (not a valid flag value)
+- If you don't know the exact CVE ID, use -tags with the technology name instead
 
 ## CONCLUDE when ALL of these are true:
 - Port scan completed
@@ -384,11 +421,69 @@ $focusHints
 Respond ONLY with valid JSON.''';
   }
 
+  String _internalBaseline(String address, _ExecEnv env) => '''
+## BASELINE RECON - INTERNAL TARGET:
+- First: FULL port scan across ALL 65535 ports with service/version detection
+  Unix/WSL: nmap -sV -sC --open -T4 -p- $address
+  Windows: Test-NetConnection $address -Port 80,443,22,21,445,3389,8080,8443,3306,5432
+- CRITICAL: Always use -p- to scan all ports - services frequently run on non-standard ports.
+- Then follow the PRIORITY TARGETS above based on what you find''';
+
+  String _externalBaseline(String address, _ExecEnv env) {
+    final isWin = env.isNativeWindows;
+    final dnsCmd = isWin
+        ? 'Resolve-DnsName $address -Type ANY'
+        : 'dig ANY $address +noall +answer && dig MX $address +short && dig NS $address +short && dig TXT $address +short';
+    final subdomainCmd = isWin
+        ? ''
+        : '- Subdomain hints (TWO separate commands):\n'
+          '  Step 1: curl -s "https://crt.sh/?q=%25.$address&output=json" -o /tmp/crtsh_$address.json 2>/dev/null\n'
+          '  Step 2: cat /tmp/crtsh_$address.json | python3 -c "import sys,json; [print(e[\'name_value\']) for e in json.load(sys.stdin)]" 2>/dev/null | sort -u | head -30';
+    final sslCmd = isWin
+        ? '- nmap --script ssl-cert,ssl-enum-ciphers -p 443 $address'
+        : '- nmap --script ssl-cert,ssl-enum-ciphers,ssl-heartbleed,ssl-poodle -p 443 $address\n- testssl.sh --fast $address 2>/dev/null | head -80  (if available)';
+    final harvestCmd = isWin
+        ? ''
+        : '- theHarvester -d $address -b google,bing,crtsh -l 50 2>/dev/null | head -60  (if available)';
+    return '''
+## BASELINE RECON - EXTERNAL TARGET:
+External targets require a different approach than internal hosts. Follow this order:
+
+### STEP 1 - DNS & OSINT (do these before port scanning)
+- DNS records: $dnsCmd
+$subdomainCmd
+- WAF/CDN detection: curl -sI https://$address | grep -iE 'cf-ray|x-amz|x-cache|via|server|x-powered'
+
+### STEP 2 - Port scan (top ports first, then full)
+- Fast top-1000 first (external hosts may rate-limit or block -p-):
+  nmap -sV -sC --open -T3 $address
+- Then full scan if top-1000 found interesting services:
+  nmap -sV --open -T3 -p- $address
+- NOTE: Use -T3 (not -T4) for external targets to avoid triggering rate limits or IDS.
+
+### STEP 3 - SSL/TLS (for every HTTPS port found)
+$sslCmd
+
+### STEP 4 - Web enumeration (for every HTTP/HTTPS port)
+- Use a larger wordlist for external targets:
+  gobuster dir -u https://$address -w /usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt -q -t 20 2>/dev/null
+  (fallback: /usr/share/wordlists/dirb/common.txt if medium list not present)
+- CMS detection: whatweb https://$address 2>/dev/null || curl -s https://$address | grep -iE '<meta|generator|powered|wp-content|drupal|joomla'
+- If CMS identified from findings, run CMS-specific scanner:
+  * WordPress: wpscan --url https://$address --enumerate p,t,u --no-banner 2>/dev/null
+  * Drupal: droopescan scan drupal -u https://$address 2>/dev/null
+  * Joomla: joomscan -u https://$address 2>/dev/null
+
+### STEP 5 - Email/contact harvesting (for phishing context)
+$harvestCmd''';
+  }
+
   // ---------------------------------------------------------------------------
   // Findings-driven focus hints
   // ---------------------------------------------------------------------------
 
-  String _buildFocusHints(String address, Map<String, dynamic> findings, _ExecEnv env) {
+  String _buildFocusHints(String address, Map<String, dynamic> findings, _ExecEnv env, TargetScope scope) {
+    final isExternal = scope == TargetScope.external;
     final ports = (findings['open_ports'] as List? ?? []).cast<Map<String, dynamic>>();
     final webFindings = (findings['web_findings'] as List? ?? []);
     final smbFindings = (findings['smb_findings'] as List? ?? []);
@@ -454,10 +549,27 @@ Respond ONLY with valid JSON.''';
       }
     }
 
-    // OS fingerprint hint
+    // OS fingerprint hint — skip for external (OS fingerprinting is noisy and often blocked)
     final os = device['os'] as String? ?? '';
-    if (os.isEmpty && ports.isNotEmpty) {
+    if (os.isEmpty && ports.isNotEmpty && !isExternal) {
       hints.add('- OS not yet identified → run: nmap -O --osscan-guess $address');
+    }
+
+    // External-only: SSL/TLS hint for any HTTPS port not yet checked
+    if (isExternal && !isWin) {
+      for (final p in ports) {
+        final port = (p['port'] as num?)?.toInt() ?? 0;
+        final svc = (p['service'] as String? ?? '').toLowerCase();
+        final isHttps = svc.contains('https') || svc.contains('ssl') || port == 443;
+        if (isHttps) {
+          final alreadyChecked = (findings['nmap_scripts'] as List? ?? [])
+              .cast<Map<String, dynamic>>()
+              .any((s) => s['port'] == port && (s['script_id'] as String? ?? '').contains('ssl'));
+          if (!alreadyChecked) {
+            hints.add('- SSL/TLS on port $port not yet checked → nmap --script ssl-cert,ssl-enum-ciphers,ssl-heartbleed -p $port $address');
+          }
+        }
+      }
     }
 
     // Web hints
@@ -493,11 +605,19 @@ Respond ONLY with valid JSON.''';
       } else {
         // Got 200 at root — go deeper
         final serverHeader = _findWebServer(webFindings, port);
+        // Check if CMS was already identified in findings
+        final techs = (webFindings.cast<Map<String, dynamic>>()
+            .firstWhere((w) => (w['url'] as String? ?? '').contains(':$port'), orElse: () => {})
+            ['technologies'] as List? ?? []).join(' ').toLowerCase();
         hints.add('- Port $port web server identified${serverHeader.isNotEmpty ? " ($serverHeader)" : ""} → collect more:');
         if (!isWin) {
           hints.add('  • Fetch robots.txt: curl -s $url/robots.txt');
           hints.add('  • Fetch sitemap: curl -s $url/sitemap.xml');
-          hints.add('  • Directory hints: gobuster dir -u $url -w /usr/share/wordlists/dirb/common.txt -q 2>/dev/null || curl -s $url/ | grep -oP \'href="[^"]+"\'');
+          // External gets larger wordlist
+          final wordlist = isExternal
+              ? '/usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt'
+              : '/usr/share/wordlists/dirb/common.txt';
+          hints.add('  • Directory enum: gobuster dir -u $url -w $wordlist -q 2>/dev/null || dirb $url /usr/share/wordlists/dirb/common.txt -S 2>/dev/null');
           hints.add('  • Full headers + redirect chain: curl -sIL $url');
           if (serverHeader.contains('apache') || serverHeader.contains('nginx') ||
               serverHeader.contains('iis')) {
@@ -505,6 +625,16 @@ Respond ONLY with valid JSON.''';
           }
           hints.add('  • Technology fingerprint: whatweb $url 2>/dev/null || curl -s $url | grep -iE \'<meta|generator|powered\'');
           hints.add('  • Common paths: curl -s -o /dev/null -w "%{http_code} %{url_effective}\\n" $url/admin $url/login $url/phpmyadmin $url/manager $url/api $url/console');
+          // CMS-specific scanners (external only — too noisy for internal)
+          if (isExternal) {
+            if (techs.contains('wordpress') || techs.contains('wp-')) {
+              hints.add('  • WordPress scan: wpscan --url $url --enumerate p,t,u --no-banner 2>/dev/null');
+            } else if (techs.contains('drupal')) {
+              hints.add('  • Drupal scan: droopescan scan drupal -u $url 2>/dev/null');
+            } else if (techs.contains('joomla')) {
+              hints.add('  • Joomla scan: joomscan -u $url 2>/dev/null');
+            }
+          }
         } else {
           hints.add('  • Fetch robots.txt: curl -s $url/robots.txt');
           hints.add('  • Common paths: foreach (\$p in @("/admin","/login","/manager","/phpmyadmin","/api","/console")) { \$r = try { Invoke-WebRequest "$url\$p" -UseBasicParsing -EA Stop } catch { \$_.Exception.Response }; Write-Host "\$p \$(\$r.StatusCode)" }');
@@ -512,8 +642,46 @@ Respond ONLY with valid JSON.''';
       }
     }
 
-    // SMB hints
+    // External-only: HTTP method enumeration for web ports
+    if (isExternal && !isWin) {
+      for (final port in webPorts) {
+        final portEntry = ports.firstWhere((p) => (p['port'] as num?)?.toInt() == port, orElse: () => {});
+        final svc = (portEntry['service'] as String? ?? '').toLowerCase();
+        final scheme = svc.contains('https') || svc.contains('ssl') ? 'https' : 'http';
+        final alreadyChecked = (findings['web_findings'] as List? ?? [])
+            .cast<Map<String, dynamic>>()
+            .any((w) => (w['notes'] as String? ?? '').toLowerCase().contains('options'));
+        if (!alreadyChecked) {
+          hints.add('- HTTP methods on port $port → curl -s -X OPTIONS -i $scheme://$address:$port/ | grep -i allow');
+        }
+      }
+    }
+
+    // External-only: API surface hints
+    if (isExternal && !isWin) {
+      for (final port in webPorts) {
+        final portEntry = ports.firstWhere((p) => (p['port'] as num?)?.toInt() == port, orElse: () => {});
+        final svc = (portEntry['service'] as String? ?? '').toLowerCase();
+        final scheme = svc.contains('https') || svc.contains('ssl') ? 'https' : 'http';
+        final existingNotes = (findings['web_findings'] as List? ?? [])
+            .cast<Map<String, dynamic>>()
+            .firstWhere((w) => (w['url'] as String? ?? '').contains(':$port'), orElse: () => {})
+            ['notes'] as String? ?? '';
+        if (!existingNotes.toLowerCase().contains('graphql') &&
+            !existingNotes.toLowerCase().contains('/api')) {
+          hints.add('- API surface on port $port → curl -s -o /dev/null -w "%{http_code} %{url_effective}\\n" '
+              '$scheme://$address:$port/api $scheme://$address:$port/api/v1 '
+              '$scheme://$address:$port/graphql $scheme://$address:$port/swagger '
+              '$scheme://$address:$port/openapi.json $scheme://$address:$port/docs');
+          hints.add('  • GraphQL introspection: curl -s -X POST -H "Content-Type: application/json" '
+              '-d \'{"query":"{__schema{types{name}}}"}\'  $scheme://$address:$port/graphql');
+        }
+      }
+    }
+
+    // SMB hints — internal only (almost always firewalled on external targets)
     for (final port in smbPorts) {
+      if (isExternal) continue;
       final alreadyProbed = smbFindings.isNotEmpty;
       if (!alreadyProbed) {
         if (isWin) {
@@ -638,6 +806,13 @@ Only include keys that have real data from this output (omit empty arrays/object
 
 CRITICAL FOR NMAP OUTPUT: The nmap output may contain 20+ open ports. You MUST extract ALL of them into open_ports[]. Do NOT stop after the first port. Scan the ENTIRE output for every line matching "PORT/tcp open" or "PORT/udp open" and include each one.
 
+CRITICAL FOR VERSION EXTRACTION:
+- Extract versions from URL query strings: e.g. "?v=10.6.3" or "?ver=8.2.1" in asset URLs → record as the app version
+- Extract versions from HTML meta tags: <meta name="generator" content="WordPress 6.1">
+- Extract versions from HTTP headers: X-Powered-By, X-Generator, X-Drupal-Cache, etc.
+- Extract versions from JS/CSS asset filenames: e.g. jquery-3.6.0.min.js → jQuery 3.6.0
+- If you see asset URLs like "/core/assets/vendor/jquery/jquery.min.js?v=10.6.3", the "v=" value is the CMS version
+
 Schema:
 {
   "device": {
@@ -684,6 +859,7 @@ Schema:
   "ftp_findings": [{"anonymous_allowed": false, "banner": "vsftpd 3.0.3", "files": []}],
   "ssh_findings": [{"version": "OpenSSH 8.2", "algorithms": [], "host_keys": []}],
   "db_findings": [{"type": "mysql", "version": "8.0.27", "databases": [], "notes": ""}],
+  "waf_findings": [{"waf": "Cloudflare", "detected_by": "cf-ray header", "notes": "rate limiting likely"}],
   "other_findings": [{"type": "snmp", "data": "full extracted data"}]
 }
 

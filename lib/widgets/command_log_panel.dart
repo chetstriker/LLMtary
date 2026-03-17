@@ -201,7 +201,9 @@ class _CommandLogPanelState extends State<CommandLogPanel> {
                                           const Divider(color: Color(0xFF00F5FF), height: 1, thickness: 0.5),
                                           const SizedBox(height: 6),
                                           Text(
-                                            log.output,
+                                            log.output.length > 5000
+                                                ? '${log.output.substring(0, 2500)}\n\n... [${log.output.length - 5000} chars truncated] ...\n\n${log.output.substring(log.output.length - 2500)}'
+                                                : log.output,
                                             style: const TextStyle(
                                               color: Color(0xFFCCCCCC),
                                               fontFamily: 'monospace',

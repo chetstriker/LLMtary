@@ -22,6 +22,8 @@ class TargetInputPanel extends StatefulWidget {
   final Target? selectedTarget;
   final Function(Target) onTargetSelected;
   final String projectName;
+  final int projectId;
+  final int Function(String address)? getTargetId;
 
   const TargetInputPanel({
     super.key,
@@ -41,6 +43,8 @@ class TargetInputPanel extends StatefulWidget {
     required this.selectedTarget,
     required this.onTargetSelected,
     this.projectName = 'default',
+    this.projectId = 0,
+    this.getTargetId,
   });
 
   @override
@@ -168,7 +172,11 @@ class _TargetInputPanelState extends State<TargetInputPanel> {
           onPromptResponse: widget.onPromptResponse,
         );
 
-        final filePath = await recon.reconTarget(addr, widget.projectName);
+        final filePath = await recon.reconTarget(
+          addr, widget.projectName,
+          projectId: widget.projectId,
+          targetId: widget.getTargetId?.call(addr) ?? 0,
+        );
 
         if (filePath != null) {
           _updateTargetStatus(addr, TargetStatus.complete, jsonFilePath: filePath);
