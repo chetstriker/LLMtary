@@ -3,7 +3,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:file_picker/file_picker.dart';
+import '../utils/file_dialog.dart';
 import '../models/vulnerability.dart';
 import '../models/command_log.dart';
 import '../models/llm_provider.dart';
@@ -675,7 +675,7 @@ class _MainScreenState extends State<MainScreen> {
       '> ${l.command}\n'
       '${l.output}'
     ).join('\n---\n\n');
-    final path = await FilePicker.platform.saveFile(
+    final path = await FileDialog.saveFile(
       dialogTitle: 'Save Command Logs',
       fileName: 'PenExecute_CommandLogs.txt',
     );
@@ -686,7 +686,7 @@ class _MainScreenState extends State<MainScreen> {
 
   Future<void> _exportPrompts(AppState state) async {
     final content = state.promptLogs.map((log) => '=== PROMPT ===\n${log.prompt}\n\n=== RESPONSE ===\n${log.response}\n').join('\n---\n\n');
-    final path = await FilePicker.platform.saveFile(
+    final path = await FileDialog.saveFile(
       dialogTitle: 'Save Prompts',
       fileName: 'PenExecute_Prompts.txt',
     );
@@ -697,7 +697,7 @@ class _MainScreenState extends State<MainScreen> {
 
   Future<void> _exportDebug(AppState state) async {
     final content = state.debugLogs.map((log) => '[${log.timestamp.toString().substring(11, 19)}] ${log.message}').join('\n');
-    final path = await FilePicker.platform.saveFile(
+    final path = await FileDialog.saveFile(
       dialogTitle: 'Save Debug Log',
       fileName: 'PenExecute_Debug.txt',
     );

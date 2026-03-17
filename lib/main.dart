@@ -4,6 +4,7 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'dart:io';
 import 'screens/home_screen.dart';
 import 'widgets/app_state.dart';
+import 'widgets/resize_border.dart';
 
 void main() {
   if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
@@ -21,14 +22,15 @@ class MyApp extends StatelessWidget {
     return ChangeNotifierProvider(
       create: (_) => AppState()..initialize(),
       child: MaterialApp(
-        title: 'PenExecute',
-        debugShowCheckedModeBanner: false,
-        theme: ThemeData(
-          brightness: Brightness.dark,
-          primaryColor: const Color(0xFF00F5FF),
+          title: 'PenExecute',
+          debugShowCheckedModeBanner: false,
+          theme: ThemeData(
+            brightness: Brightness.dark,
+            primaryColor: Color(0xFF00F5FF),
+          ),
+          builder: (context, child) => ResizeBorder(child: child!),
+          home: HomeScreen(),
         ),
-        home: const HomeScreen(),
-      ),
     );
   }
 }

@@ -79,8 +79,8 @@ class ReconService {
   final Function(String, String)? onPromptResponse;
   final Function(String, String)? onCommandExecuted;
 
-  static const int _maxIterations = 20;
-  static const int _maxIterationsExternal = 25;
+  static const int _maxIterations = 100;
+  static const int _maxIterationsExternal = 100;
 
   ReconService({
     required this.settings,
@@ -161,7 +161,7 @@ class ReconService {
     onProgress?.call('[$address] Starting recon loop (${env.label})...');
 
     for (int iteration = 0; iteration < maxIter; iteration++) {
-      onProgress?.call('[$address] Iteration ${iteration + 1}/$maxIter');
+      onProgress?.call('[$address] Iteration ${iteration + 1}...');
 
       String historyHint = '';
       if (executedCommands.isNotEmpty || unavailableTools.isNotEmpty) {
@@ -205,7 +205,7 @@ class ReconService {
         final reason = decision['conclude_reason'] ?? 'Recon complete';
         // Don't conclude early if there are still unprobed ports/services
         final focusHints = _buildFocusHints(address, findings, env, scope);
-        if (focusHints.isNotEmpty && iteration < maxIter - 3) {
+        if (focusHints.isNotEmpty) {
           history += 'Iteration ${iteration + 1}: LLM tried to CONCLUDE but unprobed services remain — continuing.\n\n';
           onProgress?.call('[$address] Overriding early conclude — unprobed services remain');
           consecutiveFailures = 0;
@@ -347,7 +347,7 @@ class ReconService {
       }
     }
 
-    onProgress?.call('[$address] Max iterations reached, evaluating...');
+    onProgress?.call('[$address] Safety limit reached, evaluating...');
     return await _evaluateAndSave(llmService, address, findings, outputDir);
   }
 
@@ -385,7 +385,7 @@ ${env.shellRules}
 - ALL tool output files MUST use the full absolute path: $outDir
 - NEVER use relative paths like temp/, ./temp/, or just a filename
 - Examples:
-  * gobuster -o output.txt → gobuster ... -o "$outDir/output.txt"
+  * tool -o output.txt → tool ... -o "$outDir/output.txt"
   * curl -o file.txt URL → curl -o "$outDir/file.txt" URL
   * wget URL → wget -P "$outDir" URL
   * command > file.txt → command > "$outDir/file.txt"
@@ -401,20 +401,17 @@ $focusHints
 
 $baseline
 
-## NUCLEI USAGE (CRITICAL — wrong syntax wastes iterations):
-- CORRECT: nuclei -u http://$address -id CVE-2021-41773  (use -id for specific CVEs)
-- CORRECT: nuclei -u http://$address -tags drupal  (use -tags for technology-based scans)
-- CORRECT: nuclei -u http://$address -tags cve,drupal  (combine tags)
-- WRONG: nuclei -u http://$address -t cves/2023/CVE-2023-1234.yaml  (file paths don't exist locally)
-- WRONG: nuclei -u http://$address -t CVE-2023-1234  (not a valid flag value)
-- If you don't know the exact CVE ID, use -tags with the technology name instead
+## TOOL SYNTAX NOTE — NUCLEI (if used):
+- Use -id for specific CVEs: nuclei -u http://$address -id CVE-2021-41773
+- Use -tags for technology scans: nuclei -u http://$address -tags drupal
+- Do NOT use -t with file paths — template files are not present locally
 
 ## CONCLUDE when ALL of these are true:
-- Port scan completed
-- Every open port has been individually probed for banners/versions
-- All web ports have had headers, robots.txt, and directory hints collected
-- No new data has been returned in the last 2 commands
-- OR: host is unreachable / all ports filtered
+- All open ports have been individually probed beyond the initial scan
+- Every service has a version string, banner, or is confirmed unresponsive
+- All web ports have been fingerprinted (headers, tech stack, path enumeration)
+- No new information returned in the last 2 iterations
+- OR: host is unreachable / all ports filtered / WAF blocking all requests
 
 ## RESPONSE (JSON only, no markdown):
 {
@@ -431,60 +428,96 @@ Respond ONLY with valid JSON.''';
   }
 
   String _internalBaseline(String address, _ExecEnv env) => '''
-## BASELINE RECON - INTERNAL TARGET:
-- First: FULL port scan across ALL 65535 ports with service/version detection
-  Unix/WSL: nmap -sV -sC --open -T4 -p- $address
-  Windows: Test-NetConnection $address -Port 80,443,22,21,445,3389,8080,8443,3306,5432
-- CRITICAL: Always use -p- to scan all ports - services frequently run on non-standard ports.
-- Then follow the PRIORITY TARGETS above based on what you find''';
+## RECON OBJECTIVES - INTERNAL TARGET:
+Work through these objectives in order. Use whatever tools are available on the system.
+
+### OBJECTIVE 1 — FULL PORT & SERVICE ENUMERATION
+Collect: Every open TCP/UDP port, service name, product, exact version string, banner.
+Why: Services on non-standard ports are common. Every open port is a potential entry point.
+Approach: Scan all 65535 ports with version detection. On Windows, enumerate common ports first.
+Timing: Use aggressive timing — internal hosts are local and won't rate-limit.
+
+### OBJECTIVE 2 — OS & HOST IDENTIFICATION
+Collect: OS name and version, hostname, domain membership, uptime, MAC/vendor.
+Why: OS determines which exploit classes apply (EternalBlue = Windows, SambaCry = Linux).
+
+### OBJECTIVE 3 — SERVICE DEEP-DIVE (per open port)
+For each open port, collect everything available:
+- Web (HTTP/HTTPS): headers, title, technology stack, CMS name+version, paths, login portals, API endpoints
+- SMB: share list, signing status, OS info, null session access, domain/workgroup
+- FTP: anonymous access, banner, directory listing if accessible
+- SSH: version string, supported algorithms, host key fingerprint
+- Databases: version, accessible without credentials, exposed databases
+- DNS: all record types, zone transfer attempt, recursion enabled
+- SNMP: community strings, system info, interface table
+- RDP: NLA status, encryption level, version
+- Any other service: banner grab, version, protocol fingerprint
+
+### OBJECTIVE 4 — VULNERABILITY SURFACE MAPPING
+Collect: Version strings mapped to known CVE ranges, misconfigurations, weak settings.
+Why: Exact versions enable CVE matching in the analysis phase.
+Approach: Use vulnerability scanning scripts/tools available on the system against identified services.
+
+### CONCLUDE when:
+- All ports have been individually probed beyond the initial scan
+- Every service has a version string or banner (or confirmed unresponsive)
+- No new data returned in last 2 iterations
+- OR: host is down / all ports filtered''';
 
   String _externalBaseline(String address, _ExecEnv env) {
     final isWin = env.isNativeWindows;
-    final dnsCmd = isWin
-        ? 'Resolve-DnsName $address -Type ANY'
-        : 'dig ANY $address +noall +answer && dig MX $address +short && dig NS $address +short && dig TXT $address +short';
-    final subdomainCmd = isWin
-        ? ''
-        : '- Subdomain hints (TWO separate commands):\n'
-          '  Step 1: curl -s "https://crt.sh/?q=%25.$address&output=json" -o /tmp/crtsh_$address.json 2>/dev/null\n'
-          '  Step 2: cat /tmp/crtsh_$address.json | python3 -c "import sys,json; [print(e[\'name_value\']) for e in json.load(sys.stdin)]" 2>/dev/null | sort -u | head -30';
-    final sslCmd = isWin
-        ? '- nmap --script ssl-cert,ssl-enum-ciphers -p 443 $address'
-        : '- nmap --script ssl-cert,ssl-enum-ciphers,ssl-heartbleed,ssl-poodle -p 443 $address\n- testssl.sh --fast $address 2>/dev/null | head -80  (if available)';
-    final harvestCmd = isWin
-        ? ''
-        : '- theHarvester -d $address -b google,bing,crtsh -l 50 2>/dev/null | head -60  (if available)';
+    final winNote = isWin ? '\nNote: Windows — prefer PowerShell/curl equivalents where Unix tools are unavailable.' : '';
     return '''
-## BASELINE RECON - EXTERNAL TARGET:
-External targets require a different approach than internal hosts. Follow this order:
+## RECON OBJECTIVES - EXTERNAL TARGET:$winNote
+External targets differ from internal: rate limiting, WAFs, and firewalls are common.
+Use whatever tools are available. These are OBJECTIVES — not a fixed tool list.
 
-### STEP 1 - DNS & OSINT (do these before port scanning)
-- DNS records: $dnsCmd
-$subdomainCmd
-- WAF/CDN detection: curl -sI https://$address | grep -iE 'cf-ray|x-amz|x-cache|via|server|x-powered'
+### OBJECTIVE 1 — PASSIVE INTELLIGENCE (before any active scanning)
+Collect: DNS records (A, MX, NS, TXT, AAAA, CNAME, SOA), subdomains via certificate
+transparency logs and passive sources, WHOIS/ASN/org data, WAF/CDN presence,
+hosting provider, email addresses, employee names.
+Why: Expands attack surface beyond the single IP. Subdomains often have weaker security.
+CT logs (crt.sh) and passive DNS are free and leave no trace on the target.
+Timing: Do this BEFORE active scanning — it costs nothing and shapes the scan strategy.
 
-### STEP 2 - Port scan (top ports first, then full)
-- Fast top-1000 first (external hosts may rate-limit or block -p-):
-  nmap -sV -sC --open -T3 $address
-- Then full scan if top-1000 found interesting services:
-  nmap -sV --open -T3 -p- $address
-- NOTE: Use -T3 (not -T4) for external targets to avoid triggering rate limits or IDS.
+### OBJECTIVE 2 — PORT & SERVICE ENUMERATION
+Collect: Open ports, service names, product names, exact version strings, banners.
+Why: Version strings are the primary input for CVE matching.
+Approach: Start with top ports for speed — external hosts may rate-limit full scans.
+Follow with full port scan if initial results are promising.
+Timing: Use moderate timing (not aggressive) — external hosts may block or rate-limit.
 
-### STEP 3 - SSL/TLS (for every HTTPS port found)
-$sslCmd
+### OBJECTIVE 3 — SSL/TLS ANALYSIS (every HTTPS port)
+Collect: Certificate CN, SANs (reveals additional hostnames/subdomains), issuer,
+expiry, supported protocol versions, cipher suites, known protocol weaknesses.
+Why: Weak TLS configs are directly exploitable. SANs frequently reveal internal hostnames.
+Use any available tool that can enumerate TLS configuration.
 
-### STEP 4 - Web enumeration (for every HTTP/HTTPS port)
-- Use a larger wordlist for external targets:
-  gobuster dir -u https://$address -w /usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt -q -t 20 2>/dev/null
-  (fallback: /usr/share/wordlists/dirb/common.txt if medium list not present)
-- CMS detection: whatweb https://$address 2>/dev/null || curl -s https://$address | grep -iE '<meta|generator|powered|wp-content|drupal|joomla'
-- If CMS identified from findings, run CMS-specific scanner:
-  * WordPress: wpscan --url https://$address --enumerate p,t,u --no-banner 2>/dev/null
-  * Drupal: droopescan scan drupal -u https://$address 2>/dev/null
-  * Joomla: joomscan -u https://$address 2>/dev/null
+### OBJECTIVE 4 — WEB APPLICATION FINGERPRINTING (every HTTP/HTTPS port)
+Collect: Server/framework headers, technology stack, CMS name and version,
+HTTP methods accepted, robots.txt, sitemap.xml, error page content,
+login portals, admin interfaces, API endpoints, GraphQL, API docs.
+Why: Technology identification maps directly to CVEs. Exposed admin panels are high value.
+Approach: Start with headers and root response, then enumerate paths.
+For CMS: identify first, then use CMS-appropriate enumeration for plugins/themes/users.
 
-### STEP 5 - Email/contact harvesting (for phishing context)
-$harvestCmd''';
+### OBJECTIVE 5 — API & ENDPOINT DISCOVERY
+Collect: REST API versions, GraphQL schema (introspection query), OpenAPI/Swagger specs,
+authentication mechanisms, debug/status/health endpoints, exposed internal paths.
+Why: APIs frequently have weaker authentication and expose more functionality than the UI.
+
+### OBJECTIVE 6 — EMAIL & CONTACT HARVESTING
+Collect: Email addresses, employee names, organisational structure hints.
+Why: Provides phishing targets and username patterns for credential attacks.
+Use passive sources — do not send emails or interact with mail servers.
+
+### CONCLUDE when:
+- Passive intelligence gathered (DNS, CT logs, WAF detection)
+- Port scan completed and all open ports have version strings or banners
+- Every web port has been fingerprinted (headers, tech stack, path enumeration)
+- SSL/TLS analysed on all HTTPS ports
+- No new data returned in last 2 iterations
+- OR: host unreachable / all ports filtered / WAF blocking all requests''';
   }
 
   // ---------------------------------------------------------------------------
@@ -561,7 +594,7 @@ $harvestCmd''';
     // OS fingerprint hint — skip for external (OS fingerprinting is noisy and often blocked)
     final os = device['os'] as String? ?? '';
     if (os.isEmpty && ports.isNotEmpty && !isExternal) {
-      hints.add('- OS not yet identified → run: nmap -O --osscan-guess $address');
+      hints.add('- OS not yet identified — collect OS fingerprint and hostname');
     }
 
     // External-only: SSL/TLS hint for any HTTPS port not yet checked
@@ -575,7 +608,7 @@ $harvestCmd''';
               .cast<Map<String, dynamic>>()
               .any((s) => s['port'] == port && (s['script_id'] as String? ?? '').contains('ssl'));
           if (!alreadyChecked) {
-            hints.add('- SSL/TLS on port $port not yet checked → nmap --script ssl-cert,ssl-enum-ciphers,ssl-heartbleed -p $port $address');
+            hints.add('- SSL/TLS on port $port not yet analysed — collect: protocol versions, cipher suites, certificate CN/SANs, known weaknesses (Heartbleed, POODLE, BEAST, ROBOT)');
           }
         }
       }
@@ -594,185 +627,105 @@ $harvestCmd''';
       final wasProbed = existingFinding.isNotEmpty;
 
       if (!wasProbed) {
-        if (isWin) {
-          hints.add('- Web port $port not yet probed → Invoke-WebRequest -Uri $url -UseBasicParsing | Select-Object StatusCode,Headers');
-        } else {
-          hints.add('- Web port $port not yet probed → curl -sIL $url');
-        }
+        hints.add('- Web port $port not yet probed — collect: HTTP status, server header, technology stack, redirect chain');
       } else if (!hasUsefulContent) {
-        // Got a non-200 at root (404, 403, redirect, etc.) — the app is likely at a sub-path
-        hints.add('- Port $port root returned HTTP $rootStatus — application is likely at a sub-path, enumerate paths:');
-        if (!isWin) {
-          hints.add('  • nmap --script=http-enum -p $port $address  (discovers common app paths)');
-          hints.add('  • gobuster dir -u $url -w /usr/share/wordlists/dirb/common.txt -q 2>/dev/null');
-          hints.add('  • curl -s $url/robots.txt $url/sitemap.xml');
-          hints.add('  • curl -s -o /dev/null -w "%{http_code} %{url_effective}\\n" $url/login $url/admin $url/app $url/api $url/console $url/manager $url/status $url/health');
-        } else {
-          hints.add('  • nmap --script=http-enum -p $port $address');
-          hints.add('  • foreach (\$p in @("/login","/admin","/app","/api","/console","/manager","/status")) { try { \$r = Invoke-WebRequest "$url\$p" -UseBasicParsing -EA Stop; Write-Host "\$p \$(\$r.StatusCode)" } catch { Write-Host "\$p \$(\$_.Exception.Response.StatusCode.value__)" } }');
-        }
+        hints.add('- Port $port root returned HTTP $rootStatus — application likely at a sub-path; enumerate paths and common locations (admin, login, api, console, manager, status, health, docs)');
       } else {
-        // Got 200 at root — go deeper
         final serverHeader = _findWebServer(webFindings, port);
-        // Check if CMS was already identified in findings
         final techs = (webFindings.cast<Map<String, dynamic>>()
             .firstWhere((w) => (w['url'] as String? ?? '').contains(':$port'), orElse: () => {})
             ['technologies'] as List? ?? []).join(' ').toLowerCase();
-        hints.add('- Port $port web server identified${serverHeader.isNotEmpty ? " ($serverHeader)" : ""} → collect more:');
-        if (!isWin) {
-          hints.add('  • Fetch robots.txt: curl -s $url/robots.txt');
-          hints.add('  • Fetch sitemap: curl -s $url/sitemap.xml');
-          // External gets larger wordlist
-          final wordlist = isExternal
-              ? '/usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt'
-              : '/usr/share/wordlists/dirb/common.txt';
-          hints.add('  • Directory enum: gobuster dir -u $url -w $wordlist -q 2>/dev/null || dirb $url /usr/share/wordlists/dirb/common.txt -S 2>/dev/null');
-          hints.add('  • Full headers + redirect chain: curl -sIL $url');
-          if (serverHeader.contains('apache') || serverHeader.contains('nginx') ||
-              serverHeader.contains('iis')) {
-            hints.add('  • Server info page: curl -s $url/server-status 2>/dev/null || curl -s $url/server-info 2>/dev/null');
+        hints.add('- Port $port web service identified${serverHeader.isNotEmpty ? " ($serverHeader)" : ""} — collect more:');
+        hints.add('  • Fetch robots.txt and sitemap.xml');
+        hints.add('  • Enumerate directories and paths${isExternal ? " (use larger wordlist for external targets)" : ""}');
+        hints.add('  • Identify full technology stack and exact versions (server, framework, CMS, JS libraries)');
+        hints.add('  • Check common paths: admin, login, phpmyadmin, manager, api, console, dashboard');
+        hints.add('  • Collect all HTTP response headers');
+        if (isExternal) {
+          hints.add('  • Check HTTP methods accepted (OPTIONS request)');
+          hints.add('  • Probe API surface: /api, /api/v1, /graphql (introspection), /swagger, /openapi.json, /docs');
+          if (techs.contains('wordpress') || techs.contains('wp-')) {
+            hints.add('  • WordPress detected — enumerate plugins, themes, and users');
+          } else if (techs.contains('drupal')) {
+            hints.add('  • Drupal detected — enumerate modules and version');
+          } else if (techs.contains('joomla')) {
+            hints.add('  • Joomla detected — enumerate extensions and version');
+          } else if (techs.isNotEmpty) {
+            hints.add('  • CMS/framework identified — use appropriate enumeration tool');
           }
-          hints.add('  • Technology fingerprint: whatweb $url 2>/dev/null || curl -s $url | grep -iE \'<meta|generator|powered\'');
-          hints.add('  • Common paths: curl -s -o /dev/null -w "%{http_code} %{url_effective}\\n" $url/admin $url/login $url/phpmyadmin $url/manager $url/api $url/console');
-          // CMS-specific scanners (external only — too noisy for internal)
-          if (isExternal) {
-            if (techs.contains('wordpress') || techs.contains('wp-')) {
-              hints.add('  • WordPress scan: wpscan --url $url --enumerate p,t,u --no-banner 2>/dev/null');
-            } else if (techs.contains('drupal')) {
-              hints.add('  • Drupal scan: droopescan scan drupal -u $url 2>/dev/null');
-            } else if (techs.contains('joomla')) {
-              hints.add('  • Joomla scan: joomscan -u $url 2>/dev/null');
-            }
-          }
-        } else {
-          hints.add('  • Fetch robots.txt: curl -s $url/robots.txt');
-          hints.add('  • Common paths: foreach (\$p in @("/admin","/login","/manager","/phpmyadmin","/api","/console")) { \$r = try { Invoke-WebRequest "$url\$p" -UseBasicParsing -EA Stop } catch { \$_.Exception.Response }; Write-Host "\$p \$(\$r.StatusCode)" }');
         }
       }
     }
 
-    // External-only: HTTP method enumeration for web ports
-    if (isExternal && !isWin) {
+    // External-only: HTTP method enumeration and API surface
+    if (isExternal) {
       for (final port in webPorts) {
-        final portEntry = ports.firstWhere((p) => (p['port'] as num?)?.toInt() == port, orElse: () => {});
-        final svc = (portEntry['service'] as String? ?? '').toLowerCase();
-        final scheme = svc.contains('https') || svc.contains('ssl') ? 'https' : 'http';
-        final alreadyChecked = (findings['web_findings'] as List? ?? [])
-            .cast<Map<String, dynamic>>()
-            .any((w) => (w['notes'] as String? ?? '').toLowerCase().contains('options'));
-        if (!alreadyChecked) {
-          hints.add('- HTTP methods on port $port → curl -s -X OPTIONS -i $scheme://$address:$port/ | grep -i allow');
-        }
-      }
-    }
-
-    // External-only: API surface hints
-    if (isExternal && !isWin) {
-      for (final port in webPorts) {
-        final portEntry = ports.firstWhere((p) => (p['port'] as num?)?.toInt() == port, orElse: () => {});
-        final svc = (portEntry['service'] as String? ?? '').toLowerCase();
-        final scheme = svc.contains('https') || svc.contains('ssl') ? 'https' : 'http';
         final existingNotes = (findings['web_findings'] as List? ?? [])
             .cast<Map<String, dynamic>>()
             .firstWhere((w) => (w['url'] as String? ?? '').contains(':$port'), orElse: () => {})
             ['notes'] as String? ?? '';
-        if (!existingNotes.toLowerCase().contains('graphql') &&
-            !existingNotes.toLowerCase().contains('/api')) {
-          hints.add('- API surface on port $port → curl -s -o /dev/null -w "%{http_code} %{url_effective}\\n" '
-              '$scheme://$address:$port/api $scheme://$address:$port/api/v1 '
-              '$scheme://$address:$port/graphql $scheme://$address:$port/swagger '
-              '$scheme://$address:$port/openapi.json $scheme://$address:$port/docs');
-          hints.add('  • GraphQL introspection: curl -s -X POST -H "Content-Type: application/json" '
-              '-d \'{"query":"{__schema{types{name}}}"}\'  $scheme://$address:$port/graphql');
+        final hasApiData = existingNotes.toLowerCase().contains('graphql') ||
+            existingNotes.toLowerCase().contains('/api');
+        if (!hasApiData) {
+          hints.add('- Port $port API surface not yet probed — check for REST API versions, GraphQL (introspection), OpenAPI/Swagger docs, and unauthenticated debug/status endpoints');
         }
       }
     }
 
-    // SMB hints — internal only (almost always firewalled on external targets)
+    // SMB hints — internal only
     for (final port in smbPorts) {
       if (isExternal) continue;
       final alreadyProbed = smbFindings.isNotEmpty;
       if (!alreadyProbed) {
-        if (isWin) {
-          hints.add('- SMB port $port → net view \\\\$address /all');
-          hints.add('- SMB details → nmap --script=smb-os-discovery,smb-security-mode,smb2-security-mode -p $port $address');
-        } else {
-          hints.add('- SMB port $port → smbclient -N -L //$address 2>/dev/null');
-          hints.add('- SMB OS/security → nmap --script=smb-os-discovery,smb-security-mode,smb2-security-mode,smb-enum-shares -p $port $address');
-          hints.add('- SMB full enum → enum4linux -a $address 2>/dev/null (if available)');
-        }
+        hints.add('- SMB port $port not yet probed — collect: share list, null session access, signing status, OS info, domain/workgroup, SMB version, known vulnerabilities (MS17-010, CVE-2017-7494)');
       }
     }
 
     // FTP hints
     for (final port in ftpPorts) {
-      hints.add('- FTP port $port → collect banner + check anonymous access:');
-      if (isWin) {
-        hints.add('  • nmap --script=ftp-anon,ftp-banner,ftp-syst -p $port $address');
-      } else {
-        hints.add('  • nmap --script=ftp-anon,ftp-banner,ftp-syst -p $port $address');
-        hints.add('  • curl -s --connect-timeout 5 ftp://$address:$port/');
-      }
+      hints.add('- FTP port $port — collect: banner/version, anonymous access status, directory listing if accessible');
     }
 
     // SSH hints
     for (final port in sshPorts) {
-      hints.add('- SSH port $port → collect version + supported algorithms:');
-      hints.add('  • nmap --script=ssh2-enum-algos,ssh-hostkey,ssh-auth-methods -p $port $address');
+      hints.add('- SSH port $port — collect: exact version string, supported algorithms, host key fingerprint, authentication methods');
     }
 
     // DNS hints
     for (final port in dnsPorts) {
-      hints.add('- DNS port $port → enumerate records:');
-      if (isWin) {
-        hints.add('  • Resolve-DnsName $address -Type ANY');
-        hints.add('  • Resolve-DnsName $address -Type MX; Resolve-DnsName $address -Type NS');
-      } else {
-        hints.add('  • dig ANY $address @$address +noall +answer');
-        hints.add('  • dig AXFR $address @$address 2>/dev/null (zone transfer attempt - read only)');
-        hints.add('  • dig MX NS TXT $address @$address');
-      }
+      hints.add('- DNS port $port — collect: all record types, zone transfer attempt, recursion status, version string');
     }
 
     // SNMP hints
     for (final port in snmpPorts) {
-      if (!isWin) {
-        hints.add('- SNMP port $port → snmpwalk -v2c -c public $address 2>/dev/null | head -50');
-        hints.add('  • snmpwalk -v1 -c public $address 2>/dev/null | head -50');
-      }
+      hints.add('- SNMP port $port — collect: system info, interface table, running processes, installed software (try community strings: public, private, community)');
     }
 
     // RDP hints
     for (final port in rdpPorts) {
-      hints.add('- RDP port $port → collect encryption/NLA info:');
-      hints.add('  • nmap --script=rdp-enum-encryption,rdp-vuln-ms12-020 -p $port $address');
+      hints.add('- RDP port $port — collect: NLA requirement, encryption level, version, known vulnerabilities (BlueKeep CVE-2019-0708, DejaBlue)');
     }
 
     // Telnet hints
     for (final port in telnetPorts) {
-      hints.add('- Telnet port $port → grab banner:');
-      if (isWin) {
-        hints.add('  • nmap --script=telnet-ntlm-info,banner -p $port $address');
-      } else {
-        hints.add('  • timeout 5 nc -w3 $address $port 2>/dev/null || nmap --script=telnet-ntlm-info,banner -p $port $address');
-      }
+      hints.add('- Telnet port $port — collect: banner, device type, authentication prompt');
     }
 
     // Database hints
     for (final port in mysqlPorts) {
-      hints.add('- MySQL port $port → nmap --script=mysql-info,mysql-databases,mysql-empty-password -p $port $address');
+      hints.add('- MySQL port $port — collect: exact version, unauthenticated access, accessible databases');
     }
     for (final port in postgresPorts) {
-      hints.add('- PostgreSQL port $port → nmap --script=pgsql-brute --script-args brute.mode=user -p $port $address');
+      hints.add('- PostgreSQL port $port — collect: exact version, authentication method, accessible databases');
     }
     for (final port in mssqlPorts) {
-      hints.add('- MSSQL port $port → nmap --script=ms-sql-info,ms-sql-config,ms-sql-empty-password -p $port $address');
+      hints.add('- MSSQL port $port — collect: exact version, instance name, authentication method, sa account status');
     }
 
-    // Unknown ports — grab banners
+    // Unknown ports
     for (final p in unknownPorts) {
       final port = (p['port'] as num?)?.toInt() ?? 0;
-      hints.add('- Port $port has no banner/version yet → nmap -sV --script=banner -p $port $address');
+      hints.add('- Port $port has no banner or version yet — grab banner and identify service');
     }
 
     if (hints.isEmpty) return '';

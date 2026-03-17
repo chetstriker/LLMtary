@@ -14,6 +14,19 @@ struct _MyApplication {
 
 G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
 
+// Called when the window is realized (GDK surface exists) — safe to set
+// Wayland geometry hints here. Must be done post-realize; hints set before
+// realize are silently ignored by the GDK Wayland backend.
+static void on_window_realize(GtkWidget* widget, gpointer) {
+  GtkWindow* window = GTK_WINDOW(widget);
+  GdkGeometry hints;
+  hints.min_width  = 800;
+  hints.min_height = 600;
+  gtk_window_set_geometry_hints(
+      window, nullptr, &hints,
+      static_cast<GdkWindowHints>(GDK_HINT_MIN_SIZE));
+}
+
 // Called when first Flutter frame received.
 static void first_frame_cb(MyApplication* self, FlView* view) {
   gtk_widget_show(gtk_widget_get_toplevel(GTK_WIDGET(view)));
@@ -53,9 +66,11 @@ static void my_application_activate(GApplication* application) {
   }
 
   gtk_window_set_default_size(window, 1280, 720);
-  /* Ensure the window can be resized by the user and has decorations. */
   gtk_window_set_resizable(window, TRUE);
   gtk_window_set_decorated(window, TRUE);
+  gtk_window_set_type_hint(window, GDK_WINDOW_TYPE_HINT_NORMAL);
+  // Geometry hints are applied post-realize in on_window_realize().
+  g_signal_connect(window, "realize", G_CALLBACK(on_window_realize), nullptr);
 
   g_autoptr(FlDartProject) project = fl_dart_project_new();
   fl_dart_project_set_dart_entrypoint_arguments(

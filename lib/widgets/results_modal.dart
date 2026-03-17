@@ -1,6 +1,6 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:file_picker/file_picker.dart';
+import '../utils/file_dialog.dart';
 import '../models/vulnerability.dart';
 import '../models/command_log.dart';
 
@@ -212,7 +212,7 @@ class ResultsModal extends StatelessWidget {
           ].join(',')),
     ];
 
-    final path = await FilePicker.platform.saveFile(
+    final path = await FileDialog.saveFile(
       dialogTitle: 'Save Results',
       fileName: 'PenExecute_Results.csv',
     );

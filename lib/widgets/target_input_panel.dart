@@ -1,6 +1,6 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:file_picker/file_picker.dart';
+import '../utils/file_dialog.dart';
 import '../models/target.dart';
 import '../services/recon_service.dart';
 import '../models/llm_settings.dart';
@@ -81,8 +81,8 @@ class _TargetInputPanelState extends State<TargetInputPanel> {
   }
 
   Future<void> _pickFile() async {
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.custom,
+    final result = await FileDialog.pickFiles(
+      dialogTitle: 'Open target list',
       allowedExtensions: ['txt'],
     );
     if (result != null && result.files.single.path != null) {

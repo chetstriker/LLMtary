@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:dropdown_button2/dropdown_button2.dart';
-import 'package:file_picker/file_picker.dart';
+import '../utils/file_dialog.dart';
 import '../models/llm_provider.dart';
 import '../models/llm_settings.dart';
 import '../services/llm_service.dart';
@@ -55,7 +55,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _changeStoragePath() async {
-    final picked = await FilePicker.platform.getDirectoryPath(dialogTitle: 'Select PenExecute storage folder');
+    final picked = await FileDialog.getDirectoryPath(dialogTitle: 'Select PenExecute storage folder');
     if (picked == null) return;
     StorageService.setCustomBasePath(picked);
     await DatabaseHelper.saveSetting(SettingsKeys.storageBasePath, picked);

@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:archive/archive.dart';
-import 'package:file_picker/file_picker.dart';
+import '../utils/file_dialog.dart';
 import 'package:flutter/material.dart';
 import 'package:pointycastle/export.dart';
 import '../database/database_helper.dart';
@@ -26,7 +26,7 @@ class ProjectPorter {
       final zipBytes = await _buildZip(project);
       final encrypted = _encrypt(zipBytes, password);
 
-      final savePath = await FilePicker.platform.saveFile(
+      final savePath = await FileDialog.saveFile(
         dialogTitle: 'Export Project',
         fileName: '${project.name}.penex',
       );
@@ -49,9 +49,8 @@ class ProjectPorter {
   }
 
   static Future<Project?> importProject(BuildContext context) async {
-    final result = await FilePicker.platform.pickFiles(
+    final result = await FileDialog.pickFiles(
       dialogTitle: 'Import Project',
-      type: FileType.any,
     );
     if (result == null || result.files.single.path == null) return null;
 
