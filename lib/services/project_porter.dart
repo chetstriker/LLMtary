@@ -113,6 +113,18 @@ class ProjectPorter {
       if (t.jsonFilePath.isNotEmpty && await File(t.jsonFilePath).exists()) {
         fileEntries[portablePath] = await File(t.jsonFilePath).readAsBytes();
       }
+      // Include all other files in the target directory
+      final targetDir = Directory(t.jsonFilePath.isNotEmpty
+          ? File(t.jsonFilePath).parent.path
+          : '');
+      if (targetDir.path.isNotEmpty && await targetDir.exists()) {
+        await for (final entity in targetDir.list()) {
+          if (entity is File && entity.path != t.jsonFilePath) {
+            final fileName = entity.uri.pathSegments.last;
+            fileEntries['files/$safeAddr/$fileName'] = await entity.readAsBytes();
+          }
+        }
+      }
     }
 
     // Strip machine-specific IDs, cross-reference by address
@@ -311,6 +323,17 @@ class ProjectPorter {
       final fileEntry = archive.findFile(portablePath);
       if (fileEntry != null) {
         await File(destPath).writeAsBytes(fileEntry.content as List<int>);
+      }
+
+      // Restore all other files for this target from the archive
+      final prefix = 'files/$safeAddr/';
+      for (final entry in archive.files) {
+        if (entry.name.startsWith(prefix) && entry.name != portablePath) {
+          final fileName = entry.name.substring(prefix.length);
+          if (fileName.isNotEmpty && !fileName.contains('/')) {
+            await File('$destDir/$fileName').writeAsBytes(entry.content as List<int>);
+          }
+        }
       }
 
       final target = Target(

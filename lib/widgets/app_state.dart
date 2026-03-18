@@ -80,9 +80,9 @@ class AppState extends ChangeNotifier {
 
     _targets = await DatabaseHelper.getTargets(project.id!);
 
-    // Verify JSON files still exist; exclude targets whose files are missing
+    // Verify JSON files still exist; only exclude targets that haven't been analyzed yet
     for (final t in _targets) {
-      if (t.status == TargetStatus.complete && t.jsonFilePath.isNotEmpty) {
+      if (t.status == TargetStatus.complete && t.jsonFilePath.isNotEmpty && !t.analysisComplete) {
         if (!await File(t.jsonFilePath).exists()) {
           t.status = TargetStatus.excluded;
           await DatabaseHelper.updateTarget(t);
@@ -92,7 +92,7 @@ class AppState extends ChangeNotifier {
     }
 
     // Derive flags after targets are loaded
-    _scanComplete = project.scanComplete || _targets.any((t) => t.status == TargetStatus.complete);
+    _scanComplete = project.scanComplete || _targets.any((t) => t.status == TargetStatus.complete || t.analysisComplete);
     _analysisComplete = project.analysisComplete || _targets.any((t) => t.analysisComplete);
     _hasResults = project.hasResults;
 
