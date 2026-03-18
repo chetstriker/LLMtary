@@ -75,6 +75,7 @@ class ReconService {
   final bool requireApproval;
   final String? adminPassword;
   final Future<String?> Function(String)? onApprovalNeeded;
+  final Future<String?> Function(String)? onPasswordNeeded;
   final Function(String)? onProgress;
   final Function(String, String)? onPromptResponse;
   final Function(String, String)? onCommandExecuted;
@@ -87,6 +88,7 @@ class ReconService {
     this.requireApproval = false,
     this.adminPassword,
     this.onApprovalNeeded,
+    this.onPasswordNeeded,
     this.onProgress,
     this.onPromptResponse,
     this.onCommandExecuted,
@@ -157,6 +159,8 @@ class ReconService {
         : <String>{};
     final unavailableTools = <String>{};
     int consecutiveFailures = 0;
+    bool exhaustedOptions = false;
+    int connectivityFailures = 0;
 
     onProgress?.call('[$address] Starting recon loop (${env.label})...');
 
@@ -164,7 +168,7 @@ class ReconService {
       onProgress?.call('[$address] Iteration ${iteration + 1}...');
 
       String historyHint = '';
-      if (executedCommands.isNotEmpty || unavailableTools.isNotEmpty) {
+      {
         final parts = <String>[];
         if (executedCommands.isNotEmpty) {
           parts.add('## ALREADY EXECUTED - do NOT repeat:\n'
@@ -174,7 +178,14 @@ class ReconService {
           parts.add('## UNAVAILABLE TOOLS - do NOT use:\n'
               '${unavailableTools.map((t) => '- $t').join('\n')}');
         }
-        historyHint = '\n${parts.join('\n\n')}\n';
+        if (connectivityFailures >= 3) {
+          parts.add('## ⚠ HOST UNREACHABLE ($connectivityFailures failures)\n'
+              'DNS resolution and/or connectivity has failed $connectivityFailures times.\n'
+              'Trying a different DNS resolver will NOT fix this — the host does not exist or is down.\n'
+              'You MUST CONCLUDE now with host_useful=false.\n'
+              'Do NOT run any more DNS or ping commands.');
+        }
+        if (parts.isNotEmpty) historyHint = '\n${parts.join('\n\n')}\n';
       }
 
       final prompt = _buildCommandPrompt(
@@ -194,7 +205,7 @@ class ReconService {
         onProgress?.call('[$address] LLM error: $e');
         history += 'Iteration ${iteration + 1}: LLM error: $e\n\n';
         consecutiveFailures++;
-        if (consecutiveFailures >= 3) break;
+        if (consecutiveFailures >= 3) { exhaustedOptions = true; break; }
         continue;
       }
 
@@ -221,7 +232,7 @@ class ReconService {
 
       if (decision['action'] != 'COMMAND') {
         consecutiveFailures++;
-        if (consecutiveFailures >= 3) break;
+        if (consecutiveFailures >= 3) { exhaustedOptions = true; break; }
         continue;
       }
 
@@ -232,14 +243,14 @@ class ReconService {
 
       if (command.isEmpty) {
         consecutiveFailures++;
-        if (consecutiveFailures >= 3) break;
+        if (consecutiveFailures >= 3) { exhaustedOptions = true; break; }
         continue;
       }
 
       if (CommandUtils.isSimilarCommand(command, executedCommands)) {
         history += 'Iteration ${iteration + 1}: SKIPPED duplicate: $command\n\n';
         consecutiveFailures++;
-        if (consecutiveFailures >= 2) break;
+        if (consecutiveFailures >= 5) { exhaustedOptions = true; break; }
         continue;
       }
 
@@ -250,7 +261,7 @@ class ReconService {
         history += 'Iteration ${iteration + 1}: SKIPPED (already run in prior session): $command\n\n';
         onProgress?.call('[$address] Skipping previously run command...');
         consecutiveFailures++;
-        if (consecutiveFailures >= 2) break;
+        if (consecutiveFailures >= 5) { exhaustedOptions = true; break; }
         continue;
       }
 
@@ -264,13 +275,44 @@ class ReconService {
           consecutiveFailures++;
           continue;
         }
+        final toolBinary = CommandExecutor.getToolBinary(tool);
         final exists = await CommandExecutor.checkToolExists(tool, settings, llmService);
+        final checkLog = CommandLog(
+          timestamp: DateTime.now(),
+          command: 'which $toolBinary',
+          output: exists ? '$toolBinary found' : '$toolBinary not found',
+          exitCode: exists ? 0 : 1,
+          vulnerabilityIndex: null,
+          projectId: projectId,
+          targetId: targetId,
+        );
+        await DatabaseHelper.insertCommandLog(checkLog);
+        onCommandExecuted?.call(checkLog.command, checkLog.output);
+
         if (!exists) {
-          unavailableTools.add(tool);
-          history += 'Iteration ${iteration + 1}: $tool not found\n\n';
-          onProgress?.call('[$address] $tool not available, skipping...');
-          consecutiveFailures++;
-          continue;
+          onProgress?.call('[$address] $tool not found, attempting install...');
+          final packageManager = await CommandExecutor.detectPackageManager();
+          final installed = await CommandExecutor.installTool(tool, settings, llmService, adminPassword: adminPassword, onPasswordNeeded: onPasswordNeeded);
+          final installLog = CommandLog(
+            timestamp: DateTime.now(),
+            command: '$packageManager install $tool',
+            output: installed ? 'Successfully installed $tool' : 'Failed to install $tool',
+            exitCode: installed ? 0 : 1,
+            vulnerabilityIndex: null,
+            projectId: projectId,
+            targetId: targetId,
+          );
+          await DatabaseHelper.insertCommandLog(installLog);
+          onCommandExecuted?.call(installLog.command, installLog.output);
+
+          if (!installed) {
+            unavailableTools.add(tool);
+            history += 'Iteration ${iteration + 1}: $tool not found and install failed\n\n';
+            onProgress?.call('[$address] $tool not available, skipping...');
+            consecutiveFailures++;
+            continue;
+          }
+          onProgress?.call('[$address] $tool installed successfully');
         }
       }
 
@@ -335,6 +377,33 @@ class ReconService {
         if (missingTool.isNotEmpty) unavailableTools.add(missingTool);
       }
 
+      // Track DNS/connectivity failures so the LLM is forced to conclude when the host is unreachable.
+      // Patterns that reliably indicate the host cannot be reached:
+      final connectivityFailurePatterns = [
+        'could not resolve',
+        'failed to resolve',
+        'nxdomain',
+        'name or service not known',
+        'no such host',
+        'connection refused',
+        '0 hosts up',
+        'network is unreachable',
+      ];
+      final lowerOutput = output.toLowerCase();
+      // Also treat empty output from a DNS tool (dig/host/nslookup) with non-zero exit as a failure
+      final isDnsTool = ['dig', 'host', 'nslookup', 'drill'].any((t) => command.contains(t));
+      final hasConnectivityFailure = connectivityFailurePatterns.any((p) => lowerOutput.contains(p)) ||
+          (isDnsTool && output.isEmpty && exitCode != 0);
+      if (hasConnectivityFailure) {
+        connectivityFailures++;
+        if (connectivityFailures >= 3) {
+          onProgress?.call('[$address] Connectivity failures: $connectivityFailures — host appears unreachable');
+        }
+      } else if (output.isNotEmpty) {
+        // Successful output resets the connectivity failure streak
+        connectivityFailures = 0;
+      }
+
       history += 'Iteration ${iteration + 1}:\n'
           'Command: $command\n'
           'Purpose: $purpose\n'
@@ -347,7 +416,11 @@ class ReconService {
       }
     }
 
-    onProgress?.call('[$address] Safety limit reached, evaluating...');
+    if (exhaustedOptions) {
+      onProgress?.call('[$address] Exhausted useful options, evaluating...');
+    } else {
+      onProgress?.call('[$address] Safety limit reached ($maxIter iterations), evaluating...');
+    }
     return await _evaluateAndSave(llmService, address, findings, outputDir);
   }
 
@@ -384,11 +457,28 @@ ${env.shellRules}
 ## FILE OUTPUT RULES (CRITICAL):
 - ALL tool output files MUST use the full absolute path: $outDir
 - NEVER use relative paths like temp/, ./temp/, or just a filename
-- Examples:
-  * tool -o output.txt → tool ... -o "$outDir/output.txt"
-  * curl -o file.txt URL → curl -o "$outDir/file.txt" URL
-  * wget URL → wget -P "$outDir" URL
-  * command > file.txt → command > "$outDir/file.txt"
+
+## OUTPUT VISIBILITY RULES (CRITICAL — read carefully):
+When you redirect output to a file with `>`, the output is INVISIBLE to your context.
+You will not be able to see what the command found, and cannot adapt based on the results.
+
+RULE: For diagnostic/short-output commands, use `tee` so output goes BOTH to file AND to your context:
+  * WRONG: dig a target.com > "$outDir/dig_a.txt"
+  * RIGHT:  dig a target.com | tee "$outDir/dig_a.txt"
+  * WRONG: curl -I https://target.com > "$outDir/headers.txt"
+  * RIGHT:  curl -s -I https://target.com | tee "$outDir/headers.txt"
+  * WRONG: whois target.com > "$outDir/whois.txt"
+  * RIGHT:  whois target.com | tee "$outDir/whois.txt"
+
+Use `tee` for: dig, host, nslookup, whois, curl headers, nmap short scans, any command where
+you need to READ the results to decide what to do next.
+
+Use `>` (not tee) ONLY for: large outputs like full nmap port scans, gobuster, ffuf, nikto —
+where you are saving for later analysis and do not need to react to the output immediately.
+
+Do NOT use command substitution like `\$(dig target.com +short)` inside another command's arguments.
+If you need an IP from a DNS lookup, run the DNS lookup first in a separate command, read the result,
+then use the IP directly in the next command.
 
 ## WHAT YOU HAVE FOUND SO FAR:
 ${json.encode(findings)}
@@ -411,7 +501,13 @@ $baseline
 - Every service has a version string, banner, or is confirmed unresponsive
 - All web ports have been fingerprinted (headers, tech stack, path enumeration)
 - No new information returned in the last 2 iterations
-- OR: host is unreachable / all ports filtered / WAF blocking all requests
+- OR: host is truly unreachable (DNS NXDOMAIN AND all ports filtered/timed out)
+
+## host_useful field — CRITICAL:
+- Set host_useful=true whenever port 80 or 443 is open, even if behind a WAF/CDN.
+  Web application vulnerabilities are testable through Cloudflare/CDN at the public address.
+- Set host_useful=false ONLY when: DNS NXDOMAIN AND no open ports AND all connections time out.
+- WAF detected + no origin IP found → still host_useful=true
 
 ## RESPONSE (JSON only, no markdown):
 {
@@ -434,34 +530,63 @@ Work through these objectives in order. Use whatever tools are available on the 
 ### OBJECTIVE 1 — FULL PORT & SERVICE ENUMERATION
 Collect: Every open TCP/UDP port, service name, product, exact version string, banner.
 Why: Services on non-standard ports are common. Every open port is a potential entry point.
-Approach: Scan all 65535 ports with version detection. On Windows, enumerate common ports first.
+Approach: Scan all 65535 TCP ports with version detection, plus key UDP ports (161, 623, 2049).
+Also attempt IPv6 discovery — internal hosts unreachable on IPv4 may respond on IPv6.
 Timing: Use aggressive timing — internal hosts are local and won't rate-limit.
 
 ### OBJECTIVE 2 — OS & HOST IDENTIFICATION
 Collect: OS name and version, hostname, domain membership, uptime, MAC/vendor.
-Why: OS determines which exploit classes apply (EternalBlue = Windows, SambaCry = Linux).
+Why: OS determines which exploit classes apply (EternalBlue = Windows, SambaCry = Linux,
+AD attacks = domain-joined Windows). Domain membership is critical for scoping AD attacks.
 
 ### OBJECTIVE 3 — SERVICE DEEP-DIVE (per open port)
 For each open port, collect everything available:
-- Web (HTTP/HTTPS): headers, title, technology stack, CMS name+version, paths, login portals, API endpoints
-- SMB: share list, signing status, OS info, null session access, domain/workgroup
+- Web (HTTP/HTTPS): headers, title, technology stack, CMS or application name+version,
+  login portals, API endpoints, default credential exposure (admin panels, management UIs)
+- SMB: share list, signing status, OS info, null session access, domain/workgroup, SMB version
+- LDAP (389/636/3268/3269): domain name, naming context, base DN, supported LDAP features,
+  any unauthenticated information disclosure (null bind query)
+- Kerberos (88): domain name confirmation, user enumeration, pre-auth not required (AS-REP)
+- WinRM (5985/5986): authentication methods, OS version
 - FTP: anonymous access, banner, directory listing if accessible
-- SSH: version string, supported algorithms, host key fingerprint
-- Databases: version, accessible without credentials, exposed databases
+- SSH: version string, supported algorithms, host key fingerprint, auth methods
+- Databases (MySQL/MSSQL/PostgreSQL): version, accessible without credentials, exposed databases
+- Redis (6379): unauthenticated access, version, keyspace listing
+- MongoDB (27017): unauthenticated access, database listing
+- Elasticsearch (9200): unauthenticated access, index listing, version, cluster health
+- Memcached (11211): unauthenticated access, stats, cached key names
+- NFS (2049): exported shares, mount permissions, root squash status
+- IPMI (623 UDP): authentication type, cipher suite 0 (unauthenticated), version
 - DNS: all record types, zone transfer attempt, recursion enabled
-- SNMP: community strings, system info, interface table
-- RDP: NLA status, encryption level, version
+- SNMP: community strings (public/private/community), system info, interface table, ARP cache
+- RDP: NLA status, encryption level, version, BlueKeep/DejaBlue indicators
+- VNC: authentication required, version
 - Any other service: banner grab, version, protocol fingerprint
 
-### OBJECTIVE 4 — VULNERABILITY SURFACE MAPPING
-Collect: Version strings mapped to known CVE ranges, misconfigurations, weak settings.
+### OBJECTIVE 4 — ACTIVE DIRECTORY DOMAIN ENUMERATION (when domain membership detected)
+When the host is domain-joined or a domain controller is identified:
+Collect: Domain name, domain controllers list, all domain users, groups, computers,
+password policy, account lockout policy, GPO names, OU structure, trust relationships,
+Kerberoastable accounts (users with SPNs), AS-REP-roastable accounts (no pre-auth),
+AdminCount=1 accounts, privileged group membership (Domain Admins, Enterprise Admins).
+Why: AD misconfigurations are the most common path to domain compromise. SPNs enable
+offline password cracking. Accounts without Kerberos pre-auth leak crackable hashes passively.
+Approach: Use LDAP queries and domain enumeration tools. Unauthenticated null sessions
+may reveal partial data; authenticated sessions (if credentials found) reveal much more.
+
+### OBJECTIVE 5 — VULNERABILITY SURFACE MAPPING
+Collect: Version strings mapped to known CVE ranges, misconfigurations, weak default settings.
 Why: Exact versions enable CVE matching in the analysis phase.
-Approach: Use vulnerability scanning scripts/tools available on the system against identified services.
+Approach: Use vulnerability scanning scripts/tools available on the system against each service.
 
 ### CONCLUDE when:
-- All ports have been individually probed beyond the initial scan
-- Every service has a version string or banner (or confirmed unresponsive)
-- No new data returned in last 2 iterations
+- All 65535 TCP ports scanned with version detection
+- Every open service has a version string, banner, or is confirmed unresponsive
+- All web ports have been fingerprinted (headers, tech stack, path enumeration)
+- If domain-joined: AD enumeration attempted (users, groups, SPNs, pre-auth status)
+- High-value unauthenticated services checked (Redis, MongoDB, Elasticsearch, NFS exports)
+- UDP scan run for SNMP (161), IPMI (623), NFS (2049)
+- No new data returned in last 3 iterations
 - OR: host is down / all ports filtered''';
 
   String _externalBaseline(String address, _ExecEnv env) {
@@ -483,8 +608,8 @@ Timing: Do this BEFORE active scanning — it costs nothing and shapes the scan 
 ### OBJECTIVE 2 — PORT & SERVICE ENUMERATION
 Collect: Open ports, service names, product names, exact version strings, banners.
 Why: Version strings are the primary input for CVE matching.
-Approach: Start with top ports for speed — external hosts may rate-limit full scans.
-Follow with full port scan if initial results are promising.
+Approach: Begin with top-1000 ports, then follow with a full port scan (-p-) if initial
+results are promising. Do not stop at only a handful of common ports.
 Timing: Use moderate timing (not aggressive) — external hosts may block or rate-limit.
 
 ### OBJECTIVE 3 — SSL/TLS ANALYSIS (every HTTPS port)
@@ -498,26 +623,66 @@ Collect: Server/framework headers, technology stack, CMS name and version,
 HTTP methods accepted, robots.txt, sitemap.xml, error page content,
 login portals, admin interfaces, API endpoints, GraphQL, API docs.
 Why: Technology identification maps directly to CVEs. Exposed admin panels are high value.
-Approach: Start with headers and root response, then enumerate paths.
+Approach: Fetch the root page and parse the HTML — look for generator meta tags, JS
+framework hints, inline library names, and version strings in comments or script paths.
+Use a technology identification tool to fingerprint the full stack beyond just HTTP headers.
 For CMS: identify first, then use CMS-appropriate enumeration for plugins/themes/users.
 
-### OBJECTIVE 5 — API & ENDPOINT DISCOVERY
+### OBJECTIVE 5 — SUBDOMAIN ACTIVE ENUMERATION
+Collect: Subdomains beyond what CT logs reveal, by actively brute-forcing DNS names.
+Why: CT logs are passive and incomplete. Active DNS enumeration often finds internal,
+staging, api, dev, and admin subdomains not listed in certificates.
+Approach: Use a DNS brute-force or OSINT tool with a common subdomain wordlist.
+Timing: Do this AFTER passive collection so duplicates are avoided.
+
+### OBJECTIVE 6 — WAF/CDN ORIGIN IP DISCOVERY (CRITICAL when WAF/CDN is detected)
+When a WAF or CDN (Cloudflare, Akamai, Fastly, Sucuri, Incapsula, etc.) is identified:
+- All direct attack attempts against the WAF IP are WASTED EFFORT.
+- FIRST priority: find the real origin server IP hiding behind the WAF.
+Methods to try (in order):
+  1. Historical DNS: look up pre-CDN A records via passive DNS history sources (SecurityTrails,
+     ViewDNS, RiskIQ) — many operators set up CDN without changing DNS everywhere.
+  2. SPF record: dig TXT $address — SPF often lists the real mail/web server IPs.
+  3. MX record IPs: mail servers are frequently on the same subnet as the origin web server.
+  4. Certificate SANs: additional hostnames in the certificate may resolve directly.
+  5. Direct IP probe: if you find a candidate origin IP, verify with curl using Host header.
+Why: Once the real IP is known, you bypass the WAF entirely and can test the raw application.
+
+### OBJECTIVE 7 — API & ENDPOINT DISCOVERY
 Collect: REST API versions, GraphQL schema (introspection query), OpenAPI/Swagger specs,
 authentication mechanisms, debug/status/health endpoints, exposed internal paths.
 Why: APIs frequently have weaker authentication and expose more functionality than the UI.
 
-### OBJECTIVE 6 — EMAIL & CONTACT HARVESTING
+### OBJECTIVE 8 — DIRECTORY & PATH ENUMERATION (when web content is confirmed)
+When a web port returns useful content (not just a WAF block page):
+Collect: Common directories, hidden paths, backup files, config leaks, admin portals.
+Why: Reveals unlinked functionality, exposed files, and entry points not visible from the UI.
+Approach: Use a directory/path brute-force tool with a common wordlist, focused on the
+confirmed technology stack. Use appropriate file extensions for the detected language.
+
+### OBJECTIVE 9 — EMAIL & CONTACT HARVESTING
 Collect: Email addresses, employee names, organisational structure hints.
 Why: Provides phishing targets and username patterns for credential attacks.
 Use passive sources — do not send emails or interact with mail servers.
 
 ### CONCLUDE when:
 - Passive intelligence gathered (DNS, CT logs, WAF detection)
-- Port scan completed and all open ports have version strings or banners
+- Port scan completed (top-1000 minimum) with version strings or banners on all open ports
 - Every web port has been fingerprinted (headers, tech stack, path enumeration)
 - SSL/TLS analysed on all HTTPS ports
+- If WAF/CDN detected: attempted origin IP discovery via passive DNS and SPF/MX methods
+- Active subdomain enumeration attempted
 - No new data returned in last 2 iterations
-- OR: host unreachable / all ports filtered / WAF blocking all requests''';
+- OR: host is truly unreachable (DNS NXDOMAIN, all ports filtered, zero response)
+
+### host_useful field (CRITICAL — read carefully):
+- Set host_useful=true whenever port 80 or 443 is OPEN and responding, even through a WAF/CDN.
+  REASON: Web application vulnerabilities (XSS, CSRF, injection, auth bypass, logic flaws) exist
+  at the application layer and are fully testable through Cloudflare or any other CDN/WAF.
+  Failing to find the origin IP does NOT make the target unreachable — it is accessible at its public address.
+- Set host_useful=false ONLY when the host is completely unreachable:
+  DNS does not resolve (NXDOMAIN) AND no ports are open AND all connection attempts time out.
+- Do NOT set host_useful=false just because: origin IP unknown, WAF detected, or port scan timed out.''';
   }
 
   // ---------------------------------------------------------------------------
@@ -548,6 +713,13 @@ Use passive sources — do not send emails or interact with mail servers.
     final mysqlPorts = <int>[];
     final postgresPorts = <int>[];
     final mssqlPorts = <int>[];
+    final ldapPorts = <int>[];
+    final kerberosPorts = <int>[];
+    final winrmPorts = <int>[];
+    final redisPorts = <int>[];
+    final mongoPorts = <int>[];
+    final elasticPorts = <int>[];
+    final nfsPorts = <int>[];
     final unknownPorts = <Map<String, dynamic>>[];
 
     for (final p in ports) {
@@ -585,6 +757,20 @@ Use passive sources — do not send emails or interact with mail servers.
         postgresPorts.add(port);
       } else if (service.contains('mssql') || service.contains('ms-sql') || service.contains('microsoft sql')) {
         mssqlPorts.add(port);
+      } else if (service.contains('ldap') || port == 389 || port == 636 || port == 3268 || port == 3269) {
+        ldapPorts.add(port);
+      } else if (service.contains('kerberos') || port == 88) {
+        kerberosPorts.add(port);
+      } else if (service.contains('winrm') || service.contains('wsman') || port == 5985 || port == 5986) {
+        winrmPorts.add(port);
+      } else if (service.contains('redis') || port == 6379) {
+        redisPorts.add(port);
+      } else if (service.contains('mongo') || port == 27017 || port == 27018) {
+        mongoPorts.add(port);
+      } else if (service.contains('elastic') || port == 9200 || port == 9300) {
+        elasticPorts.add(port);
+      } else if (service.contains('nfs') || service.contains('mountd') || port == 2049) {
+        nfsPorts.add(port);
       } else {
         // Anything not positively identified goes to unknown for banner grabbing
         unknownPorts.add(p);
@@ -595,6 +781,38 @@ Use passive sources — do not send emails or interact with mail servers.
     final os = device['os'] as String? ?? '';
     if (os.isEmpty && ports.isNotEmpty && !isExternal) {
       hints.add('- OS not yet identified — collect OS fingerprint and hostname');
+    }
+
+    // External-only: WAF/CDN detection and origin IP discovery hint
+    if (isExternal) {
+      final wafKeywords = ['cloudflare', 'akamai', 'fastly', 'sucuri', 'incapsula',
+                           'imperva', 'f5', 'waf', 'cdn', 'proxy'];
+      final wafProduct = ports
+          .map((p) => (p['product'] as String? ?? '').toLowerCase())
+          .firstWhere((prod) => wafKeywords.any((kw) => prod.contains(kw)), orElse: () => '');
+      final wafFindings = findings['waf_findings'] as List? ?? [];
+      final wafDetected = wafProduct.isNotEmpty || wafFindings.isNotEmpty;
+
+      if (wafDetected) {
+        final wafName = wafProduct.isNotEmpty ? wafProduct : 'WAF/CDN';
+        final hasOriginIp = (device['origin_ip'] as String? ?? '').isNotEmpty;
+        if (!hasOriginIp) {
+          hints.add('- $wafName DETECTED — direct attacks against this IP hit the WAF, not the app.');
+          hints.add('  PRIORITY: find the REAL origin server IP before any further web testing:');
+          hints.add('  1. Query historical/passive DNS sources for pre-CDN A records');
+          hints.add('  2. Parse SPF TXT record — it often lists real mail/web server IPs');
+          hints.add('  3. Resolve MX record IPs — mail servers are often on the same subnet');
+          hints.add('  4. Check all SANs from the TLS certificate — some may resolve directly');
+          hints.add('  5. If a candidate IP is found, verify: curl -H "Host: $address" http://CANDIDATE_IP/');
+        } else {
+          hints.add('  - Origin IP identified — test directly against the origin, bypassing the WAF');
+        }
+      }
+    }
+
+    // External-only: comprehensive port scan hint
+    if (isExternal && ports.length < 20) {
+      hints.add('- Only ${ports.length} open port(s) found — ensure a comprehensive port scan has been run (top-1000 minimum). If only a small set of common ports was scanned, run a broader scan now.');
     }
 
     // External-only: SSL/TLS hint for any HTTPS port not yet checked
@@ -722,6 +940,48 @@ Use passive sources — do not send emails or interact with mail servers.
       hints.add('- MSSQL port $port — collect: exact version, instance name, authentication method, sa account status');
     }
 
+    // LDAP hints — internal only
+    for (final port in ldapPorts) {
+      if (isExternal) continue;
+      hints.add('- LDAP port $port — collect: domain name, base DN, null bind (unauthenticated query), naming contexts, domain controllers list, password policy');
+    }
+
+    // Kerberos hints — internal only
+    for (final port in kerberosPorts) {
+      if (isExternal) continue;
+      hints.add('- Kerberos port $port — collect: domain name, enumerate valid usernames, check for accounts with pre-auth disabled (AS-REP roasting candidates), list SPNs (Kerberoasting candidates)');
+    }
+
+    // WinRM hints — internal only
+    for (final port in winrmPorts) {
+      if (isExternal) continue;
+      hints.add('- WinRM port $port — collect: authentication methods accepted, OS version, test for unauthenticated access or default/weak credentials');
+    }
+
+    // Redis hints — internal only
+    for (final port in redisPorts) {
+      if (isExternal) continue;
+      hints.add('- Redis port $port — collect: unauthenticated access (try connecting with no password), server version, CONFIG GET, keyspace listing, check for write access (critical: can write SSH keys or cron jobs)');
+    }
+
+    // MongoDB hints — internal only
+    for (final port in mongoPorts) {
+      if (isExternal) continue;
+      hints.add('- MongoDB port $port — collect: unauthenticated access, database and collection listing, version, check for sensitive data exposure');
+    }
+
+    // Elasticsearch hints — internal only
+    for (final port in elasticPorts) {
+      if (isExternal) continue;
+      hints.add('- Elasticsearch port $port — collect: unauthenticated access (HTTP GET /), cluster info, index listing, version, check for sensitive data in indices');
+    }
+
+    // NFS hints — internal only
+    for (final port in nfsPorts) {
+      if (isExternal) continue;
+      hints.add('- NFS port $port — collect: exported shares list, mount permissions per share, root squash status, check for world-readable or world-writable exports');
+    }
+
     // Unknown ports
     for (final p in unknownPorts) {
       final port = (p['port'] as num?)?.toInt() ?? 0;
@@ -845,8 +1105,18 @@ Respond ONLY with valid JSON.''';
 ## FINDINGS:
 ${json.encode(findings)}
 
-A host IS useful if it has open ports with identified services, version numbers, or banners.
-A host is NOT useful if: no open ports, host down, all ports filtered.
+A host IS useful if ANY of these are true:
+- Port 80 or 443 is open and responding (even through a WAF/CDN proxy — the web application is still testable)
+- Any open port has an identified service, version number, or banner
+- Any network service is confirmed reachable
+
+A host is NOT useful only if ALL of these are true:
+- No open ports found at all
+- Host is down or DNS does not resolve (NXDOMAIN)
+- All connection attempts timed out or were filtered
+
+IMPORTANT: Do NOT mark a host as not useful simply because it is behind Cloudflare, a CDN, or a WAF.
+Port 80/443 behind Cloudflare = web application is fully testable for XSS, CSRF, injection, authentication bypass, etc.
 
 {"useful": true or false, "reason": "brief explanation"}
 

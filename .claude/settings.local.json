@@ -7,7 +7,13 @@
       "Bash(dart fix:*)",
       "Bash(findstr:*)",
       "Bash(wc:*)",
-      "mcp__plugin_claude-mem_mcp-search__save_memory"
+      "mcp__plugin_claude-mem_mcp-search__save_memory",
+      "Bash(sqlite3 /home/chetstriker/Documents/PenExecute/penexecute/.dart_tool/sqflite_common_ffi/databases/penexecute.db \"SELECT id, name FROM projects;\")",
+      "Bash(sqlite3 /home/chetstriker/Documents/PenExecute/penexecute/.dart_tool/sqflite_common_ffi/databases/penexecute.db \"SELECT id, address, status, jsonFilePath, analysisComplete FROM targets WHERE projectId = 7;\")",
+      "Bash(sqlite3 /home/chetstriker/Documents/PenExecute/penexecute/.dart_tool/sqflite_common_ffi/databases/penexecute.db \"SELECT id, address, status, jsonFilePath, analysisComplete FROM targets;\")",
+      "Bash(sqlite3 /home/chetstriker/Documents/PenExecute/penexecute/.dart_tool/sqflite_common_ffi/databases/penexecute.db \".schema targets\")",
+      "Bash(sqlite3 /home/chetstriker/Documents/PenExecute/penexecute/.dart_tool/sqflite_common_ffi/databases/penexecute.db \"INSERT INTO targets \\(projectId, address, jsonFilePath, summary, status, analysisComplete, executionComplete\\) VALUES \\(7, ''www.bmhvt.org'', ''/home/chetstriker/Documents/PenExecute/BMH/www.bmhvt.org/www.bmhvt.org.json'', ''Port 80/443 open \\(Cloudflare proxy\\). Origin IP candidates: smtp.bmhvt.org=64.223.66.176, smtp2=177, smtp3=180. Email via Barracuda ESS, M365. DNSSEC unsigned.'', ''complete'', 0, 0\\);\")",
+      "Bash(sqlite3 /home/chetstriker/Documents/PenExecute/penexecute/.dart_tool/sqflite_common_ffi/databases/penexecute.db \"SELECT id, address, status, analysisComplete, jsonFilePath FROM targets WHERE projectId = 7;\")"
     ]
   }
 }

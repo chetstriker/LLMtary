@@ -10,6 +10,7 @@ class TargetInputPanel extends StatefulWidget {
   final bool requireApproval;
   final String? adminPassword;
   final Future<bool> Function()? onPasswordNeeded;
+  final Future<String?> Function(String)? onInstallPasswordNeeded;
   final Future<String?> Function(String)? onApprovalNeeded;
   final Function(String) onProgress;
   final Function(String, String) onPromptResponse;
@@ -31,6 +32,7 @@ class TargetInputPanel extends StatefulWidget {
     required this.requireApproval,
     this.adminPassword,
     this.onPasswordNeeded,
+    this.onInstallPasswordNeeded,
     this.onApprovalNeeded,
     required this.onProgress,
     required this.onPromptResponse,
@@ -164,6 +166,7 @@ class _TargetInputPanelState extends State<TargetInputPanel> {
           requireApproval: widget.requireApproval,
           adminPassword: widget.adminPassword,
           onApprovalNeeded: widget.onApprovalNeeded,
+          onPasswordNeeded: widget.onInstallPasswordNeeded,
           onCommandExecuted: widget.onCommandExecuted,
           onProgress: (msg) {
             widget.onProgress(msg);

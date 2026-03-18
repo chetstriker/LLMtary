@@ -17,6 +17,14 @@ class PromptTemplates {
 
 ## EXTERNAL TARGET CONTEXT:
 - WAF/CDN may be present — note any WAF-related headers (cf-ray, x-sucuri, x-cache)
+- If a WAF/CDN (Cloudflare, Akamai, etc.) is detected:
+  • Application-layer attacks (XSS, CSRF, SQLi, auth bypass, IDOR, logic flaws) are fully testable
+    through the CDN — Cloudflare proxies HTTP/HTTPS traffic to the origin. Generate these findings
+    whenever evidence for the attack surface exists, exactly as you would without a WAF.
+  • ALSO generate ONE additional finding: "WAF/CDN Origin IP Not Yet Discovered" — noting that
+    direct server-level exploitation (CVE RCE, buffer overflows against specific server software)
+    requires the real origin IP, and describing origin IP discovery methods.
+  • If the origin IP IS known, additionally generate server-software CVE findings against that IP.
 - Focus on: CMS CVEs, exposed APIs, JWT issues, GraphQL introspection, subdomain takeover
 - API testing: check /api, /api/v1, /graphql, /swagger, /openapi.json for unauthenticated access
 - JWT: if tokens are present, check for alg:none, weak secrets, or missing expiry
@@ -44,10 +52,20 @@ ${isExternal ? "- API security: unauthenticated endpoints, GraphQL introspection
 
 ## RULES:
 - Only include findings for HTTP/HTTPS ports
-- Every web port gets at minimum: default credentials, SQLi on login, directory enumeration
+- ONLY generate a finding if the recon data contains direct evidence that the attack surface exists:
+  • Default credentials / brute-force: only if a login form, admin panel, or auth prompt was observed
+  • SQL injection: only if a login form, search field, or URL parameter was seen in the recon data
+  • XSS: only if user-supplied input fields or reflected content was observed
+  • Directory enumeration: only if the port returned HTTP 200 content (not a WAF block or redirect)
+  • API attacks: only if an API path or API-related header was found during recon
+  • CMS-specific attacks: only if the CMS was positively identified with evidence
+- Do NOT generate findings for attack surfaces that were not observed — an open port alone is NOT evidence
+- If a WAF/CDN (Cloudflare, Akamai, etc.) is detected: still generate application-layer findings
+  (XSS, SQLi, auth bypass, IDOR, etc.) if evidence supports them — these work through the CDN.
+  Only skip direct server-software CVE exploitation if the origin IP is unknown.
 - Each attack class is a SEPARATE entry — never group SQLi + XSS together
-- Description MUST include: URL path, HTTP method, parameter name, example payload
-- Confidence for generic web attack classes on any web port = MEDIUM minimum
+- Description MUST include: URL path, HTTP method, parameter name, example payload where evidence exists
+- Assign LOW confidence to any finding where evidence is indirect or inferred
 
 ${_outputFormatBlock()}
 
@@ -175,6 +193,17 @@ Respond ONLY with a valid JSON array. No markdown, no explanations.''';
       'ssrf': ['SSRF'],
       'deserialization': ['DESERIALIZATION'],
       'smb': ['SMB VULNERABILITIES'],
+      'active directory': ['ACTIVE DIRECTORY ATTACKS'],
+      'kerberoast': ['ACTIVE DIRECTORY ATTACKS'],
+      'as-rep': ['ACTIVE DIRECTORY ATTACKS'],
+      'pass-the-hash': ['ACTIVE DIRECTORY ATTACKS'],
+      'ldap': ['ACTIVE DIRECTORY ATTACKS'],
+      'redis': ['UNAUTHENTICATED SERVICE ACCESS'],
+      'mongodb': ['UNAUTHENTICATED SERVICE ACCESS'],
+      'elasticsearch': ['UNAUTHENTICATED SERVICE ACCESS'],
+      'memcached': ['UNAUTHENTICATED SERVICE ACCESS'],
+      'nfs': ['UNAUTHENTICATED SERVICE ACCESS'],
+      'ipmi': ['UNAUTHENTICATED SERVICE ACCESS'],
       'ssl': ['SSL/TLS VULNERABILITIES'],
       'tls': ['SSL/TLS VULNERABILITIES'],
       'dns': ['DNS-BASED VULNERABILITIES'],
@@ -267,7 +296,7 @@ Return a JSON array. Each entry is one specific exploitable issue.
 - Verification: Extract database version or table names
 - CSRF-AWARE TESTING (CRITICAL for modern web apps):
   1. GET the login/form page first: curl -s -c /tmp/cookies.txt http://TARGET/login
-  2. Extract CSRF token: grep -oP 'name="_?csrf[^"]*"\s+value="[^"]*"' or similar
+  2. Extract CSRF token: grep -oP 'name="_?csrf[^"]*"\\s+value="[^"]*"' or similar
   3. POST with token: curl -s -b /tmp/cookies.txt -d "csrf_token=TOKEN&username=admin'--&password=x" http://TARGET/login
   4. For sqlmap with CSRF: sqlmap -u URL --data="csrf=TOKEN&user=test&pass=test" --csrf-token="csrf" --batch
   5. WITHOUT the CSRF token, the server returns a different error page (not auth failure), causing FALSE POSITIVES
@@ -316,6 +345,34 @@ Return a JSON array. Each entry is one specific exploitable issue.
 - PHP: phpggc for gadget chains
 - .NET: ysoserial.net
 - Verification: Code execution or error indicating processing
+
+### ACTIVE DIRECTORY ATTACKS
+- AS-REP Roasting: find accounts with "Do not require Kerberos preauthentication" → request AS-REP hash without credentials → crack hash offline
+  Identify targets via LDAP attribute (userAccountControl flag 0x400000) or enumeration tools
+  Request hash: use any Kerberos AS-REQ tool without pre-auth, save hash in hashcat format
+  Crack: hashcat mode 18200 (-m 18200) against wordlist
+- Kerberoasting: find accounts with SPNs set → request TGS service ticket → crack offline
+  Identify via LDAP query for servicePrincipalName attribute
+  Request ticket: any Kerberos TGS-REQ tool, save in hashcat format
+  Crack: hashcat mode 13100 (-m 13100) against wordlist
+- Pass-the-Hash: use captured NTLM hash directly for authentication without cracking
+  Works against SMB, WinRM, RDP (restricted admin mode)
+  Tool category: pass-the-hash tools; syntax varies by tool
+- LDAP null bind: connect to LDAP on port 389 with no credentials → attempt to read domain objects
+  Test: ldapsearch -x -H ldap://TARGET -b "DC=domain,DC=com" (no bind DN or password)
+  May reveal: usernames, computer names, group memberships, password policy
+- DCSync: if Domain Admin or equivalent privileges obtained → dump all domain password hashes
+  Simulates domain controller replication to extract NTLM hashes for all accounts
+  Requires: Replicating Directory Changes + Replicating Directory Changes All permissions
+
+### UNAUTHENTICATED SERVICE ACCESS
+- Redis (default port 6379): connect directly, run INFO, KEYS *, CONFIG GET
+  If write access: can write SSH authorized_keys or cron jobs for RCE
+- MongoDB (default port 27017): connect directly, show dbs, use db, show collections
+- Elasticsearch (default port 9200): HTTP GET / for cluster info, GET /_cat/indices for data
+- Memcached (default port 11211): connect via netcat, send "stats", "stats items", "stats slabs"
+- NFS: showmount -e TARGET to list exports, then mount if permitted
+- IPMI (port 623 UDP): cipher suite 0 allows authentication bypass; dump password hashes
 
 ### DNS-BASED VULNERABILITIES (dnsmasq, BIND, etc.)
 - CVE-2017-14491: Heap overflow in dnsmasq < 2.78
@@ -435,8 +492,13 @@ To list all available scripts: ls /usr/share/nmap/scripts/ | grep KEYWORD
    - Check what SERVICE/PORT the exploit targets (e.g., TFTP=port 69, DNS=port 53, HTTP=port 80)
 
 ### NUCLEI
-- Scan: nuclei -u URL -t cves/
-- Specific CVE: nuclei -u URL -t CVE-XXXX-XXXXX.yaml
+CRITICAL — correct flag usage (wrong flags silently produce no results):
+- By tag (scan a category): nuclei -u URL -tags cves
+- By technology:           nuclei -u URL -tags wordpress
+- Specific CVE:            nuclei -u URL -id CVE-XXXX-XXXXX
+- Multiple CVEs:           nuclei -u URL -id CVE-XXXX-XXXXX,CVE-YYYY-YYYYY
+- Do NOT use -t with a directory path (e.g. -t cves/) — template directories are
+  not present locally. Use -tags or -id only.
 
 ### HYDRA (Credential Testing)
 - Basic: hydra -l admin -P /usr/share/wordlists/rockyou.txt TARGET SERVICE

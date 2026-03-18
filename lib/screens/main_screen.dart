@@ -94,6 +94,21 @@ class _MainScreenState extends State<MainScreen> {
     return true;
   }
 
+  /// Called mid-scan when a tool needs sudo and no cached credentials exist.
+  /// Shows the password dialog, saves to appState, and returns the password.
+  Future<String?> _onInstallPasswordNeeded(String prompt) async {
+    final appState = context.read<AppState>();
+    if (appState.sessionPasswordEntered) return appState.adminPassword;
+    final password = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const AdminPasswordDialog(),
+    );
+    if (password == null || password.isEmpty) return null;
+    appState.setAdminPassword(password);
+    return password;
+  }
+
   @override
   void dispose() {
     _logScrollController.dispose();
@@ -121,6 +136,7 @@ class _MainScreenState extends State<MainScreen> {
                           requireApproval: appState.requireApproval,
                           adminPassword: appState.adminPassword,
                           onPasswordNeeded: () => _ensureSessionPassword(),
+                          onInstallPasswordNeeded: _onInstallPasswordNeeded,
                           onApprovalNeeded: appState.requireApproval
                               ? (command) async {
                                   _approvalCompleter = Completer<String?>();
@@ -560,6 +576,7 @@ class _MainScreenState extends State<MainScreen> {
                 return await _approvalCompleter!.future;
               }
             : null,
+        onPasswordNeeded: _onInstallPasswordNeeded,
       );
 
       final maxIterations = int.tryParse(await DatabaseHelper.getSetting(SettingsKeys.maxIterations) ?? '10') ?? 10;

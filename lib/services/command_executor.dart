@@ -574,7 +574,7 @@ Respond ONLY with valid JSON.''';
     }
   }
 
-  static Future<String> _detectPackageManager() async {
+  static Future<String> detectPackageManager() async {
     // Check for macOS first
     if (Platform.isMacOS) {
       try {
@@ -620,7 +620,7 @@ Respond ONLY with valid JSON.''';
     return 'apt-get'; // Default fallback
   }
 
-  static Future<bool> installTool(String tool, LLMSettings settings, LLMService llmService, {String? adminPassword}) async {
+  static Future<bool> installTool(String tool, LLMSettings settings, LLMService llmService, {String? adminPassword, Future<String?> Function(String)? onPasswordNeeded}) async {
     try {
       // Handle comma-separated tool names - install the PRIMARY tool only
       final primaryTool = tool.split(',').first.trim().split(' ').first.trim();
@@ -635,7 +635,7 @@ Respond ONLY with valid JSON.''';
       }
 
       final os = await getOsInfo();
-      final packageManager = await _detectPackageManager();
+      final packageManager = await detectPackageManager();
       print('${_timestamp()} DEBUG: Installing on OS: $os (package manager: $packageManager)');
 
       // Build OS-specific prompt
@@ -745,31 +745,68 @@ Respond ONLY with valid JSON.''';
         installCmd = installCmd.replaceAll('sudo ', '');
       }
 
-      // Use sudo -n (non-interactive) to fail fast if password required
-      // Skip for brew (doesn't use sudo), Windows (no sudo), and if adminPassword is provided
-      if (packageManager != 'brew' && !isWindowsNative &&
-          installCmd.contains('sudo ') && !installCmd.contains('sudo -n') && !installCmd.contains('sudo -S')) {
-        installCmd = installCmd.replaceAll('sudo ', 'sudo -n ');
-      }
-
-      // Check if sudo requires password (would cause hang) - skip for Windows native
-      if (installCmd.contains('sudo') && !isWindowsNative) {
-        print('${_timestamp()} DEBUG: Checking sudo access...');
-        try {
-          ProcessResult sudoCheck;
-          if (Platform.isWindows && await isWslAvailable()) {
-            sudoCheck = await Process.run('wsl', ['sudo', '-n', 'true']).timeout(Duration(seconds: 5));
-          } else {
-            sudoCheck = await Process.run('sudo', ['-n', 'true']).timeout(Duration(seconds: 5));
-          }
-          if (sudoCheck.exitCode != 0) {
-            print('${_timestamp()} DEBUG: sudo requires password - cannot install automatically');
-            print('${_timestamp()} DEBUG: User should run: $installCmd');
+      // Sudo handling: two paths depending on whether an admin password is available.
+      final hasSudo = installCmd.contains('sudo ');
+      if (hasSudo && !isWindowsNative && packageManager != 'brew') {
+        if (adminPassword != null && adminPassword.isNotEmpty) {
+          // Password provided — verify it works with sudo -S, then let the install
+          // command run via "echo PASSWORD | sudo -S ..." below. No -n transformation needed.
+          print('${_timestamp()} DEBUG: Admin password provided — verifying sudo -S access...');
+          try {
+            final sudoCheck = await Process.run('bash',
+                ['-c', 'echo "$adminPassword" | sudo -S true 2>/dev/null'])
+                .timeout(const Duration(seconds: 5));
+            if (sudoCheck.exitCode != 0) {
+              print('${_timestamp()} DEBUG: Admin password incorrect or sudo not available');
+              return false;
+            }
+            print('${_timestamp()} DEBUG: sudo -S access confirmed');
+          } catch (e) {
+            print('${_timestamp()} DEBUG: sudo -S check failed: $e');
             return false;
           }
-          print('${_timestamp()} DEBUG: sudo access confirmed (no password needed)');
-        } catch (e) {
-          print('${_timestamp()} DEBUG: sudo check failed: $e - proceeding anyway');
+        } else {
+          // No password — check if sudo is already cached (non-interactive)
+          print('${_timestamp()} DEBUG: No admin password — checking cached sudo access...');
+          try {
+            ProcessResult sudoCheck;
+            if (Platform.isWindows && await isWslAvailable()) {
+              sudoCheck = await Process.run('wsl', ['sudo', '-n', 'true']).timeout(const Duration(seconds: 5));
+            } else {
+              sudoCheck = await Process.run('sudo', ['-n', 'true']).timeout(const Duration(seconds: 5));
+            }
+            if (sudoCheck.exitCode != 0) {
+              print('${_timestamp()} DEBUG: sudo requires password and none was provided — prompting user...');
+              if (onPasswordNeeded != null) {
+                final prompted = await onPasswordNeeded(
+                    'Enter sudo password to install $primaryTool:');
+                if (prompted != null && prompted.isNotEmpty) {
+                  // Verify the prompted password works
+                  final verify = await Process.run('bash',
+                      ['-c', 'echo "$prompted" | sudo -S true 2>/dev/null'])
+                      .timeout(const Duration(seconds: 5));
+                  if (verify.exitCode != 0) {
+                    print('${_timestamp()} DEBUG: Prompted password incorrect');
+                    return false;
+                  }
+                  adminPassword = prompted;
+                  print('${_timestamp()} DEBUG: Prompted password accepted');
+                } else {
+                  print('${_timestamp()} DEBUG: User declined to provide password — cannot install');
+                  return false;
+                }
+              } else {
+                print('${_timestamp()} DEBUG: sudo requires password and none was provided — cannot install');
+                print('${_timestamp()} DEBUG: User should run: $installCmd');
+                return false;
+              }
+            }
+            // Cached — use sudo -n to prevent any interactive prompt
+            installCmd = installCmd.replaceAll('sudo ', 'sudo -n ');
+            print('${_timestamp()} DEBUG: sudo cache confirmed (no password needed)');
+          } catch (e) {
+            print('${_timestamp()} DEBUG: sudo check failed: $e - proceeding anyway');
+          }
         }
       }
 
@@ -826,7 +863,9 @@ Respond ONLY with valid JSON.''';
             process = await Process.start('bash', ['-c', installCmd]);
           }
         } else if (adminPassword != null && adminPassword.isNotEmpty && installCmd.contains('sudo')) {
-          final sudoCmd = 'echo "$adminPassword" | sudo -S bash -c "${installCmd.replaceFirst('sudo', '')}"';
+          // Strip any sudo variant (sudo, sudo -n, sudo -S) — we'll supply our own sudo -S
+          final cmdWithoutSudo = installCmd.replaceFirst(RegExp(r'sudo\s+(-\w+\s+)*'), '').trim();
+          final sudoCmd = 'echo "$adminPassword" | sudo -S bash -c "$cmdWithoutSudo"';
           process = await Process.start('bash', ['-c', sudoCmd]);
         } else {
           process = await Process.start('bash', ['-c', installCmd]);
