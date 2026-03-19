@@ -6,10 +6,12 @@ import 'package:provider/provider.dart';
 import '../utils/file_dialog.dart';
 import '../models/vulnerability.dart';
 import '../models/command_log.dart';
+import '../models/credential.dart';
 import '../models/llm_provider.dart';
 import '../models/target.dart';
 import '../services/vulnerability_analyzer.dart';
 import '../services/exploit_executor.dart';
+import '../services/report_generator.dart';
 import '../services/command_executor.dart';
 import '../database/database_helper.dart';
 import 'settings_screen.dart';
@@ -22,7 +24,6 @@ import '../widgets/debug_log_panel.dart';
 import '../widgets/command_log_panel.dart';
 import '../widgets/vulnerability_table.dart';
 import '../widgets/results_modal.dart';
-import '../constants/app_constants.dart';
 import '../utils/app_exceptions.dart';
 import '../services/storage_service.dart';
 
@@ -243,6 +244,37 @@ class _MainScreenState extends State<MainScreen> {
         ],
       ),
       actions: [
+        // 6.1: Execution status badge — shows current iteration/phase during testing
+        Consumer<AppState>(
+          builder: (context, appState, _) {
+            final status = appState.executionStatus;
+            if (status.isEmpty) return const SizedBox.shrink();
+            return Container(
+              margin: const EdgeInsets.symmetric(vertical: 10),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: const Color(0xFF0A0E27),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: const Color(0xFFFFAA00).withOpacity(0.6)),
+              ),
+              child: Text(status, style: const TextStyle(color: Color(0xFFFFAA00), fontSize: 10, fontFamily: 'monospace')),
+            );
+          },
+        ),
+        const SizedBox(width: 8),
+        // 6.3: Credentials button — shows count badge and opens panel
+        Consumer<AppState>(
+          builder: (context, appState, _) {
+            final count = appState.credentials.length;
+            if (count == 0) return const SizedBox.shrink();
+            return TextButton.icon(
+              icon: const Icon(Icons.key, size: 16, color: Color(0xFF00FF88)),
+              label: Text('CREDS ($count)', style: const TextStyle(color: Color(0xFF00FF88), fontSize: 12, fontWeight: FontWeight.bold, letterSpacing: 0.8)),
+              onPressed: () => _showCredentials(appState),
+            );
+          },
+        ),
+        const SizedBox(width: 4),
         Container(
           margin: const EdgeInsets.symmetric(vertical: 8),
           padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -290,6 +322,24 @@ class _MainScreenState extends State<MainScreen> {
             onPressed: appState.hasResults
                 ? () => _showResults(appState)
                 : null,
+          ),
+        ),
+        const SizedBox(width: 4),
+        Consumer<AppState>(
+          builder: (context, appState, _) => PopupMenuButton<String>(
+            enabled: appState.hasResults,
+            tooltip: 'Export Report',
+            icon: Icon(
+              Icons.download,
+              size: 20,
+              color: appState.hasResults ? const Color(0xFF00F5FF) : Colors.white24,
+            ),
+            onSelected: (format) => _exportReport(appState, format),
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 'html', child: Text('Export HTML Report')),
+              PopupMenuItem(value: 'md',   child: Text('Export Markdown Report')),
+              PopupMenuItem(value: 'csv',  child: Text('Export CSV (Findings)')),
+            ],
           ),
         ),
         const SizedBox(width: 4),
@@ -448,7 +498,11 @@ class _MainScreenState extends State<MainScreen> {
             appState.addPromptLog(prompt, response);
           },
         );
-        final vulns = await analyzer.analyzeDevice(deviceJson, appState.llmSettings);
+        final vulns = await analyzer.analyzeDevice(
+          deviceJson,
+          appState.llmSettings,
+          confirmedFindingsContext: appState.confirmedFindingsPromptBlock(target.address),
+        );
 
         appState.addDebugLog('Found ${vulns.length} vulnerabilities for ${target.address}');
         for (final v in vulns) {
@@ -577,18 +631,93 @@ class _MainScreenState extends State<MainScreen> {
               }
             : null,
         onPasswordNeeded: _onInstallPasswordNeeded,
+        credentialBankContext: appState.credentialBankPromptBlock(vuln.targetAddress),
+        confirmedFindingsContext: appState.confirmedFindingsPromptBlock(vuln.targetAddress),
+        onCredentialsFound: (credMaps) {
+          for (final m in credMaps) {
+            appState.addCredential(DiscoveredCredential(
+              service: m['service'] ?? '',
+              host: m['host'] ?? vuln.targetAddress,
+              username: m['username'] ?? '',
+              secret: m['secret'] ?? '',
+              secretType: m['secretType'] ?? 'password',
+              sourceVuln: vuln.problem,
+              discoveredAt: DateTime.now(),
+            ));
+          }
+        },
+        onPhaseUpdate: (iter, max, phase) {
+          final title = vuln.problem.length > 30 ? '${vuln.problem.substring(0, 30)}…' : vuln.problem;
+          appState.setExecutionStatus('$title: Iter $iter/$max — $phase');
+        },
       );
 
-      final maxIterations = int.tryParse(await DatabaseHelper.getSetting(SettingsKeys.maxIterations) ?? '10') ?? 10;
       final targetId = appState.targets
           .firstWhere((t) => t.address == vuln.targetAddress, orElse: () => appState.selectedTarget ?? appState.targets.first)
           .id ?? 0;
       final status = await executor.testVulnerability(
-        vuln, appState.llmSettings, appState.requireApproval, maxIterations,
+        vuln, appState.llmSettings, appState.requireApproval,
         projectId: appState.currentProject?.id ?? 0,
         targetId: targetId,
       );
       vuln.status = status;
+      // 2.4: Feed confirmed artifacts into the chain for subsequent vuln tests
+      if (status == VulnerabilityStatus.confirmed) {
+        appState.addConfirmedArtifact(vuln);
+        // 2.7: Post-exploitation enumeration — queue a follow-on pseudo-vuln for RCE/auth bypass
+        final vtype = vuln.vulnerabilityType.toLowerCase();
+        final vproblem = vuln.problem.toLowerCase();
+        final isHighValueAccess = vtype.contains('rce') ||
+            vtype.contains('remote code') ||
+            vtype.contains('auth bypass') ||
+            vtype.contains('default credentials') ||
+            vtype.contains('command injection') ||
+            vproblem.contains('rce') ||
+            vproblem.contains('remote code execution') ||
+            vproblem.contains('command injection') ||
+            vproblem.contains('authentication bypass') ||
+            vproblem.contains('default credential');
+        final postExploitAlreadyQueued = appState.vulnerabilities.any((v) =>
+            v.targetAddress == vuln.targetAddress &&
+            v.problem.startsWith('Post-Exploitation Enumeration'));
+        if (isHighValueAccess && !postExploitAlreadyQueued) {
+          final postExploit = Vulnerability(
+            problem: 'Post-Exploitation Enumeration (via ${vuln.problem})',
+            description:
+                'A confirmed ${vuln.vulnerabilityType} was obtained against this target. '
+                'This pseudo-vulnerability drives post-exploitation enumeration to demonstrate '
+                'the full impact of the access achieved.\n\n'
+                'Objectives:\n'
+                '- Enumerate local users, groups, and privilege context\n'
+                '- Identify network interfaces, routes, and adjacent hosts\n'
+                '- Discover running services and listening ports\n'
+                '- Find readable files containing credentials, keys, or configuration\n'
+                '- Identify paths to privilege escalation if not already at highest privilege\n'
+                '- Document what an attacker could achieve from this foothold',
+            severity: 'CRITICAL',
+            confidence: 'HIGH',
+            evidence: 'Confirmed access via: ${vuln.problem}',
+            recommendation:
+                'Patch the confirmed vulnerability that granted access. Apply principle of least '
+                'privilege to limit what an attacker can enumerate post-compromise.',
+            vulnerabilityType: 'Privilege Escalation',
+            attackVector: vuln.attackVector,
+            attackComplexity: 'LOW',
+            privilegesRequired: 'LOW',
+            userInteraction: 'NONE',
+            scope: 'CHANGED',
+            confidentialityImpact: 'HIGH',
+            integrityImpact: 'HIGH',
+            availabilityImpact: 'HIGH',
+            targetAddress: vuln.targetAddress,
+            targetId: vuln.targetId,
+            projectId: vuln.projectId,
+            status: VulnerabilityStatus.pending,
+            selected: true,
+          );
+          await DatabaseHelper.insertVulnerability(postExploit);
+        }
+      }
       await DatabaseHelper.updateVulnerability(vuln);
 
       final selectedStates = {for (var v in appState.vulnerabilities) v.id: v.selected};
@@ -616,10 +745,52 @@ class _MainScreenState extends State<MainScreen> {
       }
     }
 
+    appState.setExecutionStatus('');
     setState(() => _isExecuting = false);
 
     appState.setHasResults(true);
     if (mounted) _showResults(appState);
+  }
+
+  void _showCredentials(AppState appState) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1F3A),
+        title: const Text('Discovered Credentials', style: TextStyle(color: Color(0xFF00FF88), fontWeight: FontWeight.bold)),
+        content: SizedBox(
+          width: 600,
+          child: appState.credentials.isEmpty
+              ? const Text('No credentials discovered yet.', style: TextStyle(color: Colors.white70))
+              : SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: appState.credentials.map((c) => Container(
+                      margin: const EdgeInsets.only(bottom: 8),
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF0A0E27),
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: const Color(0xFF00FF88).withValues(alpha: 0.3)),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('${c.service} @ ${c.host}', style: const TextStyle(color: Color(0xFF00FF88), fontFamily: 'monospace', fontSize: 12, fontWeight: FontWeight.bold)),
+                          const SizedBox(height: 4),
+                          Text('User: ${c.username}  |  ${c.secretType}: ${c.secret}', style: const TextStyle(color: Colors.white, fontFamily: 'monospace', fontSize: 12)),
+                          Text('Source: ${c.sourceVuln}', style: const TextStyle(color: Colors.white38, fontSize: 11)),
+                        ],
+                      ),
+                    )).toList(),
+                  ),
+                ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('CLOSE', style: TextStyle(color: Color(0xFF00F5FF)))),
+        ],
+      ),
+    );
   }
 
   void _showResults(AppState appState) {
@@ -720,6 +891,57 @@ class _MainScreenState extends State<MainScreen> {
     );
     if (path != null) {
       await File(path).writeAsString(content);
+    }
+  }
+
+  Future<void> _exportReport(AppState state, String format) async {
+    final vulns = state.vulnerabilities;
+    if (vulns.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No findings to export')),
+      );
+      return;
+    }
+    final project = state.currentProject;
+    if (project == null) return;
+
+    final String content;
+    final String fileName;
+    switch (format) {
+      case 'html':
+        content = ReportGenerator.generateHtml(
+          project: project,
+          targets: state.targets,
+          vulnerabilities: vulns,
+          credentials: state.credentials.toList(),
+        );
+        fileName = '${project.name.replaceAll(' ', '_')}_Report.html';
+      case 'md':
+        content = ReportGenerator.generateMarkdown(
+          project: project,
+          targets: state.targets,
+          vulnerabilities: vulns,
+          credentials: state.credentials.toList(),
+        );
+        fileName = '${project.name.replaceAll(' ', '_')}_Report.md';
+      case 'csv':
+        content = ReportGenerator.generateCsv(vulnerabilities: vulns);
+        fileName = '${project.name.replaceAll(' ', '_')}_Findings.csv';
+      default:
+        return;
+    }
+
+    final path = await FileDialog.saveFile(
+      dialogTitle: 'Export Report',
+      fileName: fileName,
+    );
+    if (path != null) {
+      await File(path).writeAsString(content);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Report saved to $path')),
+        );
+      }
     }
   }
 }

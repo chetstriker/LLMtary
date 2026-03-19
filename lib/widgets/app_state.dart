@@ -6,6 +6,7 @@ import '../models/llm_settings.dart';
 import '../models/llm_provider.dart';
 import '../models/target.dart';
 import '../models/project.dart';
+import '../models/credential.dart';
 import '../database/database_helper.dart';
 import '../constants/app_constants.dart';
 import '../services/storage_service.dart';
@@ -29,6 +30,9 @@ class AppState extends ChangeNotifier {
   LLMSettings _llmSettings = LLMSettings.defaultSettings();
   final List<PromptLog> _promptLogs = [];
   final List<DebugLog> _debugLogs = [];
+  final List<DiscoveredCredential> _credentials = [];
+  final List<Map<String, String>> _confirmedArtifacts = [];
+  String _executionStatus = '';
   String? _adminPassword;
   String? _pendingCommand;
   bool _requireApproval = true;
@@ -44,6 +48,9 @@ class AppState extends ChangeNotifier {
   LLMSettings get llmSettings => _llmSettings;
   List<PromptLog> get promptLogs => _promptLogs;
   List<DebugLog> get debugLogs => _debugLogs;
+  List<DiscoveredCredential> get credentials => List.unmodifiable(_credentials);
+  List<Map<String, String>> get confirmedArtifacts => List.unmodifiable(_confirmedArtifacts);
+  String get executionStatus => _executionStatus;
   String? get adminPassword => _adminPassword;
   String? get pendingCommand => _pendingCommand;
   bool get requireApproval => _requireApproval;
@@ -58,6 +65,60 @@ class AppState extends ChangeNotifier {
   int get _projectId => _currentProject?.id ?? 0;
   int get _activeTargetId => _selectedTarget?.id ?? 0;
 
+  /// Add a credential to the bank, deduplicating by fingerprint.
+  void addCredential(DiscoveredCredential cred) {
+    final fp = cred.fingerprint;
+    if (_credentials.any((c) => c.fingerprint == fp)) return;
+    _credentials.add(cred);
+    notifyListeners();
+  }
+
+  /// Return all credentials relevant to [host] as a formatted prompt block,
+  /// or an empty string if the bank is empty.
+  String credentialBankPromptBlock(String host) {
+    if (_credentials.isEmpty) return '';
+    final all = _credentials.map((c) => '  - ${c.toPromptLine()}').join('\n');
+    return '''
+## CREDENTIAL BANK — previously discovered credentials for this project:
+$all
+Try these credentials against this target before generating new approaches.
+''';
+  }
+
+  /// Record a confirmed vulnerability's artifacts for cross-vuln chaining.
+  void addConfirmedArtifact(Vulnerability vuln) {
+    if (vuln.status != VulnerabilityStatus.confirmed) return;
+    final evidence = vuln.statusReason.isNotEmpty ? vuln.statusReason : vuln.evidence;
+    _confirmedArtifacts.add({
+      'problem': vuln.problem,
+      'type': vuln.vulnerabilityType,
+      'target': vuln.targetAddress,
+      'evidence': evidence.length > 300 ? evidence.substring(0, 300) : evidence,
+    });
+    notifyListeners();
+  }
+
+  /// Build a prompt block describing confirmed findings on [targetAddress]
+  /// that subsequent vulnerability tests can chain from.
+  String confirmedFindingsPromptBlock(String targetAddress) {
+    final relevant = _confirmedArtifacts.where((a) => a['target'] == targetAddress).toList();
+    if (relevant.isEmpty) return '';
+    final lines = relevant
+        .map((a) => '  - [${a['type']}] ${a['problem']}: ${a['evidence']}')
+        .join('\n');
+    return '''
+## CONFIRMED FINDINGS ON THIS TARGET (chain from these):
+$lines
+NOTE: Use these as stepping stones. If RCE is confirmed, enumerate further (users, files, creds). If credentials were found, try them on every other service. If LFI was confirmed, read config files for database credentials and SSH keys.
+''';
+  }
+
+  /// Update the current execution status string shown in the UI.
+  void setExecutionStatus(String status) {
+    _executionStatus = status;
+    notifyListeners();
+  }
+
   Future<void> setCurrentProject(Project? project) async {
     _currentProject = project;
     _adminPassword = null;
@@ -67,6 +128,9 @@ class AppState extends ChangeNotifier {
     _commandLogs = [];
     _promptLogs.clear();
     _debugLogs.clear();
+    _credentials.clear();
+    _confirmedArtifacts.clear();
+    _executionStatus = '';
     _scanComplete = false;
     _analysisComplete = false;
     _hasResults = false;

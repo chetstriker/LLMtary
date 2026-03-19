@@ -16,7 +16,6 @@ class AppColors {
 /// Database settings keys.
 class SettingsKeys {
   static const requireApproval = 'require_approval';
-  static const maxIterations = 'max_iterations';
   static const temperature = 'temperature';
   static const maxTokens = 'maxTokens';
   static const timeoutSeconds = 'timeoutSeconds';
@@ -25,6 +24,7 @@ class SettingsKeys {
   static const baseUrl = 'baseUrl';
   static const apiKey = 'apiKey';
   static const storageBasePath = 'storage_base_path';
+  static const String maxIterations = 'maxIterations';
 }
 
 /// Default configuration values.
@@ -32,5 +32,5 @@ class ConfigDefaults {
   static const double temperature = 0.22;
   static const int maxTokens = 4096;
   static const int timeoutSeconds = 240;
-  static const int maxIterations = 10;
+  static const int maxIterations = 30;
 }
