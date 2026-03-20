@@ -8,6 +8,7 @@ import 'package:pointycastle/export.dart';
 import '../database/database_helper.dart';
 import '../models/project.dart';
 import '../models/target.dart';
+import '../models/credential.dart';
 import '../services/storage_service.dart';
 import '../widgets/admin_password_dialog.dart';
 
@@ -96,6 +97,7 @@ class ProjectPorter {
     final cmdLogs = await DatabaseHelper.getCommandLogs(projectId);
     final promptMaps = await DatabaseHelper.getPromptLogs(projectId);
     final debugMaps = await DatabaseHelper.getDebugLogs(projectId);
+    final creds = await DatabaseHelper.getCredentialsByProject(projectId);
 
     // Build address → portable path map
     final targetEntries = <Map<String, dynamic>>[];
@@ -109,6 +111,8 @@ class ProjectPorter {
         'jsonFilePath': portablePath,
         'summary': t.summary,
         'status': t.status.name,
+        'analysisComplete': t.analysisComplete,
+        'executionComplete': t.executionComplete,
       });
       if (t.jsonFilePath.isNotEmpty && await File(t.jsonFilePath).exists()) {
         fileEntries[portablePath] = await File(t.jsonFilePath).readAsBytes();
@@ -183,8 +187,20 @@ class ProjectPorter {
             })
         .toList();
 
+    final credEntries = creds
+        .map((c) => {
+              'service': c.service,
+              'host': c.host,
+              'username': c.username,
+              'secret': c.secret,
+              'secret_type': c.secretType,
+              'source_vuln': c.sourceVuln,
+              'discovered_at': c.discoveredAt.toIso8601String(),
+            })
+        .toList();
+
     final manifest = {
-      'penex_version': 1,
+      'penex_version': 2,
       'exported_at': DateTime.now().toUtc().toIso8601String(),
       'exported_from_os': Platform.operatingSystem,
       'project': {
@@ -195,12 +211,21 @@ class ProjectPorter {
         'scanComplete': project.scanComplete,
         'analysisComplete': project.analysisComplete,
         'hasResults': project.hasResults,
+        'first_analysis_at': project.firstAnalysisAt?.toIso8601String(),
+        'last_execution_at': project.lastExecutionAt?.toIso8601String(),
+        'report_title': project.reportTitle,
+        'pentester_name': project.pentesterName,
+        'executive_summary': project.executiveSummary,
+        'methodology': project.methodology,
+        'risk_rating_model': project.riskRatingModel,
+        'conclusion': project.conclusion,
       },
       'targets': targetEntries,
       'vulnerabilities': vulnEntries,
       'command_logs': cmdEntries,
       'prompt_logs': promptEntries,
       'debug_logs': debugEntries,
+      'credentials': credEntries,
     };
 
     final archive = Archive();
@@ -295,6 +320,14 @@ class ProjectPorter {
       scanComplete: projectData['scanComplete'] as bool? ?? false,
       analysisComplete: projectData['analysisComplete'] as bool? ?? false,
       hasResults: projectData['hasResults'] as bool? ?? false,
+      firstAnalysisAt: DateTime.tryParse(projectData['first_analysis_at'] as String? ?? ''),
+      lastExecutionAt: DateTime.tryParse(projectData['last_execution_at'] as String? ?? ''),
+      reportTitle: projectData['report_title'] as String?,
+      pentesterName: projectData['pentester_name'] as String?,
+      executiveSummary: projectData['executive_summary'] as String?,
+      methodology: projectData['methodology'] as String?,
+      riskRatingModel: projectData['risk_rating_model'] as String?,
+      conclusion: projectData['conclusion'] as String?,
     );
     final projectId = await DatabaseHelper.insertProject(project);
     final insertedProject = Project(
@@ -306,6 +339,14 @@ class ProjectPorter {
       scanComplete: project.scanComplete,
       analysisComplete: project.analysisComplete,
       hasResults: project.hasResults,
+      firstAnalysisAt: project.firstAnalysisAt,
+      lastExecutionAt: project.lastExecutionAt,
+      reportTitle: project.reportTitle,
+      pentesterName: project.pentesterName,
+      executiveSummary: project.executiveSummary,
+      methodology: project.methodology,
+      riskRatingModel: project.riskRatingModel,
+      conclusion: project.conclusion,
     );
 
     // Insert targets + write recon files, build address → targetId map
@@ -345,6 +386,8 @@ class ProjectPorter {
           (e) => e.name == t['status'],
           orElse: () => TargetStatus.complete,
         ),
+        analysisComplete: t['analysisComplete'] as bool? ?? false,
+        executionComplete: t['executionComplete'] as bool? ?? false,
       );
       final targetId = await DatabaseHelper.insertTarget(projectId, target);
       addressToTargetId[address] = targetId;
@@ -409,6 +452,20 @@ class ProjectPorter {
       final addr = d['targetAddress'] as String? ?? '';
       final targetId = addressToTargetId[addr] ?? 0;
       await DatabaseHelper.insertDebugLog(projectId, targetId, d['message'] as String? ?? '');
+    }
+
+    // Insert credentials
+    for (final c in (manifest['credentials'] as List? ?? []).cast<Map<String, dynamic>>()) {
+      final cred = DiscoveredCredential(
+        service: c['service'] as String? ?? '',
+        host: c['host'] as String? ?? '',
+        username: c['username'] as String? ?? '',
+        secret: c['secret'] as String? ?? '',
+        secretType: c['secret_type'] as String? ?? 'password',
+        sourceVuln: c['source_vuln'] as String? ?? '',
+        discoveredAt: DateTime.tryParse(c['discovered_at'] as String? ?? '') ?? now,
+      );
+      await DatabaseHelper.insertCredential(cred, projectId);
     }
 
     if (context.mounted) {

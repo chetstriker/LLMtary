@@ -10,6 +10,7 @@ import '../models/credential.dart';
 import '../database/database_helper.dart';
 import '../constants/app_constants.dart';
 import '../services/storage_service.dart';
+import '../services/background_process_manager.dart';
 
 class PromptLog {
   final String prompt;
@@ -31,7 +32,11 @@ class AppState extends ChangeNotifier {
   final List<PromptLog> _promptLogs = [];
   final List<DebugLog> _debugLogs = [];
   final List<DiscoveredCredential> _credentials = [];
+  final Set<String> _credentialFingerprints = {};
   final List<Map<String, String>> _confirmedArtifacts = [];
+  /// Tracks which target addresses have already received an authenticated
+  /// re-analysis pass so we don't re-run it on every subsequent execution.
+  final Set<String> _authenticatedReanalysisTargets = {};
   String _executionStatus = '';
   String? _adminPassword;
   String? _pendingCommand;
@@ -45,6 +50,8 @@ class AppState extends ChangeNotifier {
 
   List<Vulnerability> get vulnerabilities => _vulnerabilities;
   List<CommandLog> get commandLogs => _commandLogs;
+  List<String> get projectScope =>
+      _targets.map((t) => t.address).toSet().toList()..sort();
   LLMSettings get llmSettings => _llmSettings;
   List<PromptLog> get promptLogs => _promptLogs;
   List<DebugLog> get debugLogs => _debugLogs;
@@ -66,23 +73,38 @@ class AppState extends ChangeNotifier {
   int get _activeTargetId => _selectedTarget?.id ?? 0;
 
   /// Add a credential to the bank, deduplicating by fingerprint.
+  /// Only verified (extracted_from_output) credentials are persisted to DB.
+  /// Inferred credentials are kept in memory for prompt injection but not saved.
   void addCredential(DiscoveredCredential cred) {
     final fp = cred.fingerprint;
-    if (_credentials.any((c) => c.fingerprint == fp)) return;
+    if (_credentialFingerprints.contains(fp)) return;
+    _credentialFingerprints.add(fp);
     _credentials.add(cred);
+    // Only persist credentials that were actually observed in command output
+    if (cred.isVerified && _currentProject?.id != null) {
+      DatabaseHelper.insertCredential(cred, _currentProject!.id!);
+    }
     notifyListeners();
   }
 
-  /// Return all credentials relevant to [host] as a formatted prompt block,
-  /// or an empty string if the bank is empty.
+  /// Return all credentials as a formatted prompt block for LLM injection.
+  /// Verified creds are labeled [CONFIRMED from output]; inferred are labeled
+  /// [INFERRED — not verified] so the LLM knows to treat them with less certainty.
   String credentialBankPromptBlock(String host) {
     if (_credentials.isEmpty) return '';
-    final all = _credentials.map((c) => '  - ${c.toPromptLine()}').join('\n');
-    return '''
-## CREDENTIAL BANK — previously discovered credentials for this project:
-$all
-Try these credentials against this target before generating new approaches.
-''';
+    final verified = _credentials.where((c) => c.isVerified).toList();
+    final inferred = _credentials.where((c) => !c.isVerified).toList();
+    final buf = StringBuffer('## CREDENTIAL BANK — previously discovered credentials for this project:\n');
+    if (verified.isNotEmpty) {
+      buf.writeln('### Confirmed credentials (seen in command output — high confidence):');
+      for (final c in verified) { buf.writeln('  - ${c.toPromptLine()}'); }
+    }
+    if (inferred.isNotEmpty) {
+      buf.writeln('### Inferred credentials (LLM-suggested, not yet verified — try but do not assume valid):');
+      for (final c in inferred) { buf.writeln('  - ${c.toPromptLine()}'); }
+    }
+    buf.writeln('Try confirmed credentials against this target first.');
+    return buf.toString();
   }
 
   /// Record a confirmed vulnerability's artifacts for cross-vuln chaining.
@@ -94,8 +116,27 @@ Try these credentials against this target before generating new approaches.
       'type': vuln.vulnerabilityType,
       'target': vuln.targetAddress,
       'evidence': evidence.length > 300 ? evidence.substring(0, 300) : evidence,
+      'accessSurface': _deriveAccessSurface(vuln),
     });
     notifyListeners();
+  }
+
+  String _deriveAccessSurface(Vulnerability vuln) {
+    final t = vuln.vulnerabilityType.toLowerCase();
+    if (t.contains('rce') || t.contains('command injection')) {
+      return 'OS command execution on ${vuln.targetAddress} — enumerate users, files, running processes, network connections, and credentials.';
+    } else if (t.contains('sqli') || t.contains('sql injection')) {
+      return 'Database query access on ${vuln.targetAddress} — extract schemas, user tables, hashed passwords, and session tokens.';
+    } else if (t.contains('auth bypass') || t.contains('default credential')) {
+      return 'Authenticated session on ${vuln.targetAddress} — attempt privilege escalation, access admin functions, and enumerate internal resources.';
+    } else if (t.contains('lfi') || t.contains('path traversal')) {
+      return 'File read access on ${vuln.targetAddress} — read /etc/passwd, SSH private keys, app config files, and database credentials.';
+    } else if (t.contains('ssrf')) {
+      return 'Server-side request forgery on ${vuln.targetAddress} — probe internal services, cloud metadata endpoints, and internal network ranges.';
+    } else if (t.contains('privilege escalation')) {
+      return 'Elevated privilege access on ${vuln.targetAddress} — attempt root/SYSTEM access from current user context.';
+    }
+    return 'Vulnerability confirmed on ${vuln.targetAddress} — use as a stepping stone for chained attacks.';
   }
 
   /// Build a prompt block describing confirmed findings on [targetAddress]
@@ -103,13 +144,44 @@ Try these credentials against this target before generating new approaches.
   String confirmedFindingsPromptBlock(String targetAddress) {
     final relevant = _confirmedArtifacts.where((a) => a['target'] == targetAddress).toList();
     if (relevant.isEmpty) return '';
-    final lines = relevant
-        .map((a) => '  - [${a['type']}] ${a['problem']}: ${a['evidence']}')
-        .join('\n');
+    final lines = relevant.map((a) =>
+        '  - [${a['type']}] ${a['problem']}: ${a['evidence']}\n    Access surface: ${a['accessSurface'] ?? ''}').join('\n');
     return '''
 ## CONFIRMED FINDINGS ON THIS TARGET (chain from these):
 $lines
 NOTE: Use these as stepping stones. If RCE is confirmed, enumerate further (users, files, creds). If credentials were found, try them on every other service. If LFI was confirmed, read config files for database credentials and SSH keys.
+''';
+  }
+
+  /// Returns true if an authenticated re-analysis has already been run for [targetAddress].
+  bool hasAuthenticatedReanalysis(String targetAddress) =>
+      _authenticatedReanalysisTargets.contains(targetAddress);
+
+  /// Mark that an authenticated re-analysis has been triggered for [targetAddress].
+  void markAuthenticatedReanalysis(String targetAddress) {
+    _authenticatedReanalysisTargets.add(targetAddress);
+  }
+
+  /// Returns true if there are any verified credentials relevant for re-analysis.
+  bool get hasVerifiedCredentials =>
+      _credentials.any((c) => c.isVerified);
+
+  /// Build a credential context block for authenticated re-analysis prompts.
+  /// Only includes verified credentials (seen in command output).
+  String authenticatedContextBlock() {
+    final verified = _credentials.where((c) => c.isVerified).toList();
+    if (verified.isEmpty) return '';
+    final lines = verified.map((c) => '  - ${c.toPromptLine()}').join('\n');
+    return '''
+## AUTHENTICATED CONTEXT — confirmed credentials discovered during this engagement:
+$lines
+
+You are now performing an AUTHENTICATED analysis pass. In addition to unauthenticated findings, generate findings that require these credentials:
+- Authenticated SMB share enumeration: list shares, test read/write access, look for sensitive files
+- Authenticated LDAP enumeration: group memberships, AdminSDHolder, ACLs, GPO objects, Kerberoastable SPNs, AS-REP roastable accounts
+- Authenticated web application testing: post-login attack surface, privilege escalation within the app, IDOR with a valid session, admin functionality exposure
+- Lateral movement: where can these credentials be reused? Test against all other services on this target and note cross-target reuse potential
+Raise confidence to HIGH for any finding where these credentials directly enable the attack.
 ''';
   }
 
@@ -119,7 +191,19 @@ NOTE: Use these as stepping stones. If RCE is confirmed, enumerate further (user
     notifyListeners();
   }
 
+  void updateCurrentProject(Project project) {
+    _currentProject = project;
+    notifyListeners();
+  }
+
+  /// Stop all background listener processes (Responder, ntlmrelayx, etc.).
+  /// Called when switching projects or on app shutdown.
+  Future<void> stopAllListeners() async {
+    await BackgroundProcessManager().stopAll();
+  }
+
   Future<void> setCurrentProject(Project? project) async {
+    await BackgroundProcessManager().stopAll();
     _currentProject = project;
     _adminPassword = null;
     _targets = [];
@@ -129,6 +213,7 @@ NOTE: Use these as stepping stones. If RCE is confirmed, enumerate further (user
     _promptLogs.clear();
     _debugLogs.clear();
     _credentials.clear();
+    _credentialFingerprints.clear();
     _confirmedArtifacts.clear();
     _executionStatus = '';
     _scanComplete = false;
@@ -162,6 +247,14 @@ NOTE: Use these as stepping stones. If RCE is confirmed, enumerate further (user
 
     _vulnerabilities = await DatabaseHelper.getVulnerabilities(project.id!);
     _commandLogs = await DatabaseHelper.getCommandLogs(project.id!);
+
+    final savedCreds = await DatabaseHelper.getCredentialsByProject(project.id!);
+    _credentials.clear();
+    _credentialFingerprints.clear();
+    for (final c in savedCreds) {
+      _credentials.add(c);
+      _credentialFingerprints.add(c.fingerprint);
+    }
 
     final promptMaps = await DatabaseHelper.getPromptLogs(project.id!);
     _promptLogs.clear();

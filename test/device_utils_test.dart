@@ -81,5 +81,43 @@ void main() {
     test('192.169.x.x is external (not RFC-1918)', () {
       expect(DeviceUtils.classifyTarget('192.169.0.1'), TargetScope.external);
     });
+
+    // CGNAT range — RFC 6598 (100.64.0.0/10)
+    test('100.64.x.x CGNAT is internal', () {
+      expect(DeviceUtils.classifyTarget('100.64.0.1'), TargetScope.internal);
+    });
+
+    test('100.127.255.254 is internal (last address in CGNAT range)', () {
+      expect(DeviceUtils.classifyTarget('100.127.255.254'), TargetScope.internal);
+    });
+
+    test('100.128.0.1 is external (just outside CGNAT range)', () {
+      expect(DeviceUtils.classifyTarget('100.128.0.1'), TargetScope.external);
+    });
+
+    test('100.63.255.255 is external (just below CGNAT range)', () {
+      expect(DeviceUtils.classifyTarget('100.63.255.255'), TargetScope.external);
+    });
+
+    // IPv6 ULA (fc00::/7) — covers fc00::/8 and fd00::/8
+    test('fd00::1 IPv6 ULA is internal', () {
+      expect(DeviceUtils.classifyTarget('fd00::1'), TargetScope.internal);
+    });
+
+    test('fc80::1 IPv6 ULA is internal', () {
+      expect(DeviceUtils.classifyTarget('fc80::1'), TargetScope.internal);
+    });
+
+    test('fdab:cdef:1234::1 IPv6 ULA is internal', () {
+      expect(DeviceUtils.classifyTarget('fdab:cdef:1234::1'), TargetScope.internal);
+    });
+
+    test('2001:db8::1 is external (global unicast)', () {
+      expect(DeviceUtils.classifyTarget('2001:db8::1'), TargetScope.external);
+    });
+
+    test('2606:4700::1 is external (Cloudflare IPv6)', () {
+      expect(DeviceUtils.classifyTarget('2606:4700::1'), TargetScope.external);
+    });
   });
 }

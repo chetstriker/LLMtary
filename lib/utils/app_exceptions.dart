@@ -24,3 +24,11 @@ class LLMParseException implements Exception {
   @override
   String toString() => message;
 }
+
+/// Thrown when a target is outside the defined engagement scope.
+class ScopeViolationException implements Exception {
+  final String message;
+  const ScopeViolationException(this.message);
+  @override
+  String toString() => message;
+}

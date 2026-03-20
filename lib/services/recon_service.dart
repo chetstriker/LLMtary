@@ -10,6 +10,101 @@ import 'command_executor.dart';
 import 'llm_service.dart';
 import 'storage_service.dart';
 
+/// Phases of the structured recon pipeline.
+enum ReconPhase { portScan, serviceBanner, webFingerprint, dnsEnum, osDetect }
+
+/// Structured result from a recon run, convertible to device JSON.
+class ReconResult {
+  String ip;
+  String hostname;
+  List<Map<String, dynamic>> openPorts;
+  String os;
+  String osVersion;
+  List<String> technologies;
+  List<Map<String, dynamic>> dnsFindings;
+  Map<String, String> httpHeaders;
+  List<String> banners;
+  List<String> hostnames;
+
+  ReconResult({
+    required this.ip,
+    this.hostname = '',
+    List<Map<String, dynamic>>? openPorts,
+    this.os = '',
+    this.osVersion = '',
+    List<String>? technologies,
+    List<Map<String, dynamic>>? dnsFindings,
+    Map<String, String>? httpHeaders,
+    List<String>? banners,
+    List<String>? hostnames,
+  })  : openPorts = openPorts ?? [],
+        technologies = technologies ?? [],
+        dnsFindings = dnsFindings ?? [],
+        httpHeaders = httpHeaders ?? {},
+        banners = banners ?? [],
+        hostnames = hostnames ?? [];
+
+  /// Merge this result into an existing device JSON map, enriching without overwriting.
+  Map<String, dynamic> mergeInto(Map<String, dynamic> existing) {
+    final device = (existing['device'] as Map<String, dynamic>?) ?? {};
+    if (os.isNotEmpty && (device['os'] ?? '').toString().isEmpty) device['os'] = os;
+    if (osVersion.isNotEmpty && (device['os_version'] ?? '').toString().isEmpty) device['os_version'] = osVersion;
+    if (hostname.isNotEmpty && (device['name'] ?? '').toString().isEmpty) device['name'] = hostname;
+    if (device['ip_address'] == null || device['ip_address'].toString().isEmpty) device['ip_address'] = ip;
+    existing['device'] = device;
+
+    // Merge open ports by port number
+    final existingPorts = (existing['open_ports'] as List?) ?? [];
+    for (final p in openPorts) {
+      final portNum = p['port'];
+      final idx = existingPorts.indexWhere((e) => (e as Map)['port'] == portNum);
+      if (idx == -1) {
+        existingPorts.add(Map<String, dynamic>.from(p));
+      } else {
+        final ep = existingPorts[idx] as Map<String, dynamic>;
+        p.forEach((k, v) {
+          if (v != null && v.toString().isNotEmpty &&
+              (ep[k] == null || ep[k].toString().isEmpty)) {
+            ep[k] = v;
+          }
+        });
+      }
+    }
+    existing['open_ports'] = existingPorts;
+
+    // Merge list fields
+    final existingDns = ((existing['dns_findings'] as List?) ?? []).cast<Map<String, dynamic>>();
+    existingDns.addAll(dnsFindings);
+    existing['dns_findings'] = existingDns;
+
+    // Merge technologies into web_findings
+    if (technologies.isNotEmpty) {
+      final webFindings = ((existing['web_findings'] as List?) ?? []).cast<Map<String, dynamic>>();
+      if (webFindings.isNotEmpty) {
+        final existingTechs = (webFindings.first['technologies'] as List?)?.cast<String>() ?? [];
+        final merged = {...existingTechs, ...technologies}.toList();
+        webFindings.first['technologies'] = merged;
+      } else {
+        webFindings.add({'technologies': technologies});
+      }
+      existing['web_findings'] = webFindings;
+    }
+
+    if (hostnames.isNotEmpty) existing['hostnames'] = hostnames;
+    if (httpHeaders.isNotEmpty) existing['http_headers'] = httpHeaders;
+
+    return existing;
+  }
+
+  /// Convert to standalone device JSON.
+  Map<String, dynamic> toDeviceJson() => mergeInto({
+    'device': {'ip_address': ip, 'name': hostname.isNotEmpty ? hostname : ip},
+    'open_ports': <dynamic>[],
+    'dns_findings': <dynamic>[],
+    'web_findings': <dynamic>[],
+  });
+}
+
 class _ExecEnv {
   final String osInfo;
   final bool isWsl;
@@ -68,6 +163,23 @@ class _ExecEnv {
       isLinux: Platform.isLinux,
     );
   }
+}
+
+/// Result of the deterministic pre-LLM baseline scan.
+class _BaselineResult {
+  final bool isAlive;
+  final bool hasWebPorts;
+  final bool hasDnsData;
+  final bool hasSmbPort;
+  final List<String> commandsRun;
+
+  const _BaselineResult({
+    required this.isAlive,
+    required this.hasWebPorts,
+    required this.hasDnsData,
+    required this.hasSmbPort,
+    required this.commandsRun,
+  });
 }
 
 class ReconService {
@@ -162,7 +274,37 @@ class ReconService {
     bool exhaustedOptions = false;
     int connectivityFailures = 0;
 
-    onProgress?.call('[$address] Starting recon loop (${env.label})...');
+    if (scope == TargetScope.external && ReconService._isDomainName(address)) {
+      onProgress?.call('[$address] Running passive OSINT...');
+      await _runPassiveOsint(
+        address: address,
+        env: env,
+        outDir: outDir,
+        findings: findings,
+        executedCommands: executedCommands,
+        projectId: projectId,
+        targetId: targetId,
+        llmService: llmService,
+      );
+    }
+
+    onProgress?.call('[$address] Running baseline scan...');
+    final baseline = await _runBaselineCommands(
+      address: address,
+      scope: scope,
+      env: env,
+      outDir: outDir,
+      findings: findings,
+      executedCommands: executedCommands,
+      projectId: projectId,
+      targetId: targetId,
+      llmService: llmService,
+    );
+    if (!baseline.isAlive) {
+      onProgress?.call('[$address] Host is down — aborting recon');
+      return await _evaluateAndSave(llmService, address, findings, outputDir);
+    }
+    onProgress?.call('[$address] Baseline complete (${baseline.commandsRun.length} steps). Starting LLM-guided deep scan...');
 
     for (int iteration = 0; iteration < maxIter; iteration++) {
       onProgress?.call('[$address] Iteration ${iteration + 1}...');
@@ -482,6 +624,9 @@ then use the IP directly in the next command.
 
 ## WHAT YOU HAVE FOUND SO FAR:
 ${json.encode(findings)}
+${(findings['osint_dorks'] as List?)?.isNotEmpty == true ? '''
+## GOOGLE DORK QUERIES (generated for manual use — do NOT re-generate these):
+${(findings['osint_dorks'] as List).join('\n')}''' : ''}
 
 ## PREVIOUS COMMANDS RUN:
 $history
@@ -1203,5 +1348,527 @@ Respond ONLY with valid JSON.''';
     final t = tool.toLowerCase();
     if (env.isNativeWindows) return _windowsAlways.contains(t);
     return _unixAlways.contains(t);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Deterministic pre-LLM baseline runner (Phase 3.1)
+  // Executes a fixed set of discovery commands before the LLM loop so the LLM
+  // starts with real port and service data rather than an empty findings map.
+  // ---------------------------------------------------------------------------
+
+  Future<_BaselineResult> _runBaselineCommands({
+    required String address,
+    required TargetScope scope,
+    required _ExecEnv env,
+    required String outDir,
+    required Map<String, dynamic> findings,
+    required Set<String> executedCommands,
+    required int projectId,
+    required int targetId,
+    required LLMService llmService,
+  }) async {
+    final commandsRun = <String>[];
+    bool isAlive = true;
+    bool hasWebPorts = false;
+    bool hasDnsData = false;
+    bool hasSmbPort = false;
+    final isInternal = scope == TargetScope.internal;
+    final isWin = env.isNativeWindows;
+
+    // Execute one baseline step: run command, log, merge findings. Returns raw
+    // output on success, null on error/skip.
+    Future<String?> runStep(String cmd, String purpose) async {
+      if (executedCommands.contains(cmd)) return null;
+      onProgress?.call('[$address] Baseline: $purpose');
+      try {
+        final result = await CommandExecutor.executeCommand(
+          cmd, requireApproval,
+          adminPassword: adminPassword,
+          onApprovalNeeded: onApprovalNeeded,
+        );
+        final output = (result['output'] as String? ?? '').trim();
+        final exitCode = (result['exitCode'] as int?) ?? -1;
+        executedCommands.add(cmd);
+        commandsRun.add(cmd);
+        if (projectId > 0 && targetId > 0) {
+          await DatabaseHelper.recordExecutedCommand(projectId, targetId, cmd,
+              output: output, exitCode: exitCode);
+        }
+        final log = CommandLog(
+          timestamp: DateTime.now(),
+          command: '[RECON BASELINE] $cmd',
+          output: output.isEmpty ? '(no output)' : output,
+          exitCode: exitCode,
+          vulnerabilityIndex: null,
+          projectId: projectId,
+          targetId: targetId,
+        );
+        await DatabaseHelper.insertCommandLog(log);
+        onCommandExecuted?.call(log.command, log.output);
+        if (output.isNotEmpty) {
+          await _mergeFindings(llmService, address, cmd, purpose, output, findings);
+        }
+        return output;
+      } catch (e) {
+        onProgress?.call('[$address] Baseline step skipped ($purpose): $e');
+        return null;
+      }
+    }
+
+    // B1 — Host liveness check
+    final pingCmd = isWin
+        ? 'Test-NetConnection $address -Port 443 -InformationLevel Quiet'
+        : 'ping -c 2 -W 2 $address';
+    final pingOut = await runStep(pingCmd, 'host liveness check');
+    if (pingOut != null) {
+      final lower = pingOut.toLowerCase();
+      final hostDown = lower.contains('0 received') ||
+          lower.contains('100% packet loss') ||
+          lower.contains('network is unreachable') ||
+          lower.contains('false'); // Test-NetConnection False = unreachable
+      if (hostDown) {
+        onProgress?.call('[$address] Baseline: host appears down — skipping further baseline steps');
+        return _BaselineResult(
+          isAlive: false, hasWebPorts: false, hasDnsData: false,
+          hasSmbPort: false, commandsRun: commandsRun,
+        );
+      }
+    }
+
+    // B2 — Top port scan
+    final nmapXmlPath = '$outDir/nmap_baseline.xml';
+    final nmapCmd = isInternal
+        ? 'nmap -sV -sC --open -T4 --top-ports 1000 $address -oX "$nmapXmlPath"'
+        : 'nmap -sV --open -T3 --top-ports 2000 $address -oX "$nmapXmlPath"';
+    await runStep(nmapCmd, 'top port scan');
+
+    // Parse the saved XML directly to update findings and detect web/SMB ports
+    try {
+      final xmlFile = File(nmapXmlPath);
+      if (await xmlFile.exists()) {
+        final xmlContent = await xmlFile.readAsString();
+        if (xmlContent.isNotEmpty) {
+          final parsedPorts = ReconService.parseNmapXml(xmlContent);
+          final existingPorts = (findings['open_ports'] as List)
+              .map((p) => (p as Map)['port'])
+              .toSet();
+          for (final port in parsedPorts) {
+            if (!existingPorts.contains(port['port'])) {
+              (findings['open_ports'] as List).add(port);
+            }
+          }
+          hasWebPorts = parsedPorts.any((p) {
+            final portNum = p['port'] as int? ?? 0;
+            final svc = (p['service'] as String? ?? '').toLowerCase();
+            return portNum == 80 || portNum == 443 ||
+                portNum == 8080 || portNum == 8443 ||
+                svc.contains('http');
+          });
+          hasSmbPort = parsedPorts.any((p) => p['port'] == 445);
+        }
+      }
+    } catch (_) {}
+
+    // B3 — Web fingerprinting (if web ports found)
+    if (hasWebPorts) {
+      if (!isWin) {
+        await runStep('curl -skL -I --max-time 10 http://$address',
+            'HTTP header fingerprint');
+        await runStep('curl -skL -I --max-time 10 https://$address',
+            'HTTPS header fingerprint');
+      } else {
+        await runStep(
+            'Invoke-WebRequest http://$address -Method Head -TimeoutSec 10 -SkipCertificateCheck -UseBasicParsing',
+            'HTTP header fingerprint');
+      }
+    }
+
+    // B4 — SSL/TLS certificate info (port 443 only, Unix)
+    final has443 = (findings['open_ports'] as List)
+        .any((p) => (p as Map)['port'] == 443);
+    if (has443 && !isWin) {
+      await runStep(
+          'echo | openssl s_client -connect $address:443 -showcerts 2>&1 | head -60',
+          'SSL/TLS certificate scan');
+    }
+
+    // B5 — DNS baseline (external targets or hostname inputs)
+    final isHostname = !RegExp(r'^\d+\.\d+\.\d+\.\d+$').hasMatch(address);
+    if (!isInternal || isHostname) {
+      if (!isWin) {
+        await runStep('dig $address A +short', 'DNS A record');
+        await runStep('dig $address MX +short', 'DNS MX record');
+        await runStep('dig $address TXT +short', 'DNS TXT record');
+        await runStep('dig $address NS +short', 'DNS NS record');
+      } else {
+        await runStep('Resolve-DnsName $address -Type ANY', 'DNS record enumeration');
+      }
+      hasDnsData = true;
+    }
+
+    // B6 — SMB security mode (internal + port 445, Unix only)
+    if (isInternal && hasSmbPort && !isWin) {
+      await runStep(
+          'nmap -p 445 --script smb-security-mode,smb2-security-mode,smb-os-discovery $address',
+          'SMB signing and OS discovery');
+    }
+
+    return _BaselineResult(
+      isAlive: isAlive,
+      hasWebPorts: hasWebPorts,
+      hasDnsData: hasDnsData,
+      hasSmbPort: hasSmbPort,
+      commandsRun: commandsRun,
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Passive OSINT — external targets only (Phase 3.2)
+  // Runs before the baseline and LLM loop. All steps are read-only and do
+  // not touch the target directly.
+  // ---------------------------------------------------------------------------
+
+  /// Returns true when [address] looks like a domain name (contains a dot and
+  /// is not a raw IPv4 address).
+  static bool _isDomainName(String address) {
+    final a = address.trim();
+    return a.contains('.') &&
+        !RegExp(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$').hasMatch(a);
+  }
+
+  Future<void> _runPassiveOsint({
+    required String address,
+    required _ExecEnv env,
+    required String outDir,
+    required Map<String, dynamic> findings,
+    required Set<String> executedCommands,
+    required int projectId,
+    required int targetId,
+    required LLMService llmService,
+  }) async {
+    // Ensure the osint bucket exists
+    findings.putIfAbsent('osint_findings', () => <dynamic>[]);
+    findings.putIfAbsent('osint_dorks', () => <dynamic>[]);
+    final isWin = env.isNativeWindows;
+
+    // Helper: run one OSINT step, log it, merge findings.
+    Future<void> osintStep(String cmd, String purpose) async {
+      if (executedCommands.contains(cmd)) return;
+      onProgress?.call('[$address] OSINT: $purpose');
+      try {
+        final result = await CommandExecutor.executeCommand(
+          cmd, requireApproval,
+          adminPassword: adminPassword,
+          onApprovalNeeded: onApprovalNeeded,
+        );
+        final output = (result['output'] as String? ?? '').trim();
+        final exitCode = (result['exitCode'] as int?) ?? -1;
+        executedCommands.add(cmd);
+        if (projectId > 0 && targetId > 0) {
+          await DatabaseHelper.recordExecutedCommand(projectId, targetId, cmd,
+              output: output, exitCode: exitCode);
+        }
+        final log = CommandLog(
+          timestamp: DateTime.now(),
+          command: '[RECON OSINT] $cmd',
+          output: output.isEmpty ? '(no output)' : output,
+          exitCode: exitCode,
+          vulnerabilityIndex: null,
+          projectId: projectId,
+          targetId: targetId,
+        );
+        await DatabaseHelper.insertCommandLog(log);
+        onCommandExecuted?.call(log.command, log.output);
+        if (output.isNotEmpty) {
+          await _mergeFindings(llmService, address, cmd, purpose, output, findings);
+        }
+      } catch (e) {
+        onProgress?.call('[$address] OSINT step skipped ($purpose): $e');
+      }
+    }
+
+    // O1 — Certificate Transparency logs (crt.sh)
+    await osintStep(
+        'curl -s --max-time 15 "https://crt.sh/?q=$address&output=json"',
+        'certificate transparency log — subdomain discovery');
+
+    // O2 — WHOIS
+    if (!isWin) {
+      await osintStep('whois $address', 'WHOIS registrar and registration data');
+    } else {
+      await osintStep('Get-WinSystemInformation', 'WHOIS (whois not natively available on Windows — skip)');
+    }
+
+    // O3 — Shodan CLI (if installed)
+    await osintStep('shodan host $address', 'Shodan historical port and vulnerability data');
+
+    // O4 — GitHub search (if gh CLI is authenticated)
+    await osintStep('gh search code "$address" --limit 10 --json path,repository,url',
+        'GitHub public code search for domain references');
+
+    // O5 — Google dork generation (always, no network required)
+    final domain = address;
+    final dorks = [
+      'site:$domain filetype:pdf',
+      'site:$domain intitle:"index of"',
+      'site:$domain inurl:admin',
+      'site:$domain inurl:login',
+      'site:$domain intext:password',
+      'site:$domain inurl:config OR inurl:env OR inurl:settings',
+      'site:$domain ext:sql OR ext:bak OR ext:log',
+      '"$domain" inurl:github.com',
+    ];
+    (findings['osint_dorks'] as List).addAll(dorks);
+    onProgress?.call('[$address] OSINT: generated ${dorks.length} Google dork queries');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 1.2 — Port scan command generation & nmap XML parsing
+  // ---------------------------------------------------------------------------
+
+  /// Generate an OS-appropriate nmap command for full TCP + high-value UDP scan.
+  static String buildNmapCommand(String target, String outDir, {bool isWindows = false}) {
+    final xmlPath = '$outDir/nmap_full.xml';
+    return 'nmap -sV -O -T4 --open -p- -oX "$xmlPath" $target';
+  }
+
+  /// Generate a UDP scan command for high-value ports.
+  static String buildUdpScanCommand(String target, String outDir) {
+    final xmlPath = '$outDir/nmap_udp.xml';
+    return 'sudo nmap -sU -sV -T4 --open -p 53,161,500,1194,4500 -oX "$xmlPath" $target';
+  }
+
+  /// Parse nmap XML output into the open_ports array format.
+  static List<Map<String, dynamic>> parseNmapXml(String xmlContent) {
+    final ports = <Map<String, dynamic>>[];
+    // Match <port protocol="tcp" portid="80"> ... </port> blocks
+    final portPattern = RegExp(
+      r'<port\s+protocol="(\w+)"\s+portid="(\d+)">(.*?)</port>',
+      dotAll: true,
+    );
+    for (final match in portPattern.allMatches(xmlContent)) {
+      final protocol = match.group(1) ?? 'tcp';
+      final portId = int.tryParse(match.group(2) ?? '') ?? 0;
+      final block = match.group(3) ?? '';
+
+      // State
+      final stateMatch = RegExp(r'<state\s+state="(\w+)"').firstMatch(block);
+      final state = stateMatch?.group(1) ?? 'unknown';
+      if (state != 'open') continue;
+
+      // Service
+      final svcMatch = RegExp(
+        r'<service\s+([^>]+)>',
+      ).firstMatch(block);
+      final svcAttrs = svcMatch?.group(1) ?? '';
+      String attr(String name) {
+        final m = RegExp('$name="([^"]*?)"').firstMatch(svcAttrs);
+        return m?.group(1) ?? '';
+      }
+
+      final entry = <String, dynamic>{
+        'port': portId,
+        'protocol': protocol,
+        'state': state,
+        'service': attr('name'),
+        'product': attr('product'),
+        'version': attr('version'),
+        'extra_info': attr('extrainfo'),
+      };
+      // CPE
+      final cpeMatch = RegExp(r'<cpe>([^<]+)</cpe>').firstMatch(block);
+      if (cpeMatch != null) entry['cpe'] = cpeMatch.group(1);
+
+      ports.add(entry);
+    }
+
+    // OS detection
+    // (parsed separately by parseNmapOs)
+    return ports;
+  }
+
+  /// Parse OS detection from nmap XML.
+  static Map<String, String> parseNmapOs(String xmlContent) {
+    final osMatch = RegExp(r'<osmatch\s+name="([^"]+)"\s+accuracy="(\d+)"')
+        .firstMatch(xmlContent);
+    if (osMatch == null) return {};
+    return {'os': osMatch.group(1) ?? '', 'accuracy': osMatch.group(2) ?? ''};
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 1.2 — Banner grabbing for unknown services
+  // ---------------------------------------------------------------------------
+
+  /// Generate a banner grab command for a port with unknown service.
+  static String buildBannerGrabCommand(String target, int port, bool isTls) {
+    if (isTls) {
+      return 'timeout 10 openssl s_client -connect $target:$port </dev/null 2>/dev/null | head -20';
+    }
+    return 'echo "" | timeout 10 nc -w 5 $target $port 2>/dev/null | head -20';
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 1.3 — Web fingerprinting
+  // ---------------------------------------------------------------------------
+
+  /// Generate a whatweb command for a web port.
+  static String buildWhatwebCommand(String target, int port, bool isTls) {
+    final scheme = isTls ? 'https' : 'http';
+    return 'whatweb -a 3 --color=never $scheme://$target:$port 2>/dev/null || '
+        'curl -s -I -L --max-time 10 $scheme://$target:$port';
+  }
+
+  /// Generate curl commands to fetch headers and check common high-value paths.
+  static List<String> buildWebProbeCommands(String target, int port, bool isTls, String outDir) {
+    final scheme = isTls ? 'https' : 'http';
+    final base = '$scheme://$target:$port';
+    return [
+      'curl -s -I -L --max-time 10 $base | tee "$outDir/headers_$port.txt"',
+      for (final path in [
+        '/robots.txt', '/sitemap.xml', '/.well-known/security.txt',
+        '/crossdomain.xml', '/swagger.json', '/openapi.json', '/api/docs', '/graphql',
+      ])
+        'curl -s -o /dev/null -w "%{http_code} $path" --max-time 5 $base$path',
+    ];
+  }
+
+  /// Detect WAF/CDN from response headers text.
+  static String? detectWafFromHeaders(String headers) {
+    final h = headers.toLowerCase();
+    if (h.contains('cf-ray') || h.contains('cloudflare')) return 'Cloudflare';
+    if (h.contains('x-sucuri')) return 'Sucuri';
+    if (h.contains('x-akamai') || h.contains('akamai')) return 'Akamai';
+    if (h.contains('x-cdn: fastly') || h.contains('fastly')) return 'Fastly';
+    if (h.contains('x-amz-cf-id') || h.contains('cloudfront')) return 'CloudFront';
+    if (h.contains('incapsula') || h.contains('imperva')) return 'Imperva';
+    return null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 1.4 — DNS enumeration
+  // ---------------------------------------------------------------------------
+
+  /// Generate DNS lookup commands for a hostname target.
+  static List<String> buildDnsCommands(String target, String outDir) {
+    return [
+      'dig A AAAA CNAME MX TXT NS SOA $target +noall +answer | tee "$outDir/dns_all.txt"',
+      'dig AXFR $target 2>/dev/null | tee "$outDir/dns_axfr.txt"',
+    ];
+  }
+
+  /// Generate reverse DNS command for an IP target.
+  static String buildReverseDnsCommand(String ip) {
+    return 'dig -x $ip +short';
+  }
+
+  /// Extract SPF, DKIM, DMARC from TXT records text.
+  static Map<String, String> extractEmailSecurityRecords(String txtOutput) {
+    final records = <String, String>{};
+    for (final line in txtOutput.split('\n')) {
+      final lower = line.toLowerCase();
+      if (lower.contains('v=spf1')) records['spf'] = line.trim();
+      if (lower.contains('v=dmarc1')) records['dmarc'] = line.trim();
+      if (lower.contains('v=dkim1')) records['dkim'] = line.trim();
+    }
+    return records;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 1.5 — OS and technology enrichment
+  // ---------------------------------------------------------------------------
+
+  /// Extract OS info from nmap OS detection and SSH/SMB banners.
+  static String extractOsFromBanners(List<Map<String, dynamic>> ports) {
+    for (final p in ports) {
+      final product = (p['product'] ?? '').toString().toLowerCase();
+      final version = (p['version'] ?? '').toString();
+      final extra = (p['extra_info'] ?? '').toString();
+      if (product.contains('openssh') && extra.toLowerCase().contains('ubuntu')) return 'Linux Ubuntu';
+      if (product.contains('openssh') && extra.toLowerCase().contains('debian')) return 'Linux Debian';
+      if (product.contains('microsoft') || product.contains('windows')) return 'Windows $version';
+      if (extra.toLowerCase().contains('windows')) return 'Windows';
+    }
+    return '';
+  }
+
+  /// Parse SMB banners for Windows version, domain, signing status.
+  static Map<String, String> parseSmbBanner(String smbOutput) {
+    final result = <String, String>{};
+    final osMatch = RegExp(r'OS:\s*(.+)', caseSensitive: false).firstMatch(smbOutput);
+    if (osMatch != null) result['os'] = osMatch.group(1)!.trim();
+    final domainMatch = RegExp(r'Domain:\s*(\S+)', caseSensitive: false).firstMatch(smbOutput);
+    if (domainMatch != null) result['domain'] = domainMatch.group(1)!.trim();
+    final signingMatch = RegExp(r'signing[:\s]+(\S+)', caseSensitive: false).firstMatch(smbOutput);
+    if (signingMatch != null) result['signing'] = signingMatch.group(1)!.trim();
+    return result;
+  }
+
+  /// Parse SSL/TLS certificate CN and SAN fields for hostname discovery.
+  static List<String> parseCertHostnames(String certOutput) {
+    final hostnames = <String>{};
+    final cnMatch = RegExp(r'CN\s*=\s*([^\s/,]+)').firstMatch(certOutput);
+    if (cnMatch != null) hostnames.add(cnMatch.group(1)!);
+    final sanMatches = RegExp(r'DNS:([^\s,]+)').allMatches(certOutput);
+    for (final m in sanMatches) {
+      hostnames.add(m.group(1)!);
+    }
+    return hostnames.toList();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 1.1 — Wire ReconService into analysis flow
+  // ---------------------------------------------------------------------------
+
+  /// Run structured recon and return a [ReconResult] that can be merged with
+  /// user-supplied JSON before analysis. This is the integration point for
+  /// VulnerabilityAnalyzer: call enrichWithRecon() then analyzeDevice().
+  static Future<ReconResult?> enrichWithRecon({
+    required String address,
+    required String projectName,
+    required LLMSettings settings,
+    int projectId = 0,
+    int targetId = 0,
+    bool requireApproval = false,
+    String? adminPassword,
+    Future<String?> Function(String)? onApprovalNeeded,
+    Future<String?> Function(String)? onPasswordNeeded,
+    Function(String)? onProgress,
+    Function(String, String)? onPromptResponse,
+    Function(String, String)? onCommandExecuted,
+  }) async {
+    final recon = ReconService(
+      settings: settings,
+      requireApproval: requireApproval,
+      adminPassword: adminPassword,
+      onApprovalNeeded: onApprovalNeeded,
+      onPasswordNeeded: onPasswordNeeded,
+      onProgress: onProgress,
+      onPromptResponse: onPromptResponse,
+      onCommandExecuted: onCommandExecuted,
+    );
+    final filePath = await recon.reconTarget(
+      address, projectName,
+      projectId: projectId, targetId: targetId,
+    );
+    if (filePath == null) return null;
+    try {
+      final content = await File(filePath).readAsString();
+      final parsed = json.decode(content) as Map<String, dynamic>;
+      final device = (parsed['device'] as Map<String, dynamic>?) ?? {};
+      final ports = ((parsed['open_ports'] as List?) ?? []).cast<Map<String, dynamic>>();
+      return ReconResult(
+        ip: device['ip_address']?.toString() ?? address,
+        hostname: device['name']?.toString() ?? '',
+        openPorts: ports,
+        os: device['os']?.toString() ?? '',
+        osVersion: device['os_version']?.toString() ?? '',
+        technologies: ((parsed['web_findings'] as List?)?.firstOrNull
+            as Map<String, dynamic>?)?['technologies']?.cast<String>() ?? [],
+        dnsFindings: ((parsed['dns_findings'] as List?) ?? []).cast<Map<String, dynamic>>(),
+        hostnames: (parsed['hostnames'] as List?)?.cast<String>() ?? [],
+      );
+    } catch (_) {
+      return null;
+    }
   }
 }

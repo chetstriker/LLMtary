@@ -5,6 +5,7 @@ import '../models/vulnerability.dart';
 import '../models/command_log.dart';
 import '../models/target.dart';
 import '../models/project.dart';
+import '../models/credential.dart';
 
 class DatabaseHelper {
   static Database? _database;
@@ -29,7 +30,7 @@ class DatabaseHelper {
     
     return await openDatabase(
       path,
-      version: 11,
+      version: 17,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE vulnerabilities (
@@ -50,12 +51,18 @@ class DatabaseHelper {
             integrityImpact TEXT,
             availabilityImpact TEXT,
             vulnerabilityType TEXT,
+            businessRisk TEXT DEFAULT '',
             statusReason TEXT,
             proofCommand TEXT,
+            proofCommandExpectedOutput TEXT,
+            proofOutput TEXT,
+            reproductionSteps TEXT,
+            confirmedAt TEXT,
             targetAddress TEXT DEFAULT '',
             targetId INTEGER DEFAULT 0,
             projectId INTEGER DEFAULT 0,
-            status TEXT NOT NULL
+            status TEXT NOT NULL,
+            remediationClass TEXT NOT NULL DEFAULT 'unclassified'
           )
         ''');
 
@@ -81,7 +88,35 @@ class DatabaseHelper {
             lastOpenedAt TEXT NOT NULL,
             scanComplete INTEGER NOT NULL DEFAULT 0,
             analysisComplete INTEGER NOT NULL DEFAULT 0,
-            hasResults INTEGER NOT NULL DEFAULT 0
+            hasResults INTEGER NOT NULL DEFAULT 0,
+            first_analysis_at TEXT,
+            last_execution_at TEXT,
+            report_title TEXT,
+            pentester_name TEXT,
+            executive_summary TEXT,
+            methodology TEXT,
+            risk_rating_model TEXT,
+            conclusion TEXT,
+            scope TEXT,
+            scope_exclusions TEXT,
+            scope_notes TEXT
+          )
+        ''');
+
+        await db.execute('''
+          CREATE TABLE discovered_credentials (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            service TEXT NOT NULL,
+            host TEXT NOT NULL,
+            username TEXT NOT NULL,
+            secret TEXT NOT NULL,
+            secret_type TEXT NOT NULL DEFAULT 'password',
+            source_vuln TEXT,
+            discovered_at TEXT NOT NULL,
+            credential_source TEXT NOT NULL DEFAULT 'extractedFromOutput',
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            UNIQUE(project_id, service, host, username, secret)
           )
         ''');
 
@@ -268,6 +303,54 @@ class DatabaseHelper {
           try { await db.execute('ALTER TABLE executed_commands ADD COLUMN output TEXT NOT NULL DEFAULT \'\''); } catch (_) {}
           try { await db.execute('ALTER TABLE executed_commands ADD COLUMN exit_code INTEGER NOT NULL DEFAULT -1'); } catch (_) {}
         }
+        if (oldVersion < 12) {
+          await db.execute('ALTER TABLE projects ADD COLUMN first_analysis_at TEXT');
+          await db.execute('ALTER TABLE projects ADD COLUMN last_execution_at TEXT');
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS discovered_credentials (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              project_id INTEGER NOT NULL,
+              service TEXT NOT NULL,
+              host TEXT NOT NULL,
+              username TEXT NOT NULL,
+              secret TEXT NOT NULL,
+              secret_type TEXT NOT NULL DEFAULT 'password',
+              source_vuln TEXT,
+              discovered_at TEXT NOT NULL,
+              FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+              UNIQUE(project_id, service, host, username, secret)
+            )
+          ''');
+        }
+        if (oldVersion < 13) {
+          await db.execute('ALTER TABLE projects ADD COLUMN report_title TEXT');
+          await db.execute('ALTER TABLE projects ADD COLUMN pentester_name TEXT');
+          await db.execute('ALTER TABLE projects ADD COLUMN executive_summary TEXT');
+          await db.execute('ALTER TABLE projects ADD COLUMN methodology TEXT');
+          await db.execute('ALTER TABLE projects ADD COLUMN risk_rating_model TEXT');
+          await db.execute('ALTER TABLE projects ADD COLUMN conclusion TEXT');
+        }
+        if (oldVersion < 14) {
+          await db.execute("ALTER TABLE vulnerabilities ADD COLUMN businessRisk TEXT DEFAULT ''");
+        }
+        if (oldVersion < 15) {
+          // Vulnerabilities: PoC artifact fields
+          try { await db.execute('ALTER TABLE vulnerabilities ADD COLUMN proofOutput TEXT'); } catch (_) {}
+          try { await db.execute('ALTER TABLE vulnerabilities ADD COLUMN reproductionSteps TEXT'); } catch (_) {}
+          try { await db.execute('ALTER TABLE vulnerabilities ADD COLUMN confirmedAt TEXT'); } catch (_) {}
+          // Credentials: source tracking
+          try { await db.execute("ALTER TABLE discovered_credentials ADD COLUMN credential_source TEXT NOT NULL DEFAULT 'extractedFromOutput'"); } catch (_) {}
+          // Projects: scope/engagement fields
+          try { await db.execute('ALTER TABLE projects ADD COLUMN scope TEXT'); } catch (_) {}
+          try { await db.execute('ALTER TABLE projects ADD COLUMN scope_exclusions TEXT'); } catch (_) {}
+          try { await db.execute('ALTER TABLE projects ADD COLUMN scope_notes TEXT'); } catch (_) {}
+        }
+        if (oldVersion < 16) {
+          try { await db.execute('ALTER TABLE vulnerabilities ADD COLUMN proofCommandExpectedOutput TEXT'); } catch (_) {}
+        }
+        if (oldVersion < 17) {
+          try { await db.execute("ALTER TABLE vulnerabilities ADD COLUMN remediationClass TEXT NOT NULL DEFAULT 'unclassified'"); } catch (_) {}
+        }
       },
     );
   }
@@ -412,7 +495,88 @@ class DatabaseHelper {
     await db.delete('prompt_logs', where: 'projectId = ?', whereArgs: [id]);
     await db.delete('debug_logs', where: 'projectId = ?', whereArgs: [id]);
     await db.delete('targets', where: 'projectId = ?', whereArgs: [id]);
+    await db.delete('discovered_credentials', where: 'project_id = ?', whereArgs: [id]);
     await db.delete('projects', where: 'id = ?', whereArgs: [id]);
+  }
+
+  static Future<void> updateProjectReportFields(int projectId, {
+    String? reportTitle,
+    String? pentesterName,
+    String? executiveSummary,
+    String? methodology,
+    String? riskRatingModel,
+    String? conclusion,
+  }) async {
+    final db = await database;
+    final updates = <String, dynamic>{};
+    if (reportTitle != null) updates['report_title'] = reportTitle;
+    if (pentesterName != null) updates['pentester_name'] = pentesterName;
+    if (executiveSummary != null) updates['executive_summary'] = executiveSummary;
+    if (methodology != null) updates['methodology'] = methodology;
+    if (riskRatingModel != null) updates['risk_rating_model'] = riskRatingModel;
+    if (conclusion != null) updates['conclusion'] = conclusion;
+    if (updates.isNotEmpty) {
+      await db.update('projects', updates, where: 'id = ?', whereArgs: [projectId]);
+    }
+  }
+
+  static Future<void> updateProjectScope(int projectId, {
+    String? scope,
+    String? scopeExclusions,
+    String? scopeNotes,
+  }) async {
+    final db = await database;
+    // Use explicit null sentinel: pass empty string to clear, null to skip
+    final updates = <String, dynamic>{
+      'scope': scope,
+      'scope_exclusions': scopeExclusions,
+      'scope_notes': scopeNotes,
+    };
+    await db.update('projects', updates, where: 'id = ?', whereArgs: [projectId]);
+  }
+
+  static Future<void> updateProjectFirstAnalysis(int projectId, DateTime at) async {
+    final db = await database;
+    await db.update('projects', {'first_analysis_at': at.toIso8601String()},
+        where: 'id = ?', whereArgs: [projectId]);
+  }
+
+  static Future<void> updateProjectLastExecution(int projectId, DateTime at) async {
+    final db = await database;
+    await db.update('projects', {'last_execution_at': at.toIso8601String()},
+        where: 'id = ?', whereArgs: [projectId]);
+  }
+
+  // --- Discovered Credentials ---
+
+  static Future<int> insertCredential(DiscoveredCredential cred, int projectId) async {
+    final db = await database;
+    return await db.insert(
+      'discovered_credentials',
+      {
+        'project_id': projectId,
+        'service': cred.service,
+        'host': cred.host,
+        'username': cred.username,
+        'secret': cred.secret,
+        'secret_type': cred.secretType,
+        'source_vuln': cred.sourceVuln,
+        'discovered_at': cred.discoveredAt.toIso8601String(),
+      },
+      conflictAlgorithm: ConflictAlgorithm.ignore,
+    );
+  }
+
+  static Future<List<DiscoveredCredential>> getCredentialsByProject(int projectId) async {
+    final db = await database;
+    final maps = await db.query('discovered_credentials',
+        where: 'project_id = ?', whereArgs: [projectId], orderBy: 'discovered_at ASC');
+    return maps.map((m) => DiscoveredCredential.fromMap(m)).toList();
+  }
+
+  static Future<void> deleteCredentialsByProject(int projectId) async {
+    final db = await database;
+    await db.delete('discovered_credentials', where: 'project_id = ?', whereArgs: [projectId]);
   }
 
   // --- Targets ---

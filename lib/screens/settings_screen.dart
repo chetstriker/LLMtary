@@ -27,6 +27,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   int _maxTokens = ConfigDefaults.maxTokens;
   int _maxIterations = ConfigDefaults.maxIterations;
   int _timeoutSeconds = ConfigDefaults.timeoutSeconds;
+  int _maxIterationsWithCve = 30;
+  int _maxIterationsNoCve = 15;
   List<String> _availableModels = [];
   bool _isLoadingModels = false;
   final _llmService = LLMService();
@@ -44,6 +46,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _temperature = settings.temperature;
     _maxTokens = settings.maxTokens;
     _timeoutSeconds = settings.timeoutSeconds;
+    _maxIterationsWithCve = settings.maxIterationsWithCve;
+    _maxIterationsNoCve = settings.maxIterationsNoCve;
     _loadMaxIterations();
     _loadWhitelist();
     _loadStoragePath();
@@ -538,6 +542,78 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                 ],
               ),
+              const SizedBox(height: 24),
+              const Text('MAX ITERATIONS (WITH CVE)', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 12)),
+              const SizedBox(height: 4),
+              const Text('Exploitation loop cap for findings with a known CVE ID', style: TextStyle(color: Color(0xFF8892B0), fontSize: 11)),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: SliderTheme(
+                      data: SliderThemeData(
+                        activeTrackColor: const Color(0xFF00F5FF),
+                        inactiveTrackColor: const Color(0xFF00F5FF).withOpacity(0.2),
+                        thumbColor: const Color(0xFF00F5FF),
+                        overlayColor: const Color(0xFF00F5FF).withOpacity(0.2),
+                      ),
+                      child: Slider(
+                        value: _maxIterationsWithCve.toDouble(),
+                        min: 10,
+                        max: 60,
+                        divisions: 50,
+                        onChanged: (v) => setState(() => _maxIterationsWithCve = v.round()),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF0A0E27),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: const Color(0xFF00F5FF).withOpacity(0.3)),
+                    ),
+                    child: Text('$_maxIterationsWithCve', style: const TextStyle(color: Color(0xFF00F5FF), fontFamily: 'monospace', fontWeight: FontWeight.bold)),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              const Text('MAX ITERATIONS (NO CVE)', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 12)),
+              const SizedBox(height: 4),
+              const Text('Exploitation loop cap for generic findings without a CVE ID', style: TextStyle(color: Color(0xFF8892B0), fontSize: 11)),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: SliderTheme(
+                      data: SliderThemeData(
+                        activeTrackColor: const Color(0xFF00F5FF),
+                        inactiveTrackColor: const Color(0xFF00F5FF).withOpacity(0.2),
+                        thumbColor: const Color(0xFF00F5FF),
+                        overlayColor: const Color(0xFF00F5FF).withOpacity(0.2),
+                      ),
+                      child: Slider(
+                        value: _maxIterationsNoCve.toDouble(),
+                        min: 5,
+                        max: 60,
+                        divisions: 55,
+                        onChanged: (v) => setState(() => _maxIterationsNoCve = v.round()),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF0A0E27),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: const Color(0xFF00F5FF).withOpacity(0.3)),
+                    ),
+                    child: Text('$_maxIterationsNoCve', style: const TextStyle(color: Color(0xFF00F5FF), fontFamily: 'monospace', fontWeight: FontWeight.bold)),
+                  ),
+                ],
+              ),
               const SizedBox(height: 32),
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
@@ -801,6 +877,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       temperature: _temperature,
       maxTokens: _maxTokens,
       timeoutSeconds: _timeoutSeconds,
+      maxIterationsWithCve: _maxIterationsWithCve,
+      maxIterationsNoCve: _maxIterationsNoCve,
     );
     
     context.read<AppState>().updateLLMSettings(settings);

@@ -6,7 +6,9 @@ A Flutter desktop application that uses large language models to automate penetr
 
 ## How It Works
 
-PenExecute feeds structured scan data (ports, services, banners, DNS records, WAF findings, SSL certificates) into a multi-prompt LLM analysis pipeline. Each analysis prompt is scoped to a specific attack domain — CVE/version matching, web application vulnerabilities, SSL/TLS configuration, DNS/OSINT intelligence, and more. The resulting findings are then individually validated through an autonomous exploit testing loop that executes real commands on your machine, evaluates the output, and iterates until the vulnerability is confirmed, ruled out, or all reasonable approaches are exhausted.
+PenExecute feeds structured scan data (ports, services, banners, DNS records, WAF findings, SSL certificates) into a phased LLM analysis pipeline that mirrors a real engagement workflow: **passive recon → active recon → vulnerability discovery → targeted exploitation → post-exploitation**. Each phase's findings enrich the next, producing more targeted and accurate results than a flat parallel approach.
+
+The resulting findings are then individually validated through an autonomous exploit testing loop that executes real commands on your machine, evaluates the output, and iterates until the vulnerability is confirmed, ruled out, or all reasonable approaches are exhausted. After testing completes, a final chain reasoning pass identifies how confirmed findings can be combined into multi-step attack paths.
 
 Everything runs locally — the LLM sends commands to your shell, not to a cloud execution environment.
 
@@ -19,16 +21,25 @@ Everything runs locally — the LLM sends commands to your shell, not to a cloud
 - Fires different prompt sets depending on scope — external targets get SSL/TLS analysis, DNS/OSINT analysis, and CDN/WAF-aware findings; internal targets get network service and Active Directory-focused analysis
 - Prevents cross-scope noise (no SMB findings on external targets, no subdomain takeover findings on internal hosts)
 
-### Parallel Vulnerability Analysis
-- Runs multiple specialized LLM analysis passes simultaneously against the same target data
+### Phased Engagement Architecture
+Analysis runs in two sequential phases, mirroring the structure of a professional engagement:
+
+**Phase 1 — Passive recon and service fingerprinting** (fast, always runs):
 - **CVE/Version Analysis** — strict product+version matching against known vulnerability ranges
-- **Web Application Analysis** — four focused passes: core injection/CMS/auth weaknesses, API/CORS/JWT/GraphQL authentication, business logic/SSTI/request smuggling/security headers, and secrets/configuration exposure
+- **Network Service Analysis** — SMB, SSH, FTP, databases, SNMP/management protocols, WinRM/WMI, IPv6 attack surface
+- **DNS/OSINT and Email Security** — zone transfer, subdomain recon, SPF/DMARC gaps (external targets)
+- Phase 1 results are compiled into a context block that is injected into every Phase 2 prompt
+
+**Phase 2 — Full vulnerability analysis** (runs after Phase 1, enriched with Phase 1 context):
+- **Web Application Analysis** — four focused passes: core injection/CMS/auth weaknesses, API/CORS/JWT/GraphQL/OAuth authentication, business logic/SSTI/request smuggling/security headers, and secrets/configuration exposure
 - **Active Directory Analysis** — three focused passes: credential attacks (password spraying, Kerberoasting, LDAP null bind), privilege escalation (ADCS, ACL abuse, delegation), and lateral movement (relay attacks, Pass-the-Hash/Ticket, WinRM)
-- **Network Service Analysis** — SMB, SSH, FTP, databases, SNMP/management protocols, WinRM/WMI, IPv6 attack surface, and other non-web services (internal targets)
 - **SSL/TLS Analysis** — cipher strength, protocol versions, certificate validity, known TLS vulnerability classes
-- **DNS/OSINT and Email Security Analysis** — zone transfer, subdomain attack surface inference, SPF/DMARC gaps, email security posture (external targets)
-- **Privilege Escalation Analysis** — OS-level escalation paths (sudo, SUID, service permissions, scheduled tasks, registry, token impersonation) when OS indicators are present
-- Deduplicates findings across all passes before presenting results
+- **Privilege Escalation Analysis** — OS-level escalation paths (sudo, SUID, service permissions, scheduled tasks, registry, token impersonation)
+- **Technology deep-dives** — WordPress, Jenkins, Atlassian, Tomcat, Exchange, Elasticsearch, VMware, GitLab, Citrix, Drupal, MSSQL, ADCS, WAF bypass (each fires only when indicators for that technology are present)
+
+**Post-analysis:**
+- Findings are deduplicated, evidence-quote validated, and sorted by severity, confidence, and business risk
+- If ≥2 HIGH/CRITICAL Active Directory findings are found, a BloodHound-style attack chain reasoning pass fires to identify multi-step paths to Domain Administrator
 
 ### Active Exploit Testing Loop
 - Each selected finding goes through a validation loop that runs real commands against the target
@@ -36,7 +47,14 @@ Everything runs locally — the LLM sends commands to your shell, not to a cloud
 - Loop terminates when: vulnerability is confirmed with proof, ruled out conclusively, or all reasonable approaches are exhausted
 - Hard cap of **100 iterations** for CVE-backed findings, **20 iterations** for speculative findings
 - Duplicate command detection and semantic approach exhaustion tracking prevent spinning
+- **OPSEC-aware prompting** — each iteration includes guidance on request pacing, scan noise reduction, tool signature minimization, and test impact limits
+- **Rate-limit detection** — if command output contains rate-limiting or blocking signals (429, "too many requests", "you have been blocked", etc.), the executor detects it, notifies the LLM, and adjusts its approach for the next iteration
 - Metasploit pre-flight check runs once before testing begins; Metasploit is skipped for the session if unavailable
+
+### Attack Chain Reasoning
+- When a vulnerability is confirmed, the executor identifies whether it enables or simplifies testing another vulnerability type ("chain opportunity") and notes it in the finding's proof
+- Confirmed artifacts (RCE, SQLi, auth bypass, LFI, SSRF, etc.) are fed forward as context — subsequent vulnerabilities on the same target know what access has already been achieved
+- After all per-vulnerability loops complete, if ≥2 findings are confirmed, a post-execution chain reasoning pass fires — identifying how the confirmed findings can be combined into higher-impact multi-step attack paths. These are added as `AttackChain` findings in the vulnerability table
 
 ### Credential Bank
 - Discovered credentials are collected into a session-wide credential bank
@@ -283,6 +301,7 @@ Each vulnerability finding includes:
 | `confidentialityImpact` | CVSS confidentiality impact |
 | `integrityImpact` | CVSS integrity impact |
 | `availabilityImpact` | CVSS availability impact |
+| `businessRisk` | Real-world business impact if exploited — data breach, ransomware pivot, regulatory exposure, operational disruption |
 
 ---
 

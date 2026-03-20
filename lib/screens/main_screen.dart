@@ -11,6 +11,7 @@ import '../models/llm_provider.dart';
 import '../models/target.dart';
 import '../services/vulnerability_analyzer.dart';
 import '../services/exploit_executor.dart';
+import '../services/report_content_service.dart';
 import '../services/report_generator.dart';
 import '../services/command_executor.dart';
 import '../database/database_helper.dart';
@@ -23,9 +24,13 @@ import '../widgets/prompt_log_panel.dart';
 import '../widgets/debug_log_panel.dart';
 import '../widgets/command_log_panel.dart';
 import '../widgets/vulnerability_table.dart';
+import '../widgets/report_config_dialog.dart';
 import '../widgets/results_modal.dart';
+import '../widgets/scope_config_dialog.dart';
 import '../utils/app_exceptions.dart';
 import '../services/storage_service.dart';
+import '../services/prompt_templates.dart';
+import '../services/llm_service.dart';
 
 class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
@@ -326,20 +331,30 @@ class _MainScreenState extends State<MainScreen> {
         ),
         const SizedBox(width: 4),
         Consumer<AppState>(
-          builder: (context, appState, _) => PopupMenuButton<String>(
-            enabled: appState.hasResults,
-            tooltip: 'Export Report',
+          builder: (context, appState, _) => IconButton(
+            tooltip: 'Generate Report',
             icon: Icon(
               Icons.download,
               size: 20,
               color: appState.hasResults ? const Color(0xFF00F5FF) : Colors.white24,
             ),
-            onSelected: (format) => _exportReport(appState, format),
-            itemBuilder: (_) => const [
-              PopupMenuItem(value: 'html', child: Text('Export HTML Report')),
-              PopupMenuItem(value: 'md',   child: Text('Export Markdown Report')),
-              PopupMenuItem(value: 'csv',  child: Text('Export CSV (Findings)')),
-            ],
+            onPressed: appState.hasResults ? () => _exportReport(appState) : null,
+          ),
+        ),
+        const SizedBox(width: 4),
+        Consumer<AppState>(
+          builder: (context, appState, _) => IconButton(
+            tooltip: 'Engagement Scope',
+            icon: Icon(
+              Icons.shield_outlined,
+              size: 20,
+              color: (appState.currentProject?.scope?.isNotEmpty ?? false)
+                  ? const Color(0xFF00F5FF)
+                  : Colors.white54,
+            ),
+            onPressed: appState.currentProject != null
+                ? () => showDialog(context: context, builder: (_) => const ScopeConfigDialog())
+                : null,
           ),
         ),
         const SizedBox(width: 4),
@@ -488,6 +503,14 @@ class _MainScreenState extends State<MainScreen> {
         return;
       }
 
+      // Record first analysis timestamp (only on first run for this project)
+      final project = appState.currentProject;
+      if (project?.id != null && project!.firstAnalysisAt == null) {
+        final now = DateTime.now();
+        await DatabaseHelper.updateProjectFirstAnalysis(project.id!, now);
+        appState.updateCurrentProject(project.copyWith(firstAnalysisAt: now));
+      }
+
       for (final target in targetsToAnalyze) {
         appState.addDebugLog('Starting vulnerability analysis for ${target.address}...');
 
@@ -502,6 +525,9 @@ class _MainScreenState extends State<MainScreen> {
           deviceJson,
           appState.llmSettings,
           confirmedFindingsContext: appState.confirmedFindingsPromptBlock(target.address),
+          onPhaseChange: (phase) => appState.setExecutionStatus(phase),
+          scopeList: appState.currentProject?.scopeList ?? [],
+          exclusionList: appState.currentProject?.exclusionList ?? [],
         );
 
         appState.addDebugLog('Found ${vulns.length} vulnerabilities for ${target.address}');
@@ -522,6 +548,24 @@ class _MainScreenState extends State<MainScreen> {
       }
 
       appState.setAnalysisComplete(true);
+    } on ScopeViolationException catch (e) {
+      // Show scope violations prominently — they indicate a configuration issue
+      context.read<AppState>().addDebugLog('Scope violation: $e');
+      if (mounted) {
+        showDialog(
+          context: context,
+          builder: (_) => AlertDialog(
+            title: const Text('Target Out of Scope'),
+            content: Text(e.message),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('OK'),
+              ),
+            ],
+          ),
+        );
+      }
     } catch (e) {
       context.read<AppState>().addDebugLog('Error: $e');
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
@@ -635,6 +679,11 @@ class _MainScreenState extends State<MainScreen> {
         confirmedFindingsContext: appState.confirmedFindingsPromptBlock(vuln.targetAddress),
         onCredentialsFound: (credMaps) {
           for (final m in credMaps) {
+            final srcName = m['credentialSource'] ?? 'inferred';
+            final src = CredentialSource.values.firstWhere(
+              (e) => e.name == srcName,
+              orElse: () => CredentialSource.inferred,
+            );
             appState.addCredential(DiscoveredCredential(
               service: m['service'] ?? '',
               host: m['host'] ?? vuln.targetAddress,
@@ -643,6 +692,7 @@ class _MainScreenState extends State<MainScreen> {
               secretType: m['secretType'] ?? 'password',
               sourceVuln: vuln.problem,
               discoveredAt: DateTime.now(),
+              credentialSource: src,
             ));
           }
         },
@@ -730,6 +780,30 @@ class _MainScreenState extends State<MainScreen> {
       if (mounted) setState(() {});
     }
 
+    // Phase 36.3: Post-execution exploit chain reasoning pass
+    final confirmedVulns = appState.vulnerabilities
+        .where((v) => v.status == VulnerabilityStatus.confirmed &&
+            v.vulnerabilityType != 'AttackChain')
+        .toList();
+    if (confirmedVulns.length >= 2) {
+      try {
+        appState.setExecutionStatus('Reasoning about attack chains...');
+        final llmService = LLMService(onPromptResponse: (p, r) => appState.addPromptLog(p, r));
+        final chainPrompt = PromptTemplates.exploitChainReasoningPrompt(confirmedVulns);
+        final chainResponse = await llmService.sendMessage(appState.llmSettings, chainPrompt);
+        final chainVulns = VulnerabilityAnalyzer().parseChainResponse(chainResponse);
+        final projectId = appState.currentProject?.id ?? 0;
+        for (final cv in chainVulns) {
+          final inserted = cv..projectId = projectId;
+          final id = await DatabaseHelper.insertVulnerability(inserted);
+          appState.addDebugLog('Added attack chain finding (id=$id): ${cv.problem}');
+        }
+        if (chainVulns.isNotEmpty) await appState.loadVulnerabilities();
+      } catch (e) {
+        appState.addDebugLog('Chain reasoning pass failed (non-fatal): $e');
+      }
+    }
+
     // Mark executionComplete on targets whose vulns were all just run
     final executedAddresses = pendingVulns.map((v) => v.targetAddress).toSet();
     for (final addr in executedAddresses) {
@@ -745,11 +819,80 @@ class _MainScreenState extends State<MainScreen> {
       }
     }
 
+    // Record last execution timestamp
+    final execProject = appState.currentProject;
+    if (execProject?.id != null) {
+      final now = DateTime.now();
+      await DatabaseHelper.updateProjectLastExecution(execProject!.id!, now);
+      appState.updateCurrentProject(execProject.copyWith(lastExecutionAt: now));
+    }
+
+    // Phase 1: Authenticated re-analysis — if new verified credentials were
+    // discovered during execution, run a second analysis pass with auth context
+    // for any targets that haven't been re-analyzed yet.
+    if (appState.hasVerifiedCredentials) {
+      for (final addr in executedAddresses) {
+        if (!appState.hasAuthenticatedReanalysis(addr)) {
+          await _runAuthenticatedReanalysis(appState, addr);
+        }
+      }
+    }
+
     appState.setExecutionStatus('');
     setState(() => _isExecuting = false);
 
     appState.setHasResults(true);
     if (mounted) _showResults(appState);
+  }
+
+  /// Phase 1: Runs a second VulnerabilityAnalyzer pass for [targetAddress]
+  /// with the discovered credential bank injected as authenticated context.
+  /// New findings are de-duplicated by problem name against existing vulns.
+  Future<void> _runAuthenticatedReanalysis(AppState appState, String targetAddress) async {
+    try {
+      final target = appState.targets.firstWhere(
+        (t) => t.address == targetAddress,
+        orElse: () => throw StateError('target not found'),
+      );
+      if (target.jsonFilePath.isEmpty || !await File(target.jsonFilePath).exists()) return;
+
+      appState.markAuthenticatedReanalysis(targetAddress);
+      appState.setExecutionStatus('Authenticated re-analysis: $targetAddress...');
+      appState.addDebugLog('Starting authenticated re-analysis for $targetAddress');
+
+      final deviceJson = await File(target.jsonFilePath).readAsString();
+      final analyzer = VulnerabilityAnalyzer(
+        onPromptResponse: (p, r) => appState.addPromptLog(p, r),
+      );
+      final authVulns = await analyzer.analyzeDevice(
+        deviceJson,
+        appState.llmSettings,
+        credentialContext: appState.authenticatedContextBlock(),
+        confirmedFindingsContext: appState.confirmedFindingsPromptBlock(targetAddress),
+        scopeList: appState.currentProject?.scopeList ?? [],
+        exclusionList: appState.currentProject?.exclusionList ?? [],
+      );
+
+      // Only persist findings whose problem doesn't already exist for this target
+      final existingProblems = appState.vulnerabilities
+          .where((v) => v.targetAddress == targetAddress)
+          .map((v) => v.problem.toLowerCase().trim())
+          .toSet();
+
+      int added = 0;
+      for (final v in authVulns) {
+        if (existingProblems.contains(v.problem.toLowerCase().trim())) continue;
+        v.targetAddress = targetAddress;
+        v.targetId = target.id;
+        v.projectId = appState.currentProject?.id;
+        await DatabaseHelper.insertVulnerability(v);
+        added++;
+      }
+      appState.addDebugLog('Authenticated re-analysis added $added new findings for $targetAddress');
+      if (added > 0) await appState.loadVulnerabilities();
+    } catch (e) {
+      appState.addDebugLog('Authenticated re-analysis failed (non-fatal): $e');
+    }
   }
 
   void _showCredentials(AppState appState) {
@@ -800,6 +943,7 @@ class _MainScreenState extends State<MainScreen> {
       appState.vulnerabilities,
       appState.commandLogs,
       target?.address ?? 'unknown',
+      projectName: appState.currentProject?.name ?? 'PenExecute',
     );
   }
 
@@ -850,8 +994,16 @@ class _MainScreenState extends State<MainScreen> {
     }
   }
 
+  /// Build a filesystem-safe export filename with project name, type, and timestamp.
+  static String _buildExportFileName(String projectName, String exportType, String ext) {
+    final safe = projectName.replaceAll(RegExp(r'[^\w\-]'), '_');
+    final ts = DateTime.now().toIso8601String().substring(0, 16).replaceAll(':', '-');
+    return '${safe}_${exportType}_$ts.$ext';
+  }
+
   Future<void> _exportLogs() async {
-    final logs = context.read<AppState>().commandLogs;
+    final appState = context.read<AppState>();
+    final logs = appState.commandLogs;
     if (logs.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('No command logs to export')),
@@ -863,9 +1015,10 @@ class _MainScreenState extends State<MainScreen> {
       '> ${l.command}\n'
       '${l.output}'
     ).join('\n---\n\n');
+    final projectName = appState.currentProject?.name ?? 'PenExecute';
     final path = await FileDialog.saveFile(
       dialogTitle: 'Save Command Logs',
-      fileName: 'PenExecute_CommandLogs.txt',
+      fileName: _buildExportFileName(projectName, 'CommandLogs', 'txt'),
     );
     if (path != null) {
       await File(path).writeAsString(content);
@@ -874,9 +1027,10 @@ class _MainScreenState extends State<MainScreen> {
 
   Future<void> _exportPrompts(AppState state) async {
     final content = state.promptLogs.map((log) => '=== PROMPT ===\n${log.prompt}\n\n=== RESPONSE ===\n${log.response}\n').join('\n---\n\n');
+    final projectName = state.currentProject?.name ?? 'PenExecute';
     final path = await FileDialog.saveFile(
       dialogTitle: 'Save Prompts',
-      fileName: 'PenExecute_Prompts.txt',
+      fileName: _buildExportFileName(projectName, 'PromptLogs', 'txt'),
     );
     if (path != null) {
       await File(path).writeAsString(content);
@@ -885,63 +1039,117 @@ class _MainScreenState extends State<MainScreen> {
 
   Future<void> _exportDebug(AppState state) async {
     final content = state.debugLogs.map((log) => '[${log.timestamp.toString().substring(11, 19)}] ${log.message}').join('\n');
+    final projectName = state.currentProject?.name ?? 'PenExecute';
     final path = await FileDialog.saveFile(
       dialogTitle: 'Save Debug Log',
-      fileName: 'PenExecute_Debug.txt',
+      fileName: _buildExportFileName(projectName, 'DebugLogs', 'txt'),
     );
     if (path != null) {
       await File(path).writeAsString(content);
     }
   }
 
-  Future<void> _exportReport(AppState state, String format) async {
-    final vulns = state.vulnerabilities;
-    if (vulns.isEmpty) {
+  Future<void> _exportReport(AppState state) async {
+    if (state.vulnerabilities.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('No findings to export')),
       );
       return;
     }
-    final project = state.currentProject;
-    if (project == null) return;
+    if (state.currentProject == null) return;
 
-    final String content;
-    final String fileName;
-    switch (format) {
-      case 'html':
-        content = ReportGenerator.generateHtml(
-          project: project,
-          targets: state.targets,
-          vulnerabilities: vulns,
-          credentials: state.credentials.toList(),
-        );
-        fileName = '${project.name.replaceAll(' ', '_')}_Report.html';
-      case 'md':
-        content = ReportGenerator.generateMarkdown(
-          project: project,
-          targets: state.targets,
-          vulnerabilities: vulns,
-          credentials: state.credentials.toList(),
-        );
-        fileName = '${project.name.replaceAll(' ', '_')}_Report.md';
-      case 'csv':
-        content = ReportGenerator.generateCsv(vulnerabilities: vulns);
-        fileName = '${project.name.replaceAll(' ', '_')}_Findings.csv';
-      default:
-        return;
-    }
+    final config = await showDialog<ReportConfig>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => ReportConfigDialog(appState: state),
+    );
+    if (config == null || !mounted) return;
+
+    final slug = config.reportTitle
+        .replaceAll(RegExp(r'[^a-zA-Z0-9]+'), '_')
+        .replaceAll(RegExp(r'^_+|_+$'), '');
+    final fileName = switch (config.format) {
+      'html' => '${slug}_Report.html',
+      'md'   => '${slug}_Report.md',
+      'csv'  => '${slug}_Findings.csv',
+      _      => '${slug}_Report.html',
+    };
 
     final path = await FileDialog.saveFile(
-      dialogTitle: 'Export Report',
+      dialogTitle: 'Save Report',
       fileName: fileName,
     );
-    if (path != null) {
-      await File(path).writeAsString(content);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Report saved to $path')),
-        );
+    if (path == null || !mounted) return;
+
+    final project = state.currentProject!.copyWith(
+      reportTitle:      config.reportTitle,
+      pentesterName:    config.pentesterName,
+      executiveSummary: config.executiveSummary,
+      methodology:      config.methodology,
+      riskRatingModel:  config.riskRatingModel,
+      conclusion:       config.conclusion,
+    );
+
+    final commandLogs = state.currentProject?.id != null
+        ? await DatabaseHelper.getCommandLogs(state.currentProject!.id!)
+        : <CommandLog>[];
+    if (!mounted) return;
+
+    // Generate attack narrative via LLM when there are confirmed findings and
+    // the format is not CSV (narrative is prose — not useful in tabular output).
+    String? attackNarrative;
+    if (config.format != 'csv') {
+      final narrativePrompt = ReportContentService.buildAttackNarrativePrompt(state);
+      if (narrativePrompt != null) {
+        try {
+          attackNarrative = await ReportContentService.generateSection(
+            prompt: narrativePrompt,
+            settings: state.llmSettings,
+          );
+        } catch (_) {
+          // Narrative generation failure is non-fatal — proceed without it.
+        }
       }
+    }
+    if (!mounted) return;
+
+    final content = switch (config.format) {
+      'html' => ReportGenerator.generateHtml(
+          project: project,
+          targets: state.targets,
+          vulnerabilities: state.vulnerabilities,
+          credentials: state.credentials.toList(),
+          commandLogs: commandLogs,
+          scope: state.projectScope,
+          llmSettings: state.llmSettings,
+          startDate: config.startDate,
+          endDate: config.endDate,
+          attackNarrative: attackNarrative,
+        ),
+      'md'   => ReportGenerator.generateMarkdown(
+          project: project,
+          targets: state.targets,
+          vulnerabilities: state.vulnerabilities,
+          credentials: state.credentials.toList(),
+          commandLogs: commandLogs,
+          scope: state.projectScope,
+          llmSettings: state.llmSettings,
+          startDate: config.startDate,
+          endDate: config.endDate,
+          attackNarrative: attackNarrative,
+        ),
+      'csv'  => ReportGenerator.generateCsv(
+          vulnerabilities: state.vulnerabilities,
+          commandLogs: commandLogs,
+        ),
+      _      => '',
+    };
+
+    await File(path).writeAsString(content);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Report saved to $path')),
+      );
     }
   }
 }

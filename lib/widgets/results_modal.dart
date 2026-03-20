@@ -22,15 +22,17 @@ class ConfirmedResult {
 
 class ResultsModal extends StatelessWidget {
   final List<ConfirmedResult> results;
+  final String projectName;
 
-  const ResultsModal({super.key, required this.results});
+  const ResultsModal({super.key, required this.results, this.projectName = 'PenExecute'});
 
   static Future<void> show(
     BuildContext context,
     List<Vulnerability> vulnerabilities,
     List<CommandLog> commandLogs,
-    String targetAddress,
-  ) {
+    String targetAddress, {
+    String projectName = 'PenExecute',
+  }) {
     final confirmed = vulnerabilities
         .where((v) => v.status == VulnerabilityStatus.confirmed)
         .toList();
@@ -79,7 +81,7 @@ class ResultsModal extends StatelessWidget {
     return showDialog(
       context: context,
       barrierDismissible: true,
-      builder: (_) => ResultsModal(results: results),
+      builder: (_) => ResultsModal(results: results, projectName: projectName),
     );
   }
 
@@ -212,9 +214,11 @@ class ResultsModal extends StatelessWidget {
           ].join(',')),
     ];
 
+    final safe = projectName.replaceAll(RegExp(r'[^\w\-]'), '_');
+    final ts = DateTime.now().toIso8601String().substring(0, 16).replaceAll(':', '-');
     final path = await FileDialog.saveFile(
       dialogTitle: 'Save Results',
-      fileName: 'PenExecute_Results.csv',
+      fileName: '${safe}_Results_$ts.csv',
     );
     if (path != null) {
       await File(path).writeAsString(rows.join('\n'));
@@ -250,6 +254,7 @@ class _ResultCard extends StatefulWidget {
 
 class _ResultCardState extends State<_ResultCard> {
   bool _proofExpanded = false;
+  bool _stepsExpanded = false;
 
   @override
   Widget build(BuildContext context) {
@@ -274,13 +279,28 @@ class _ResultCardState extends State<_ResultCard> {
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                   decoration: BoxDecoration(
-                    color: severityColor.withOpacity(0.15),
+                    color: severityColor.withValues(alpha: 0.15),
                     borderRadius: BorderRadius.circular(4),
-                    border: Border.all(color: severityColor.withOpacity(0.5)),
+                    border: Border.all(color: severityColor.withValues(alpha: 0.5)),
                   ),
                   child: Text(r.vuln.severity,
                       style: TextStyle(color: severityColor, fontSize: 11, fontWeight: FontWeight.bold)),
                 ),
+                if (r.vuln.cvssScore != null) ...[
+                  const SizedBox(width: 6),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF0A0E27),
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(color: severityColor.withValues(alpha: 0.4)),
+                    ),
+                    child: Text(
+                      'CVSS ${r.vuln.cvssScore!.toStringAsFixed(1)}',
+                      style: TextStyle(color: severityColor, fontSize: 11, fontFamily: 'monospace'),
+                    ),
+                  ),
+                ],
                 const SizedBox(width: 10),
                 Expanded(
                   child: Column(
@@ -396,6 +416,40 @@ class _ResultCardState extends State<_ResultCard> {
               ),
             ),
           ),
+          // Reproduction steps (shown when available)
+          if (r.vuln.reproductionSteps != null && r.vuln.reproductionSteps!.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 8, 14, 0),
+              child: _Section(
+                label: 'REPRODUCTION STEPS',
+                icon: Icons.format_list_numbered,
+                iconColor: const Color(0xFF00CCFF),
+                trailing: TextButton(
+                  onPressed: () => setState(() => _stepsExpanded = !_stepsExpanded),
+                  style: TextButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  child: Text(_stepsExpanded ? 'Collapse' : 'Expand',
+                      style: const TextStyle(color: Color(0xFF00CCFF), fontSize: 11)),
+                ),
+                child: AnimatedCrossFade(
+                  duration: const Duration(milliseconds: 200),
+                  crossFadeState: _stepsExpanded ? CrossFadeState.showSecond : CrossFadeState.showFirst,
+                  firstChild: Text(
+                    r.vuln.reproductionSteps!.split('\n').first,
+                    style: const TextStyle(color: Colors.white60, fontSize: 12),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  secondChild: SelectableText(
+                    r.vuln.reproductionSteps!,
+                    style: const TextStyle(color: Colors.white70, fontSize: 13, height: 1.6),
+                  ),
+                ),
+              ),
+            ),
           // Abuse example
           Padding(
             padding: const EdgeInsets.fromLTRB(14, 8, 14, 14),

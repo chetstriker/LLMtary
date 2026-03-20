@@ -19,7 +19,10 @@
       "Bash(awk 'NR>=280 && NR<=420' /home/chetstriker/Documents/PenExecute/penexecute/PLAN.MD)",
       "Bash(awk 'NR>=420 && NR<=498' /home/chetstriker/Documents/PenExecute/penexecute/PLAN.MD)",
       "Bash(flutter test:*)",
-      "Bash(python3 -c \":*)"
+      "Bash(python3 -c \":*)",
+      "Bash(__NEW_LINE_726e39f6aad0352b__ grep:*)",
+      "Bash(grep -v \"^$\")",
+      "Bash(grep -n \"static.*read\\\\|readFile\\\\|File.*read\" /home/chetstriker/Documents/PenExecute/penexecute/lib/services/*.dart)"
     ]
   }
 }
