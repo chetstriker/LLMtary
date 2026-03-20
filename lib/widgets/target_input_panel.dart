@@ -1,9 +1,13 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import '../utils/file_dialog.dart';
+import '../utils/scope_validator.dart';
 import '../models/target.dart';
 import '../services/recon_service.dart';
 import '../models/llm_settings.dart';
+import 'app_state.dart';
+import 'scope_config_dialog.dart';
 
 class TargetInputPanel extends StatefulWidget {
   final LLMSettings llmSettings;
@@ -99,7 +103,18 @@ class _TargetInputPanelState extends State<TargetInputPanel> {
   }
 
   Future<void> _startScan() async {
-    final input = _inputController.text.trim();
+    final appState = context.read<AppState>();
+    String input = _inputController.text.trim();
+
+    // Fall back to IN-SCOPE TARGETS from the Engagement Scope dialog if the
+    // text field is empty.
+    if (input.isEmpty) {
+      final scopeList = appState.currentProject?.scopeList ?? [];
+      if (scopeList.isNotEmpty) {
+        input = scopeList.join('\n');
+      }
+    }
+
     if (input.isEmpty) return;
 
     if (widget.adminPassword == null && widget.onPasswordNeeded != null) {
@@ -136,7 +151,23 @@ class _TargetInputPanelState extends State<TargetInputPanel> {
           .where((t) => t.status == TargetStatus.complete)
           .map((t) => t.address)
           .toSet();
-      final toScan = addresses.where((a) => !alreadyDone.contains(a)).toList();
+      List<String> toScan = addresses.where((a) => !alreadyDone.contains(a)).toList();
+
+      // Apply OUT-OF-SCOPE EXCLUSIONS — remove any address that matches the
+      // engagement scope exclusion list so GO honours the same rules as ANALYZE.
+      final exclusionList = appState.currentProject?.exclusionList ?? [];
+      if (exclusionList.isNotEmpty) {
+        final excluded = toScan.where((a) {
+          final r = ScopeValidator.validate(a, ['*'], exclusionList);
+          return r == ScopeResult.excluded;
+        }).toList();
+        if (excluded.isNotEmpty) {
+          for (final addr in excluded) {
+            widget.onProgress('[$addr] Excluded by engagement scope — skipping');
+          }
+          toScan = toScan.where((a) => !excluded.contains(a)).toList();
+        }
+      }
 
       // Add pending entries for addresses that still need scanning
       for (final addr in toScan) {
@@ -155,10 +186,38 @@ class _TargetInputPanelState extends State<TargetInputPanel> {
         return;
       }
 
-      setState(() => _statusMessage = 'Scanning ${toScan.length} new target(s)...');
+      // --- Fast parallel host-alive pre-sweep ---
+      // Before starting full recon on any host, ping all targets concurrently
+      // to eliminate unreachable hosts and avoid wasting time/tokens on them.
+      List<String> aliveHosts = toScan;
+      if (toScan.length > 1) {
+        setState(() => _statusMessage = 'Checking which of ${toScan.length} hosts are up...');
+        widget.onProgress('Host pre-sweep: pinging ${toScan.length} targets in parallel...');
+        final aliveResults = await Future.wait(
+          toScan.map((addr) => ReconService.quickHostAlive(addr).then((up) => MapEntry(addr, up))),
+        );
+        final deadHosts = aliveResults.where((e) => !e.value).map((e) => e.key).toList();
+        aliveHosts = aliveResults.where((e) => e.value).map((e) => e.key).toList();
+        // Mark dead hosts as excluded immediately
+        for (final addr in deadHosts) {
+          _liveTargets.removeWhere((t) => t.address == addr);
+          widget.onProgress('[$addr] Pre-sweep: host is down — skipping');
+        }
+        if (aliveHosts.isEmpty) {
+          setState(() {
+            _statusMessage = 'No hosts responded to ping — all ${toScan.length} target(s) appear down';
+            _isScanning = false;
+          });
+          return;
+        }
+        widget.onProgress('Pre-sweep complete: ${aliveHosts.length}/${toScan.length} hosts are up');
+        setState(() => _statusMessage = '${aliveHosts.length}/${toScan.length} hosts up — starting recon...');
+      }
 
-      for (int i = 0; i < toScan.length; i++) {
-        final addr = toScan[i];
+      setState(() => _statusMessage = 'Scanning ${aliveHosts.length} target(s)...');
+
+      for (int i = 0; i < aliveHosts.length; i++) {
+        final addr = aliveHosts[i];
         _updateTargetStatus(addr, TargetStatus.scanning);
 
         final recon = ReconService(
@@ -271,8 +330,33 @@ class _TargetInputPanelState extends State<TargetInputPanel> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           // ── Input area (always visible) ───────────────────────────────────
-          const Text('TARGET SCOPE',
-              style: TextStyle(color: _cyan, fontWeight: FontWeight.bold, fontSize: 10)),
+          Row(
+            children: [
+              const Text('TARGET SCOPE',
+                  style: TextStyle(color: _cyan, fontWeight: FontWeight.bold, fontSize: 10)),
+              const SizedBox(width: 6),
+              Consumer<AppState>(
+                builder: (context, appState, _) => SizedBox(
+                  width: 22,
+                  height: 22,
+                  child: IconButton(
+                    padding: EdgeInsets.zero,
+                    tooltip: 'Engagement Scope',
+                    icon: Icon(
+                      Icons.shield_outlined,
+                      size: 14,
+                      color: (appState.currentProject?.scope?.isNotEmpty ?? false)
+                          ? _cyan
+                          : Colors.white38,
+                    ),
+                    onPressed: appState.currentProject != null
+                        ? () => showDialog(context: context, builder: (_) => const ScopeConfigDialog())
+                        : null,
+                  ),
+                ),
+              ),
+            ],
+          ),
           const SizedBox(height: 6),
           TextField(
             controller: _inputController,

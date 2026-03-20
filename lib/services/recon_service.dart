@@ -1816,6 +1816,41 @@ Respond ONLY with valid JSON.''';
   }
 
   // ---------------------------------------------------------------------------
+  // Host liveness pre-sweep
+  // ---------------------------------------------------------------------------
+
+  /// Quick single-packet ping to determine if a host is reachable.
+  ///
+  /// Used for a parallel pre-sweep before full recon so we don't waste time
+  /// and tokens running nmap or LLM iterations against hosts that don't exist.
+  /// Returns true if the host responded, false if it is down or unreachable.
+  static Future<bool> quickHostAlive(String address) async {
+    try {
+      final isWindows = Platform.isWindows;
+      final List<String> args = isWindows
+          ? ['-n', '1', '-w', '2000', address]
+          : ['-c', '1', '-W', '2', address];
+      final result = await Process.run(
+        isWindows ? 'ping' : 'ping',
+        args,
+      ).timeout(const Duration(seconds: 10));
+      if (result.exitCode == 0) return true;
+      // Some systems return exit 0 even on failure; parse output as fallback
+      final out = (result.stdout as String).toLowerCase();
+      if (out.contains('0 received') ||
+          out.contains('100% packet loss') ||
+          out.contains('host unreachable') ||
+          out.contains('request timed out') ||
+          out.contains('destination host unreachable')) {
+        return false;
+      }
+      return result.exitCode == 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Phase 1.1 — Wire ReconService into analysis flow
   // ---------------------------------------------------------------------------
 

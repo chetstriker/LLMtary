@@ -26,7 +26,6 @@ import '../widgets/command_log_panel.dart';
 import '../widgets/vulnerability_table.dart';
 import '../widgets/report_config_dialog.dart';
 import '../widgets/results_modal.dart';
-import '../widgets/scope_config_dialog.dart';
 import '../utils/app_exceptions.dart';
 import '../services/storage_service.dart';
 import '../services/prompt_templates.dart';
@@ -157,7 +156,16 @@ class _MainScreenState extends State<MainScreen> {
                           },
                           onTargetsDiscovered: (targets) async => await appState.setTargets(targets),
                           onTargetDeleted: (target) => appState.deleteTarget(target),
-                          onScanComplete: () => appState.setScanComplete(true),
+                          onScanComplete: () {
+                            appState.setScanComplete(true);
+                            final done = appState.targets.where((t) => t.status == TargetStatus.complete).length;
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                                content: Text('Scan complete — $done target(s) ready for analysis'),
+                                duration: const Duration(seconds: 4),
+                              ));
+                            }
+                          },
                           targets: appState.targets,
                           existingTargets: appState.targets,
                           selectedTarget: appState.selectedTarget,
@@ -342,22 +350,6 @@ class _MainScreenState extends State<MainScreen> {
           ),
         ),
         const SizedBox(width: 4),
-        Consumer<AppState>(
-          builder: (context, appState, _) => IconButton(
-            tooltip: 'Engagement Scope',
-            icon: Icon(
-              Icons.shield_outlined,
-              size: 20,
-              color: (appState.currentProject?.scope?.isNotEmpty ?? false)
-                  ? const Color(0xFF00F5FF)
-                  : Colors.white54,
-            ),
-            onPressed: appState.currentProject != null
-                ? () => showDialog(context: context, builder: (_) => const ScopeConfigDialog())
-                : null,
-          ),
-        ),
-        const SizedBox(width: 4),
         IconButton(
           icon: const Icon(Icons.settings, color: Color(0xFF00F5FF)),
           onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsScreen())),
@@ -511,58 +503,68 @@ class _MainScreenState extends State<MainScreen> {
         appState.updateCurrentProject(project.copyWith(firstAnalysisAt: now));
       }
 
+      int analyzed = 0;
       for (final target in targetsToAnalyze) {
         appState.addDebugLog('Starting vulnerability analysis for ${target.address}...');
+        appState.setExecutionStatus('Analyzing ${target.address}...');
+        try {
+          final deviceJson = await File(target.jsonFilePath).readAsString();
 
-        final deviceJson = await File(target.jsonFilePath).readAsString();
+          final analyzer = VulnerabilityAnalyzer(
+            onPromptResponse: (prompt, response) {
+              appState.addPromptLog(prompt, response);
+            },
+          );
+          final vulns = await analyzer.analyzeDevice(
+            deviceJson,
+            appState.llmSettings,
+            confirmedFindingsContext: appState.confirmedFindingsPromptBlock(target.address),
+            onPhaseChange: (phase) => appState.setExecutionStatus(phase),
+            scopeList: appState.currentProject?.scopeList ?? [],
+            exclusionList: appState.currentProject?.exclusionList ?? [],
+          );
 
-        final analyzer = VulnerabilityAnalyzer(
-          onPromptResponse: (prompt, response) {
-            appState.addPromptLog(prompt, response);
-          },
-        );
-        final vulns = await analyzer.analyzeDevice(
-          deviceJson,
-          appState.llmSettings,
-          confirmedFindingsContext: appState.confirmedFindingsPromptBlock(target.address),
-          onPhaseChange: (phase) => appState.setExecutionStatus(phase),
-          scopeList: appState.currentProject?.scopeList ?? [],
-          exclusionList: appState.currentProject?.exclusionList ?? [],
-        );
+          appState.addDebugLog('Found ${vulns.length} vulnerabilities for ${target.address}');
+          for (final v in vulns) {
+            v.targetAddress = target.address;
+            v.targetId = target.id;
+            v.projectId = appState.currentProject?.id;
+            await DatabaseHelper.insertVulnerability(v);
+            appState.addDebugLog('Added: ${v.problem}');
+          }
 
-        appState.addDebugLog('Found ${vulns.length} vulnerabilities for ${target.address}');
-        for (final v in vulns) {
-          v.targetAddress = target.address;
-          v.targetId = target.id;
-          v.projectId = appState.currentProject?.id;
-          await DatabaseHelper.insertVulnerability(v);
-          appState.addDebugLog('Added: ${v.problem}');
+          // Mark this target's analysis as complete
+          target.analysisComplete = true;
+          await DatabaseHelper.updateTarget(target);
+
+          appState.loadVulnerabilities();
+          if (mounted) setState(() {});
+          analyzed++;
+        } on ScopeViolationException catch (e) {
+          appState.addDebugLog('[${target.address}] Scope violation: $e — skipping');
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('[${target.address}] Out of scope: $e')),
+            );
+          }
+        } catch (e) {
+          // Log and continue to next target — one failure must not stop the rest
+          appState.addDebugLog('[${target.address}] Analysis error (skipping): $e');
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('[${target.address}] Analysis error (skipped): $e')),
+            );
+          }
         }
-
-        // Mark this target's analysis as complete
-        target.analysisComplete = true;
-        await DatabaseHelper.updateTarget(target);
-
-        appState.loadVulnerabilities();
-        if (mounted) setState(() {});
       }
 
       appState.setAnalysisComplete(true);
-    } on ScopeViolationException catch (e) {
-      // Show scope violations prominently — they indicate a configuration issue
-      context.read<AppState>().addDebugLog('Scope violation: $e');
+      appState.setExecutionStatus('');
       if (mounted) {
-        showDialog(
-          context: context,
-          builder: (_) => AlertDialog(
-            title: const Text('Target Out of Scope'),
-            content: Text(e.message),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('OK'),
-              ),
-            ],
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Analysis complete — $analyzed/${targetsToAnalyze.length} target(s) analyzed'),
+            duration: const Duration(seconds: 4),
           ),
         );
       }
@@ -639,6 +641,8 @@ class _MainScreenState extends State<MainScreen> {
         continue;
       }
       appState.addDebugLog('Processing vulnerability id=${vuln.id} at index=$vulnIdx');
+
+      try {
 
       final selectedTarget = appState.selectedTarget;
       final deviceJson = selectedTarget != null
@@ -778,6 +782,16 @@ class _MainScreenState extends State<MainScreen> {
 
       await appState.loadCommandLogs();
       if (mounted) setState(() {});
+
+      } catch (e) {
+        // Log and continue — one failed exploit test must not stop the rest
+        appState.addDebugLog('[${vuln.problem}] Execution error (skipping): $e');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('[${vuln.targetAddress}] Execution error (skipped): $e')),
+          );
+        }
+      }
     }
 
     // Phase 36.3: Post-execution exploit chain reasoning pass
@@ -840,6 +854,14 @@ class _MainScreenState extends State<MainScreen> {
 
     appState.setExecutionStatus('');
     setState(() => _isExecuting = false);
+
+    final confirmedCount = appState.vulnerabilities.where((v) => v.status == VulnerabilityStatus.confirmed).length;
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('Execution complete — $confirmedCount confirmed finding(s) out of ${pendingVulns.length} tested'),
+        duration: const Duration(seconds: 5),
+      ));
+    }
 
     appState.setHasResults(true);
     if (mounted) _showResults(appState);
