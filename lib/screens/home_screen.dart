@@ -30,8 +30,11 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _loadProjects() async {
     setState(() => _loading = true);
-    _projects = await DatabaseHelper.getProjects();
-    setState(() => _loading = false);
+    try {
+      _projects = await DatabaseHelper.getProjects();
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
   }
 
   Future<void> _createProject() async {

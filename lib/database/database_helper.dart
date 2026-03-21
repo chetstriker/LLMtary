@@ -26,6 +26,7 @@ class DatabaseHelper {
 
   static Future<Database> _initDatabase() async {
     final appDir = await getApplicationSupportDirectory();
+    await appDir.create(recursive: true);
     final path = join(appDir.path, 'penexecute.db');
     print('Database path: $path');
     
