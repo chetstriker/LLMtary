@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../utils/file_dialog.dart';
@@ -57,10 +58,17 @@ class TargetInputPanel extends StatefulWidget {
   State<TargetInputPanel> createState() => _TargetInputPanelState();
 }
 
-class _TargetInputPanelState extends State<TargetInputPanel> {
+class _TargetInputPanelState extends State<TargetInputPanel>
+    with SingleTickerProviderStateMixin {
   final _inputController = TextEditingController();
   bool _isScanning = false;
   String _statusMessage = '';
+
+  late final AnimationController _shakeController;
+  // Shake: 3 s active, 2 s pause, repeat
+  static const _shakeDuration = Duration(milliseconds: 3000);
+  static const _shakePauseDuration = Duration(milliseconds: 2000);
+  bool _shakeActive = true;
 
   // Live target list built during scanning (mutable so we can update status)
   final List<Target> _liveTargets = [];
@@ -78,11 +86,61 @@ class _TargetInputPanelState extends State<TargetInputPanel> {
         _liveTargets.add(t);
       }
     }
+
+    _shakeController = AnimationController(
+      vsync: this,
+      duration: _shakeDuration,
+    );
+
+    // Check initial scope state after first frame
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final appState = context.read<AppState>();
+      if (_hasScopeData(appState)) {
+        _stopShake();
+      } else {
+        _runShakeLoop();
+        appState.addListener(_onAppStateChanged);
+      }
+    });
+  }
+
+  bool _hasScopeData(AppState appState) {
+    final p = appState.currentProject;
+    return (p?.scope?.isNotEmpty ?? false) ||
+        (p?.scopeExclusions?.isNotEmpty ?? false) ||
+        (p?.scopeNotes?.isNotEmpty ?? false);
+  }
+
+  void _onAppStateChanged() {
+    if (!mounted) return;
+    final appState = context.read<AppState>();
+    if (_hasScopeData(appState)) {
+      _stopShake();
+      appState.removeListener(_onAppStateChanged);
+    }
+  }
+
+  void _runShakeLoop() async {
+    while (mounted && _shakeActive) {
+      await _shakeController.forward(from: 0);
+      if (!mounted || !_shakeActive) break;
+      await Future.delayed(_shakePauseDuration);
+    }
+  }
+
+  void _stopShake() {
+    if (!_shakeActive) return;
+    _shakeActive = false;
+    _shakeController.stop();
+    _shakeController.value = 0;
   }
 
   @override
   void dispose() {
+    _shakeController.dispose();
     _inputController.dispose();
+    // Safe: removeListener is a no-op if not registered
+    context.read<AppState>().removeListener(_onAppStateChanged);
     super.dispose();
   }
 
@@ -103,6 +161,7 @@ class _TargetInputPanelState extends State<TargetInputPanel> {
   }
 
   Future<void> _startScan() async {
+    _stopShake();
     final appState = context.read<AppState>();
     String input = _inputController.text.trim();
 
@@ -336,24 +395,41 @@ class _TargetInputPanelState extends State<TargetInputPanel> {
                   style: TextStyle(color: _cyan, fontWeight: FontWeight.bold, fontSize: 10)),
               const SizedBox(width: 6),
               Consumer<AppState>(
-                builder: (context, appState, _) => SizedBox(
-                  width: 22,
-                  height: 22,
-                  child: IconButton(
-                    padding: EdgeInsets.zero,
-                    tooltip: 'Engagement Scope',
-                    icon: Icon(
-                      Icons.shield_outlined,
-                      size: 14,
-                      color: (appState.currentProject?.scope?.isNotEmpty ?? false)
-                          ? _cyan
-                          : Colors.white38,
+                builder: (context, appState, _) {
+                  final hasScopeData = _hasScopeData(appState);
+                  final iconColor = hasScopeData
+                      ? const Color(0xFF00FF88)
+                      : Colors.white38;
+                  final iconData = hasScopeData
+                      ? Icons.shield
+                      : Icons.shield_outlined;
+                  return AnimatedBuilder(
+                    animation: _shakeController,
+                    builder: (context, child) {
+                      final offset = _shakeActive
+                          ? math.sin(_shakeController.value * math.pi * 8) * 2.0
+                          : 0.0;
+                      return Transform.translate(
+                        offset: Offset(offset, 0),
+                        child: child,
+                      );
+                    },
+                    child: SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: IconButton(
+                        padding: EdgeInsets.zero,
+                        tooltip: 'Engagement Scope',
+                        icon: Icon(iconData, size: 14, color: iconColor),
+                        onPressed: appState.currentProject != null
+                            ? () => showDialog(
+                                context: context,
+                                builder: (_) => const ScopeConfigDialog())
+                            : null,
+                      ),
                     ),
-                    onPressed: appState.currentProject != null
-                        ? () => showDialog(context: context, builder: (_) => const ScopeConfigDialog())
-                        : null,
-                  ),
-                ),
+                  );
+                },
               ),
             ],
           ),

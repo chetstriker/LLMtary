@@ -2,11 +2,13 @@ import 'dart:io';
 import 'dart:convert';
 import '../models/llm_settings.dart';
 import '../models/command_log.dart';
+import '../models/environment_info.dart';
 import '../utils/json_parser.dart';
 import '../utils/command_utils.dart';
 import '../database/database_helper.dart';
 import '../utils/device_utils.dart';
 import 'command_executor.dart';
+import 'environment_discovery.dart';
 import 'llm_service.dart';
 import 'storage_service.dart';
 
@@ -289,6 +291,8 @@ class ReconService {
     }
 
     onProgress?.call('[$address] Running baseline scan...');
+    // Discover environment once (cached across targets)
+    final envInfo = await EnvironmentDiscovery.discover();
     final baseline = await _runBaselineCommands(
       address: address,
       scope: scope,
@@ -299,6 +303,7 @@ class ReconService {
       projectId: projectId,
       targetId: targetId,
       llmService: llmService,
+      envInfo: envInfo,
     );
     if (!baseline.isAlive) {
       onProgress?.call('[$address] Host is down — aborting recon');
@@ -338,6 +343,7 @@ class ReconService {
         findings: findings,
         history: history,
         historyHint: historyHint,
+        envInfo: envInfo,
       );
 
       String response;
@@ -578,6 +584,7 @@ class ReconService {
     required Map<String, dynamic> findings,
     required String history,
     required String historyHint,
+    EnvironmentInfo? envInfo,
   }) {
     final focusHints = _buildFocusHints(address, findings, env, scope);
     final baseline = scope == TargetScope.external
@@ -594,6 +601,7 @@ Every command must be read-only and purely informational.
 - Execution environment: ${env.label}
 - Output directory: $outDir (ALL files MUST be saved here — use full absolute path)
 
+${envInfo != null ? envInfo.toPromptBlock() : ''}
 ${env.shellRules}
 
 ## FILE OUTPUT RULES (CRITICAL):
@@ -1366,6 +1374,7 @@ Respond ONLY with valid JSON.''';
     required int projectId,
     required int targetId,
     required LLMService llmService,
+    EnvironmentInfo? envInfo,
   }) async {
     final commandsRun = <String>[];
     bool isAlive = true;

@@ -644,18 +644,18 @@ class _MainScreenState extends State<MainScreen> {
 
       try {
 
-      final selectedTarget = appState.selectedTarget;
-      final deviceJson = selectedTarget != null
-          ? await File(selectedTarget.jsonFilePath).readAsString()
-          : '{}';
-
-      final targetForVuln = appState.targets.firstWhere(
+      final targetForVulnLookup = appState.targets.firstWhere(
         (t) => t.address == vuln.targetAddress,
         orElse: () => appState.selectedTarget ?? appState.targets.first,
       );
+      final deviceJson = targetForVulnLookup.jsonFilePath.isNotEmpty &&
+              await File(targetForVulnLookup.jsonFilePath).exists()
+          ? await File(targetForVulnLookup.jsonFilePath).readAsString()
+          : '{}';
+
       final vulnOutputDir = StorageService.toShellPath(
         await StorageService.getTargetPath(
-          appState.currentProjectName, targetForVuln.address));
+          appState.currentProjectName, targetForVulnLookup.address));
 
       final executor = ExploitExecutor(
         deviceData: deviceJson,

@@ -723,6 +723,18 @@ Respond ONLY with valid JSON.''';
         return false;
       }
 
+      // Validate that the LLM's command uses the correct package manager.
+      // If the LLM suggests apt-get but we detected pacman (or vice versa),
+      // regenerate the command using the correct package manager.
+      const knownManagers = ['apt-get', 'apt', 'yum', 'dnf', 'pacman', 'zypper', 'apk', 'brew', 'choco', 'scoop', 'winget'];
+      final wrongManager = knownManagers.where((m) => m != packageManager && installCmd.contains(m)).firstOrNull;
+      if (wrongManager != null) {
+        print('${_timestamp()} DEBUG: LLM suggested $wrongManager but detected $packageManager — regenerating command');
+        final pkg = decision['package'] ?? primaryTool;
+        installCmd = _getInstallCommand(packageManager, pkg);
+        print('${_timestamp()} DEBUG: Corrected install command: $installCmd');
+      }
+
       // Remove apt-get update from the command - it takes too long
       installCmd = installCmd.replaceAll(RegExp(r'sudo\s+apt-get\s+update\s*&&\s*'), '');
       installCmd = installCmd.replaceAll(RegExp(r'apt-get\s+update\s*&&\s*'), '');
@@ -1084,6 +1096,7 @@ Respond ONLY with valid JSON.''';
   }
 
   static Future<CommandResult> _executeInWsl(String command) async {
+    Process? process;
     try {
       // nmap -p- scans can take 10+ minutes; other commands are fast.
       // Use a longer timeout for full port scans.
@@ -1091,7 +1104,7 @@ Respond ONLY with valid JSON.''';
       final timeout = isFullPortScan
           ? const Duration(minutes: 15)
           : const Duration(minutes: 5);
-      final process = await Process.start('wsl', ['bash', '-c', command])
+      process = await Process.start('wsl', ['bash', '-c', command])
           .timeout(timeout);
 
       final stdoutBuffer = StringBuffer();
@@ -1112,11 +1125,13 @@ Respond ONLY with valid JSON.''';
         stderrBuffer.write(sanitized);
       });
 
-      final exitCode = await process.exitCode;
+      final exitCode = await process.exitCode.timeout(timeout);
       return CommandResult(exitCode, stdoutBuffer.toString(), stderrBuffer.toString());
     } on TimeoutException {
+      process?.kill(ProcessSignal.sigkill);
       return CommandResult(-1, "", "Command timed out.");
     } catch (e) {
+      process?.kill(ProcessSignal.sigkill);
       return CommandResult(-1, "", "Error: $e");
     }
   }
