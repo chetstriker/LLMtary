@@ -1,8 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 import 'package:archive/archive.dart';
 import '../utils/file_dialog.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:pointycastle/export.dart';
 import '../database/database_helper.dart';
@@ -11,6 +11,38 @@ import '../models/target.dart';
 import '../models/credential.dart';
 import '../services/storage_service.dart';
 import '../widgets/admin_password_dialog.dart';
+
+// Top-level functions required by compute() (must be top-level or static)
+Map<String, dynamic> _encryptIsolate(Map<String, dynamic> args) {
+  final plaintext = args['plaintext'] as Uint8List;
+  final password = args['password'] as String;
+  final salt = args['salt'] as Uint8List;
+  final iv = args['iv'] as Uint8List;
+  final key = _deriveKeySync(password, salt);
+  final cipher = GCMBlockCipher(AESEngine())
+    ..init(true, AEADParameters(KeyParameter(key), 128, iv, Uint8List(0)));
+  final ciphertext = cipher.process(plaintext);
+  return {'salt': salt, 'iv': iv, 'ciphertext': ciphertext};
+}
+
+Uint8List _decryptIsolate(Map<String, dynamic> args) {
+  final data = args['data'] as Uint8List;
+  final password = args['password'] as String;
+  if (data.length < 16 + 12 + 16) throw Exception('File too short');
+  final salt = data.sublist(0, 16);
+  final iv = data.sublist(16, 28);
+  final ciphertext = data.sublist(28);
+  final key = _deriveKeySync(password, salt);
+  final cipher = GCMBlockCipher(AESEngine())
+    ..init(false, AEADParameters(KeyParameter(key), 128, iv, Uint8List(0)));
+  return cipher.process(ciphertext);
+}
+
+Uint8List _deriveKeySync(String password, Uint8List salt) {
+  final pbkdf2 = PBKDF2KeyDerivator(HMac(SHA256Digest(), 64))
+    ..init(Pbkdf2Parameters(salt, 200000, 32));
+  return pbkdf2.process(utf8.encode(password));
+}
 
 class ProjectPorter {
   // ── Public API ─────────────────────────────────────────────────────────────
@@ -23,9 +55,30 @@ class ProjectPorter {
     );
     if (password == null || password.isEmpty) return;
 
+    if (!context.mounted) return;
+    _showProgressDialog(context, 'Encrypting project…');
+
     try {
+      debugPrint('[ProjectPorter] Building zip for "${project.name}"');
       final zipBytes = await _buildZip(project);
-      final encrypted = _encrypt(zipBytes, password);
+      debugPrint('[ProjectPorter] Zip built (${zipBytes.length} bytes), encrypting…');
+
+      final salt = _randomBytes(16);
+      final iv = _randomBytes(12);
+      final result = await compute(_encryptIsolate, {
+        'plaintext': zipBytes,
+        'password': password,
+        'salt': salt,
+        'iv': iv,
+      });
+      final encrypted = Uint8List.fromList([
+        ...result['salt'] as Uint8List,
+        ...result['iv'] as Uint8List,
+        ...result['ciphertext'] as Uint8List,
+      ]);
+      debugPrint('[ProjectPorter] Encryption complete (${encrypted.length} bytes)');
+
+      if (context.mounted) Navigator.of(context, rootNavigator: true).pop();
 
       final savePath = await FileDialog.saveFile(
         dialogTitle: 'Export Project',
@@ -34,14 +87,17 @@ class ProjectPorter {
       if (savePath == null) return;
 
       await File(savePath).writeAsBytes(encrypted);
+      debugPrint('[ProjectPorter] Exported to $savePath');
 
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Project exported to $savePath')),
         );
       }
-    } catch (e) {
+    } catch (e, st) {
+      debugPrint('[ProjectPorter] Export failed: $e\n$st');
       if (context.mounted) {
+        Navigator.of(context, rootNavigator: true).pop();
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Export failed: $e')),
         );
@@ -62,13 +118,25 @@ class ProjectPorter {
     );
     if (password == null || password.isEmpty) return null;
 
+    if (!context.mounted) return null;
+    _showProgressDialog(context, 'Decrypting project…');
+
     try {
+      debugPrint('[ProjectPorter] Reading file: ${result.files.single.path}');
       final fileBytes = await File(result.files.single.path!).readAsBytes();
+      debugPrint('[ProjectPorter] File read (${fileBytes.length} bytes), decrypting…');
+
       final Uint8List zipBytes;
       try {
-        zipBytes = _decrypt(fileBytes, password);
-      } catch (_) {
+        zipBytes = await compute(_decryptIsolate, {
+          'data': fileBytes,
+          'password': password,
+        });
+        debugPrint('[ProjectPorter] Decryption successful (${zipBytes.length} bytes)');
+      } catch (e) {
+        debugPrint('[ProjectPorter] Decryption failed: $e');
         if (context.mounted) {
+          Navigator.of(context, rootNavigator: true).pop();
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Incorrect password or corrupted file')),
           );
@@ -77,15 +145,43 @@ class ProjectPorter {
       }
 
       if (!context.mounted) return null;
-      return await _extractAndImport(zipBytes, context);
-    } catch (e) {
+      Navigator.of(context, rootNavigator: true).pop();
+      _showProgressDialog(context, 'Importing project…');
+
+      if (!context.mounted) return null;
+      final project = await _extractAndImport(zipBytes, context);
+      if (context.mounted) Navigator.of(context, rootNavigator: true).pop();
+      return project;
+    } catch (e, st) {
+      debugPrint('[ProjectPorter] Import failed: $e\n$st');
       if (context.mounted) {
+        Navigator.of(context, rootNavigator: true).pop();
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Import failed: $e')),
         );
       }
       return null;
     }
+  }
+
+  static void _showProgressDialog(BuildContext context, String message) {
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          backgroundColor: const Color(0xFF1A1F3A),
+          content: Row(
+            children: [
+              const CircularProgressIndicator(color: Color(0xFF00F5FF)),
+              const SizedBox(width: 20),
+              Text(message, style: const TextStyle(color: Colors.white70)),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   // ── ZIP builder ────────────────────────────────────────────────────────────
@@ -239,38 +335,6 @@ class ProjectPorter {
   }
 
   // ── Encryption (AES-256-GCM, PBKDF2-SHA256) ───────────────────────────────
-
-  static Uint8List _encrypt(Uint8List plaintext, String password) {
-    final salt = _randomBytes(16);
-    final iv = _randomBytes(12);
-    final key = _deriveKey(password, salt);
-
-    final cipher = GCMBlockCipher(AESEngine())
-      ..init(true, AEADParameters(KeyParameter(key), 128, iv, Uint8List(0)));
-
-    final ciphertext = cipher.process(plaintext);
-    // ciphertext already includes the 16-byte GCM tag appended by pointycastle
-    return Uint8List.fromList([...salt, ...iv, ...ciphertext]);
-  }
-
-  static Uint8List _decrypt(Uint8List data, String password) {
-    if (data.length < 16 + 12 + 16) throw Exception('File too short');
-    final salt = data.sublist(0, 16);
-    final iv = data.sublist(16, 28);
-    final ciphertext = data.sublist(28);
-    final key = _deriveKey(password, salt);
-
-    final cipher = GCMBlockCipher(AESEngine())
-      ..init(false, AEADParameters(KeyParameter(key), 128, iv, Uint8List(0)));
-
-    return cipher.process(ciphertext); // throws InvalidCipherTextException on bad password
-  }
-
-  static Uint8List _deriveKey(String password, Uint8List salt) {
-    final pbkdf2 = PBKDF2KeyDerivator(HMac(SHA256Digest(), 64))
-      ..init(Pbkdf2Parameters(salt, 200000, 32));
-    return pbkdf2.process(utf8.encode(password) as Uint8List);
-  }
 
   static Uint8List _randomBytes(int length) {
     final random = FortunaRandom();

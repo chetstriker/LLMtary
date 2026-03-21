@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'package:path/path.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import '../models/vulnerability.dart';
 import '../models/command_log.dart';
@@ -24,8 +25,8 @@ class DatabaseHelper {
   }
 
   static Future<Database> _initDatabase() async {
-    final dbPath = await getDatabasesPath();
-    final path = join(dbPath, 'penexecute.db');
+    final appDir = await getApplicationSupportDirectory();
+    final path = join(appDir.path, 'penexecute.db');
     print('Database path: $path');
     
     return await openDatabase(

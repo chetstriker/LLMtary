@@ -32,5 +32,5 @@ class ConfigDefaults {
   static const double temperature = 0.22;
   static const int maxTokens = 4096;
   static const int timeoutSeconds = 240;
-  static const int maxIterations = 30;
+  static const int maxIterations = 25;
 }

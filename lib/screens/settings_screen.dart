@@ -76,7 +76,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _loadMaxIterations() async {
     final value = await DatabaseHelper.getSetting(SettingsKeys.maxIterations);
-    setState(() => _maxIterations = int.tryParse(value ?? '${ConfigDefaults.maxIterations}') ?? ConfigDefaults.maxIterations);
+    final parsed = int.tryParse(value ?? '') ?? 25;
+    setState(() => _maxIterations = parsed.clamp(1, 25));
   }
 
   @override

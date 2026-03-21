@@ -63,6 +63,7 @@ class _TargetInputPanelState extends State<TargetInputPanel>
   final _inputController = TextEditingController();
   bool _isScanning = false;
   String _statusMessage = '';
+  AppState? _appStateListener; // cached ref for safe removal in dispose()
 
   late final AnimationController _shakeController;
   // Shake: 3 s active, 2 s pause, repeat
@@ -99,6 +100,7 @@ class _TargetInputPanelState extends State<TargetInputPanel>
         _stopShake();
       } else {
         _runShakeLoop();
+        _appStateListener = appState;
         appState.addListener(_onAppStateChanged);
       }
     });
@@ -116,6 +118,7 @@ class _TargetInputPanelState extends State<TargetInputPanel>
     final appState = context.read<AppState>();
     if (_hasScopeData(appState)) {
       _stopShake();
+      _appStateListener = null;
       appState.removeListener(_onAppStateChanged);
     }
   }
@@ -139,8 +142,7 @@ class _TargetInputPanelState extends State<TargetInputPanel>
   void dispose() {
     _shakeController.dispose();
     _inputController.dispose();
-    // Safe: removeListener is a no-op if not registered
-    context.read<AppState>().removeListener(_onAppStateChanged);
+    _appStateListener?.removeListener(_onAppStateChanged);
     super.dispose();
   }
 
