@@ -28,7 +28,7 @@ class DatabaseHelper {
     final db = await openDatabase(
       path,
       version: 17,
-      singleInstance: false,
+      singleInstance: true,
       onConfigure: (db) async {
         await db.execute('PRAGMA busy_timeout=5000');
         debugPrint('[DB] onConfigure: busy_timeout set');

@@ -5,10 +5,10 @@ import '../utils/file_dialog.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:pointycastle/export.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import '../database/database_helper.dart';
 import '../models/project.dart';
 import '../models/target.dart';
-import '../models/credential.dart';
 import '../services/storage_service.dart';
 import '../widgets/admin_password_dialog.dart';
 
@@ -457,80 +457,96 @@ class ProjectPorter {
       addressToTargetId[address] = targetId;
     }
 
-    // Insert vulnerabilities
-    for (final v in (manifest['vulnerabilities'] as List? ?? []).cast<Map<String, dynamic>>()) {
-      final addr = v['targetAddress'] as String? ?? '';
-      final targetId = addressToTargetId[addr] ?? 0;
-      final db = await DatabaseHelper.database;
-      await db.insert('vulnerabilities', {
-        'projectId': projectId,
-        'targetId': targetId,
-        'targetAddress': addr,
-        'problem': v['problem'] ?? '',
-        'cve': v['cve'] ?? '',
-        'description': v['description'] ?? '',
-        'severity': v['severity'] ?? '',
-        'confidence': v['confidence'] ?? '',
-        'evidence': v['evidence'] ?? '',
-        'recommendation': v['recommendation'] ?? '',
-        'attackVector': v['attackVector'] ?? 'NETWORK',
-        'attackComplexity': v['attackComplexity'] ?? 'LOW',
-        'privilegesRequired': v['privilegesRequired'] ?? 'NONE',
-        'userInteraction': v['userInteraction'] ?? 'NONE',
-        'scope': v['scope'] ?? 'UNCHANGED',
-        'confidentialityImpact': v['confidentialityImpact'] ?? 'NONE',
-        'integrityImpact': v['integrityImpact'] ?? 'NONE',
-        'availabilityImpact': v['availabilityImpact'] ?? 'NONE',
-        'vulnerabilityType': v['vulnerabilityType'] ?? '',
-        'statusReason': v['statusReason'] ?? '',
-        'proofCommand': v['proofCommand'],
-        'status': v['status'] ?? 'pending',
-      });
-    }
+    final db = await DatabaseHelper.database;
+    await db.transaction((txn) async {
+      // Insert vulnerabilities
+      for (final v in (manifest['vulnerabilities'] as List? ?? []).cast<Map<String, dynamic>>()) {
+        final addr = v['targetAddress'] as String? ?? '';
+        final targetId = addressToTargetId[addr] ?? 0;
+        await txn.insert('vulnerabilities', {
+          'projectId': projectId,
+          'targetId': targetId,
+          'targetAddress': addr,
+          'problem': v['problem'] ?? '',
+          'cve': v['cve'] ?? '',
+          'description': v['description'] ?? '',
+          'severity': v['severity'] ?? '',
+          'confidence': v['confidence'] ?? '',
+          'evidence': v['evidence'] ?? '',
+          'recommendation': v['recommendation'] ?? '',
+          'attackVector': v['attackVector'] ?? 'NETWORK',
+          'attackComplexity': v['attackComplexity'] ?? 'LOW',
+          'privilegesRequired': v['privilegesRequired'] ?? 'NONE',
+          'userInteraction': v['userInteraction'] ?? 'NONE',
+          'scope': v['scope'] ?? 'UNCHANGED',
+          'confidentialityImpact': v['confidentialityImpact'] ?? 'NONE',
+          'integrityImpact': v['integrityImpact'] ?? 'NONE',
+          'availabilityImpact': v['availabilityImpact'] ?? 'NONE',
+          'vulnerabilityType': v['vulnerabilityType'] ?? '',
+          'statusReason': v['statusReason'] ?? '',
+          'proofCommand': v['proofCommand'],
+          'status': v['status'] ?? 'pending',
+        });
+      }
 
-    // Insert command logs
-    for (final c in (manifest['command_logs'] as List? ?? []).cast<Map<String, dynamic>>()) {
-      final addr = c['targetAddress'] as String? ?? '';
-      final targetId = addressToTargetId[addr] ?? 0;
-      final db = await DatabaseHelper.database;
-      await db.insert('command_logs', {
-        'projectId': projectId,
-        'targetId': targetId,
-        'timestamp': c['timestamp'] ?? now.toIso8601String(),
-        'command': c['command'] ?? '',
-        'output': c['output'] ?? '',
-        'exitCode': c['exitCode'] ?? 0,
-        'vulnerabilityIndex': c['vulnerabilityIndex'],
-      });
-    }
+      // Insert command logs
+      for (final c in (manifest['command_logs'] as List? ?? []).cast<Map<String, dynamic>>()) {
+        final addr = c['targetAddress'] as String? ?? '';
+        final targetId = addressToTargetId[addr] ?? 0;
+        await txn.insert('command_logs', {
+          'projectId': projectId,
+          'targetId': targetId,
+          'timestamp': c['timestamp'] ?? now.toIso8601String(),
+          'command': c['command'] ?? '',
+          'output': c['output'] ?? '',
+          'exitCode': c['exitCode'] ?? 0,
+          'vulnerabilityIndex': c['vulnerabilityIndex'],
+        });
+      }
 
-    // Insert prompt logs
-    for (final p in (manifest['prompt_logs'] as List? ?? []).cast<Map<String, dynamic>>()) {
-      final addr = p['targetAddress'] as String? ?? '';
-      final targetId = addressToTargetId[addr] ?? 0;
-      await DatabaseHelper.insertPromptLog(projectId, targetId, p['prompt'] as String? ?? '', p['response'] as String? ?? '');
-    }
+      // Insert prompt logs
+      for (final p in (manifest['prompt_logs'] as List? ?? []).cast<Map<String, dynamic>>()) {
+        final addr = p['targetAddress'] as String? ?? '';
+        final targetId = addressToTargetId[addr] ?? 0;
+        await txn.insert('prompt_logs', {
+          'projectId': projectId,
+          'targetId': targetId,
+          'prompt': p['prompt'] as String? ?? '',
+          'response': p['response'] as String? ?? '',
+          'timestamp': DateTime.now().toIso8601String(),
+        });
+      }
 
-    // Insert debug logs
-    for (final d in (manifest['debug_logs'] as List? ?? []).cast<Map<String, dynamic>>()) {
-      final addr = d['targetAddress'] as String? ?? '';
-      final targetId = addressToTargetId[addr] ?? 0;
-      await DatabaseHelper.insertDebugLog(projectId, targetId, d['message'] as String? ?? '');
-    }
+      // Insert debug logs
+      for (final d in (manifest['debug_logs'] as List? ?? []).cast<Map<String, dynamic>>()) {
+        final addr = d['targetAddress'] as String? ?? '';
+        final targetId = addressToTargetId[addr] ?? 0;
+        await txn.insert('debug_logs', {
+          'projectId': projectId,
+          'targetId': targetId,
+          'message': d['message'] as String? ?? '',
+          'timestamp': DateTime.now().toIso8601String(),
+        });
+      }
 
-    // Insert credentials
-    for (final c in (manifest['credentials'] as List? ?? []).cast<Map<String, dynamic>>()) {
-      final cred = DiscoveredCredential(
-        service: c['service'] as String? ?? '',
-        host: c['host'] as String? ?? '',
-        username: c['username'] as String? ?? '',
-        secret: c['secret'] as String? ?? '',
-        secretType: c['secret_type'] as String? ?? 'password',
-        sourceVuln: c['source_vuln'] as String? ?? '',
-        discoveredAt: DateTime.tryParse(c['discovered_at'] as String? ?? '') ?? now,
-      );
-      await DatabaseHelper.insertCredential(cred, projectId);
-    }
+      // Insert credentials
+      for (final c in (manifest['credentials'] as List? ?? []).cast<Map<String, dynamic>>()) {
+        await txn.insert(
+          'discovered_credentials',
+          {
+            'project_id': projectId,
+            'service': c['service'] as String? ?? '',
+            'host': c['host'] as String? ?? '',
+            'username': c['username'] as String? ?? '',
+            'secret': c['secret'] as String? ?? '',
+            'secret_type': c['secret_type'] as String? ?? 'password',
+            'source_vuln': c['source_vuln'] as String? ?? '',
+            'discovered_at': DateTime.tryParse(c['discovered_at'] as String? ?? '')?.toIso8601String() ?? now.toIso8601String(),
+          },
+          conflictAlgorithm: ConflictAlgorithm.ignore,
+        );
+      }
+    });
 
     if (context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
