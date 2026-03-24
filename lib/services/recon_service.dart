@@ -279,6 +279,7 @@ class ReconService {
     int consecutiveFailures = 0;
     bool exhaustedOptions = false;
     int connectivityFailures = 0;
+    int concludeOverrides = 0;
 
     if (scope == TargetScope.external && ReconService._isDomainName(address)) {
       onProgress?.call('[$address] Running passive OSINT...');
@@ -378,13 +379,17 @@ class ReconService {
       if (decision['action'] == 'CONCLUDE') {
         final useful = decision['host_useful'] == true;
         final reason = decision['conclude_reason'] ?? 'Recon complete';
-        // Don't conclude early if there are still unprobed ports/services
-        final focusHints = _buildFocusHints(address, findings, env, scope);
-        if (focusHints.isNotEmpty) {
-          history += 'Iteration ${iteration + 1}: LLM tried to CONCLUDE but unprobed services remain — continuing.\n\n';
-          onProgress?.call('[$address] Overriding early conclude — unprobed services remain');
-          consecutiveFailures = 0;
-          continue;
+        // Don't conclude early if there are still unprobed ports/services,
+        // but cap overrides to prevent infinite loops on stubborn targets.
+        if (concludeOverrides < 3) {
+          final focusHints = _buildFocusHints(address, findings, env, scope);
+          if (focusHints.isNotEmpty) {
+            concludeOverrides++;
+            history += 'Iteration ${iteration + 1}: LLM tried to CONCLUDE but unprobed services remain (override $concludeOverrides/3) — continuing.\n\n';
+            onProgress?.call('[$address] Overriding early conclude — unprobed services remain ($concludeOverrides/3)');
+            consecutiveFailures = 0;
+            continue;
+          }
         }
         onProgress?.call('[$address] Concluded: $reason');
         if (!useful) {
@@ -953,6 +958,11 @@ Use passive sources — do not send emails or interact with mail servers.
         elasticPorts.add(port);
       } else if (service.contains('nfs') || service.contains('mountd') || port == 2049) {
         nfsPorts.add(port);
+      } else if (service.contains('ssl') || service.contains('tls') || service.contains('https')) {
+        // SSL/TLS services that didn't match a more specific category above
+        // (e.g. Cast devices, proprietary TLS services) — treat as web-adjacent
+        // only if not already probed.
+        webPorts.add(port);
       } else {
         // Anything not positively identified goes to unknown for banner grabbing
         unknownPorts.add(p);
@@ -1171,10 +1181,16 @@ Use passive sources — do not send emails or interact with mail servers.
       hints.add('- NFS port $port — collect: exported shares list, mount permissions per share, root squash status, check for world-readable or world-writable exports');
     }
 
-    // Unknown ports
+    // Unknown ports — only hint if they genuinely lack identification data
     for (final p in unknownPorts) {
       final port = (p['port'] as num?)?.toInt() ?? 0;
-      hints.add('- Port $port has no banner or version yet — grab banner and identify service');
+      final hasProduct = (p['product'] as String? ?? '').isNotEmpty;
+      final hasVersion = (p['version'] as String? ?? '').isNotEmpty;
+      final hasBanner = (p['banner'] as String? ?? '').isNotEmpty;
+      final hasExtraInfo = (p['extra_info'] as String? ?? '').isNotEmpty;
+      if (!hasProduct && !hasVersion && !hasBanner && !hasExtraInfo) {
+        hints.add('- Port $port has no banner or version yet — grab banner and identify service');
+      }
     }
 
     if (hints.isEmpty) return '';
