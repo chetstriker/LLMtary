@@ -525,6 +525,12 @@ class _MainScreenState extends State<MainScreen> {
           );
 
           appState.addDebugLog('Found ${vulns.length} vulnerabilities for ${target.address}');
+          if (vulns.isEmpty) {
+            appState.addDebugLog('Analysis complete for ${target.address}: 0 findings generated');
+            target.noFindings = true;
+          } else {
+            target.noFindings = false;
+          }
           for (final v in vulns) {
             v.targetAddress = target.address;
             v.targetId = target.id;
@@ -1147,6 +1153,7 @@ class _MainScreenState extends State<MainScreen> {
           startDate: config.startDate,
           endDate: config.endDate,
           attackNarrative: attackNarrative,
+          confirmedOnly: config.confirmedOnly,
         ),
       'md'   => ReportGenerator.generateMarkdown(
           project: project,
@@ -1159,10 +1166,12 @@ class _MainScreenState extends State<MainScreen> {
           startDate: config.startDate,
           endDate: config.endDate,
           attackNarrative: attackNarrative,
+          confirmedOnly: config.confirmedOnly,
         ),
       'csv'  => ReportGenerator.generateCsv(
           vulnerabilities: state.vulnerabilities,
           commandLogs: commandLogs,
+          confirmedOnly: false,
         ),
       _      => '',
     };

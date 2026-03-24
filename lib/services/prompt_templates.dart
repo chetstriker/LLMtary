@@ -1876,6 +1876,10 @@ Respond ONLY with a valid JSON array. No markdown, no explanations.''';
       'dacl': ['ACTIVE DIRECTORY ATTACKS'],
       'acl abuse': ['ACTIVE DIRECTORY ATTACKS'],
       'print spooler': ['ACTIVE DIRECTORY ATTACKS'],
+      'tomcat': ['APACHE TOMCAT DEEP-DIVE'],
+      'ghostcat': ['APACHE TOMCAT DEEP-DIVE'],
+      'ajp': ['APACHE TOMCAT DEEP-DIVE'],
+      'cve-2020-1938': ['APACHE TOMCAT DEEP-DIVE'],
     };
 
     // Find matching section headers
@@ -1909,14 +1913,14 @@ Return a JSON array. Each entry is one specific exploitable issue.
 [
   {
     "problem": "Short name, e.g. SQL Injection on login form port 666",
-    "cve": "CVE-XXXX-XXXXX or empty string",
+    "cve": "ONE CVE ID only (e.g. CVE-2021-44228). If multiple CVEs apply, emit one separate finding object per CVE — do NOT comma-separate multiple CVEs in this field. Empty string if no CVE.",
     "description": "What the vulnerability is, the specific attack technique, and what an attacker gains. Include HTTP method, path, parameter, example payload.",
     "severity": "CRITICAL|HIGH|MEDIUM|LOW",
     "confidence": "HIGH|MEDIUM|LOW",
     "evidence": "Exact data from scan output that indicates this attack surface exists",
     "evidence_quote": "An exact substring copied verbatim from the device data that supports this finding. REQUIRED. If you cannot quote directly from the provided data, set confidence to LOW and explain what additional evidence would be needed.",
     "recommendation": "How to fix it",
-    "vulnerabilityType": "RCE|SQLi|XSS|LFI|RFI|Command Injection|Auth Bypass|Default Credentials|Info Disclosure|Config Weakness|DoS|Privilege Escalation|Path Traversal|SSRF|XXE|etc.",
+    "vulnerabilityType": "one of: RCE|SQLi|XSS|LFI|RFI|Command Injection|Auth Bypass|Default Credentials|Info Disclosure|Config Weakness|DoS|Privilege Escalation|Path Traversal|SSRF|XXE|CSRF|Deserialization|SSTI|Open Redirect|Host Header Injection|CRLF Injection|HTTP Request Smuggling|JWT Attack|CORS Misconfiguration|OAuth Misconfiguration|WebSocket Security|Prototype Pollution|Race Condition|Business Logic|SMB Vulnerability|Active Directory|ADCS|Kerberos|NTLM|LDAP|Network Protocol|SSL/TLS|DNS|IoT Security|OT/ICS|Container Security|Cloud Security|Wireless Security|AttackChain|Unknown",
     "attackVector": "NETWORK|ADJACENT|LOCAL|PHYSICAL",
     "attackComplexity": "LOW|HIGH",
     "privilegesRequired": "NONE|LOW|HIGH",
@@ -2708,6 +2712,15 @@ Objective: identify protocol-level weaknesses in TLS/SSL configuration that enab
 - Industrial protocol exposure: Modbus (502), DNP3 (20000), EtherNet/IP (44818), BACnet (47808), Siemens S7 (102), OPC-UA (4840) were designed for isolated networks with no authentication. Exposure to any reachable network segment is the finding.
 - Engineering workstation/HMI: hosts showing both IT services (RDP, SMB) and OT protocol ports are dual-homed HMIs — access to the IT side can yield reach into the OT network.
 - Always include a scope/safety advisory when OT protocols are detected.
+
+### APACHE TOMCAT DEEP-DIVE
+- AJP Connector (Ghostcat CVE-2020-1938): port 8009 AJP connector allows unauthenticated file read from the web application root and, in some configurations, file inclusion leading to RCE. Use an AJP-specific tool (e.g. ajpfuzzer, or a Python AJP client) — do NOT use curl or HTTP tools against port 8009.
+- Manager Application (/manager/html, /manager/text): default or weak credentials allow WAR file deployment = RCE. Test with common credentials (tomcat/tomcat, admin/admin, manager/manager).
+- HTTP PUT file upload: if the DefaultServlet has readonly=false, PUT a JSP webshell directly to the web root.
+- Java deserialization via T3/AJP: send a malicious serialized Java object to trigger RCE on unpatched versions.
+- Example applications (/examples/servlets, /examples/jsp): may expose session fixation and XSS examples that are exploitable.
+- Version-specific CVEs: Tomcat 9.x < 9.0.31, 8.x < 8.5.51, 7.x < 7.0.100 are affected by Ghostcat. Tomcat < 9.0.35 has partial PUT RCE (CVE-2019-0232 on Windows with enableCmdLineArguments).
+- ALWAYS use AJP-specific tooling for port 8009 — generic HTTP scanners cannot speak the AJP binary protocol.
 
 ## TOOL USAGE PATTERNS:
 

@@ -17,6 +17,7 @@ class ReportConfig {
   final String riskRatingModel;
   final String conclusion;
   final String format; // 'html', 'md', 'csv'
+  final bool confirmedOnly;
 
   const ReportConfig({
     required this.reportTitle,
@@ -28,6 +29,7 @@ class ReportConfig {
     required this.riskRatingModel,
     required this.conclusion,
     required this.format,
+    this.confirmedOnly = true,
   });
 }
 
@@ -57,6 +59,7 @@ class _ReportConfigDialogState extends State<ReportConfigDialog> {
   DateTime? _startDate;
   DateTime? _endDate;
   String _format = 'html';
+  bool _confirmedOnly = true;
 
   // Per-field generation loading state
   final Map<String, bool> _generating = {
@@ -201,6 +204,7 @@ class _ReportConfigDialogState extends State<ReportConfigDialog> {
         riskRatingModel: _riskRatingCtrl.text.trim(),
         conclusion: _conclusionCtrl.text.trim(),
         format: _format,
+        confirmedOnly: _confirmedOnly,
       ));
     }
   }
@@ -690,6 +694,19 @@ class _ReportConfigDialogState extends State<ReportConfigDialog> {
         children: [
           // Format selector
           _buildFormatSelector(),
+          const SizedBox(width: 12),
+          // Confirmed-only toggle
+          Row(
+            children: [
+              Checkbox(
+                value: _confirmedOnly,
+                onChanged: (v) => setState(() => _confirmedOnly = v ?? true),
+                activeColor: _accent,
+                side: const BorderSide(color: Colors.white38),
+              ),
+              const Text('Confirmed only', style: TextStyle(color: Colors.white54, fontSize: 12)),
+            ],
+          ),
           const Spacer(),
           TextButton(
             onPressed: () => Navigator.of(context).pop(),

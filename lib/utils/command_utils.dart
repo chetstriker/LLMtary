@@ -119,6 +119,17 @@ class CommandUtils {
           return true;
         }
       }
+
+      // Same gobuster/ffuf/dirb target (same host:port) — minor flag changes are still the same approach
+      bool isDirBust(String cmd) => cmd.contains('gobuster') || cmd.contains('ffuf') || cmd.contains('dirb') || cmd.contains('feroxbuster');
+      if (isDirBust(newCmdLower) && isDirBust(execLower)) {
+        final newUrl = RegExp(r'https?://[^\s/"]+(?:/[^\s"]*)?').firstMatch(newCmdLower)?.group(0) ?? '';
+        final execUrl = RegExp(r'https?://[^\s/"]+(?:/[^\s"]*)?').firstMatch(execLower)?.group(0) ?? '';
+        // Same base URL (host:port/path) = same approach regardless of flags
+        if (newUrl.isNotEmpty && execUrl.isNotEmpty && newUrl == execUrl) {
+          return true;
+        }
+      }
     }
 
     return false;

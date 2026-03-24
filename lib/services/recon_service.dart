@@ -193,6 +193,7 @@ class ReconService {
   final Function(String)? onProgress;
   final Function(String, String)? onPromptResponse;
   final Function(String, String)? onCommandExecuted;
+  final Function(String)? onTargetDown;
 
   static const int _maxIterations = 100;
   static const int _maxIterationsExternal = 100;
@@ -206,6 +207,7 @@ class ReconService {
     this.onProgress,
     this.onPromptResponse,
     this.onCommandExecuted,
+    this.onTargetDown,
   });
 
   // ---------------------------------------------------------------------------
@@ -272,6 +274,8 @@ class ReconService {
         ? await DatabaseHelper.getExecutedCommands(projectId, targetId)
         : <String>{};
     final unavailableTools = <String>{};
+    // Track per-port tool failures to enable fast fallback (e.g. gobuster → ffuf)
+    final portToolFailures = <String, Set<String>>{}; // 'port:tool' → failed
     int consecutiveFailures = 0;
     bool exhaustedOptions = false;
     int connectivityFailures = 0;
@@ -306,13 +310,25 @@ class ReconService {
       envInfo: envInfo,
     );
     if (!baseline.isAlive) {
-      onProgress?.call('[$address] Host is down — aborting recon');
-      return await _evaluateAndSave(llmService, address, findings, outputDir);
+      // Skip LLM evaluation entirely for down hosts — no token spend needed.
+      onProgress?.call('[$address] Host is down — skipping (no LLM evaluation needed)');
+      onTargetDown?.call(address);
+      return null;
     }
     onProgress?.call('[$address] Baseline complete (${baseline.commandsRun.length} steps). Starting LLM-guided deep scan...');
 
     for (int iteration = 0; iteration < maxIter; iteration++) {
       onProgress?.call('[$address] Iteration ${iteration + 1}...');
+
+      // Per-target command cap: warn at 50, hard stop at 80
+      final cmdCount = executedCommands.length;
+      if (cmdCount >= 80) {
+        onProgress?.call('[$address] Command cap reached ($cmdCount commands) — stopping recon');
+        break;
+      }
+      if (cmdCount == 50) {
+        onProgress?.call('[$address] Warning: $cmdCount commands executed — approaching cap (80)');
+      }
 
       String historyHint = '';
       {
@@ -550,6 +566,19 @@ class ReconService {
       } else if (output.isNotEmpty) {
         // Successful output resets the connectivity failure streak
         connectivityFailures = 0;
+      }
+
+      // Track gobuster/ffuf/dirb failures per port for fast fallback
+      if (exitCode != 0 && (command.contains('gobuster') || command.contains('ffuf') || command.contains('dirb'))) {
+        final portMatch = RegExp(r':(\d+)').firstMatch(command);
+        final portKey = portMatch?.group(1) ?? 'unknown';
+        final toolName = command.contains('gobuster') ? 'gobuster'
+            : command.contains('ffuf') ? 'ffuf' : 'dirb';
+        portToolFailures.putIfAbsent(portKey, () => {}).add(toolName);
+        // Inject hint into history so LLM knows to switch tools
+        if (toolName == 'gobuster' && !portToolFailures[portKey]!.contains('ffuf')) {
+          history += 'NOTE: gobuster failed on port $portKey — switch to ffuf immediately, do NOT retry gobuster.\n\n';
+        }
       }
 
       history += 'Iteration ${iteration + 1}:\n'
@@ -936,6 +965,11 @@ Use passive sources — do not send emails or interact with mail servers.
       hints.add('- OS not yet identified — collect OS fingerprint and hostname');
     }
 
+    // UDP scan guard: only suggest UDP if TCP baseline found at least one open port
+    if (!isExternal && ports.isEmpty) {
+      hints.add('- No TCP ports found yet — do NOT run UDP scans until at least one TCP port is confirmed open');
+    }
+
     // External-only: WAF/CDN detection and origin IP discovery hint
     if (isExternal) {
       final wafKeywords = ['cloudflare', 'akamai', 'fastly', 'sucuri', 'incapsula',
@@ -968,18 +1002,20 @@ Use passive sources — do not send emails or interact with mail servers.
       hints.add('- Only ${ports.length} open port(s) found — ensure a comprehensive port scan has been run (top-1000 minimum). If only a small set of common ports was scanned, run a broader scan now.');
     }
 
-    // External-only: SSL/TLS hint for any HTTPS port not yet checked
-    if (isExternal && !isWin) {
+    // SSL/TLS hint for HTTPS ports not yet checked (internal and external)
+    if (!isWin) {
       for (final p in ports) {
         final port = (p['port'] as num?)?.toInt() ?? 0;
         final svc = (p['service'] as String? ?? '').toLowerCase();
-        final isHttps = svc.contains('https') || svc.contains('ssl') || port == 443;
+        final isHttps = svc.contains('https') || svc.contains('ssl') || port == 443 || port == 8443;
         if (isHttps) {
           final alreadyChecked = (findings['nmap_scripts'] as List? ?? [])
               .cast<Map<String, dynamic>>()
               .any((s) => s['port'] == port && (s['script_id'] as String? ?? '').contains('ssl'));
           if (!alreadyChecked) {
-            hints.add('- SSL/TLS on port $port not yet analysed — collect: protocol versions, cipher suites, certificate CN/SANs, known weaknesses (Heartbleed, POODLE, BEAST, ROBOT)');
+            hints.add('- SSL/TLS on port $port not yet analysed — run ONE comprehensive scan: '
+                'nmap -p $port --script ssl-cert,ssl-enum-ciphers,ssl-heartbleed,ssl-dh-params,ssl-poodle $address '
+                '(do NOT run multiple separate SSL nmap invocations on the same port)');
           }
         }
       }
@@ -1424,24 +1460,51 @@ Respond ONLY with valid JSON.''';
       }
     }
 
-    // B1 — Host liveness check
+    // B1 — Host liveness check (ICMP ping, then TCP fallback for ICMP-blocking hosts)
     final pingCmd = isWin
         ? 'Test-NetConnection $address -Port 443 -InformationLevel Quiet'
         : 'ping -c 2 -W 2 $address';
     final pingOut = await runStep(pingCmd, 'host liveness check');
+    bool icmpFailed = false;
     if (pingOut != null) {
       final lower = pingOut.toLowerCase();
-      final hostDown = lower.contains('0 received') ||
+      icmpFailed = lower.contains('0 received') ||
           lower.contains('100% packet loss') ||
           lower.contains('network is unreachable') ||
           lower.contains('false'); // Test-NetConnection False = unreachable
-      if (hostDown) {
-        onProgress?.call('[$address] Baseline: host appears down — skipping further baseline steps');
+    }
+    if (icmpFailed) {
+      // TCP fallback: some hosts block ICMP but respond on common TCP ports
+      onProgress?.call('[$address] ICMP failed — trying TCP fallback probe...');
+      bool tcpAlive = false;
+      if (!isWin) {
+        final tcpOut = await runStep(
+            'nmap -sn -PS22,80,443,445 --open -T4 $address',
+            'TCP fallback probe (ICMP-blocking host)');
+        if (tcpOut != null) {
+          tcpAlive = tcpOut.toLowerCase().contains('host is up') ||
+              tcpOut.toLowerCase().contains('1 host up');
+        }
+      } else {
+        // Windows: try a few Test-NetConnection probes
+        for (final port in [80, 443, 22, 445]) {
+          final tcpOut = await runStep(
+              'Test-NetConnection $address -Port $port -InformationLevel Quiet',
+              'TCP fallback probe port $port');
+          if (tcpOut != null && tcpOut.toLowerCase().contains('true')) {
+            tcpAlive = true;
+            break;
+          }
+        }
+      }
+      if (!tcpAlive) {
+        onProgress?.call('[$address] Baseline: host is down (ICMP + TCP fallback failed) — skipping');
         return _BaselineResult(
           isAlive: false, hasWebPorts: false, hasDnsData: false,
           hasSmbPort: false, commandsRun: commandsRun,
         );
       }
+      onProgress?.call('[$address] TCP fallback succeeded — host is up (blocks ICMP)');
     }
 
     // B2 — Top port scan
@@ -1458,6 +1521,9 @@ Respond ONLY with valid JSON.''';
         final xmlContent = await xmlFile.readAsString();
         if (xmlContent.isNotEmpty) {
           final parsedPorts = ReconService.parseNmapXml(xmlContent);
+          if (parsedPorts.isEmpty) {
+            onProgress?.call('[$address] nmap found 0 open ports — host may be filtered or down');
+          }
           final existingPorts = (findings['open_ports'] as List)
               .map((p) => (p as Map)['port'])
               .toSet();
@@ -1478,7 +1544,14 @@ Respond ONLY with valid JSON.''';
       }
     } catch (_) {}
 
-    // B3 — Web fingerprinting (if web ports found)
+    // B3 — High-port second pass for web/API hosts (catches non-standard service ports)
+    if (hasWebPorts && !isWin) {
+      await runStep(
+          'nmap -sV --open -T4 -p 8080,8443,8888,3000,3001,9000,9090,9200,5601,4848,7001,7002,8161,8500,8600,6443,2375,2376 $address',
+          'high-port web/API scan');
+    }
+
+    // B4 — Web fingerprinting (if web ports found)
     if (hasWebPorts) {
       if (!isWin) {
         await runStep('curl -skL -I --max-time 10 http://$address',

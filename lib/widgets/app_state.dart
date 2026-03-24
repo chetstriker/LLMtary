@@ -248,6 +248,14 @@ Raise confidence to HIGH for any finding where these credentials directly enable
     _vulnerabilities = await DatabaseHelper.getVulnerabilities(project.id!);
     _commandLogs = await DatabaseHelper.getCommandLogs(project.id!);
 
+    // Recompute hasResults from actual vulnerability data in case the stored
+    // flag is stale (e.g. after import or if execution completed without
+    // setting the flag).
+    if (!_hasResults && _vulnerabilities.any((v) => v.status == VulnerabilityStatus.confirmed)) {
+      _hasResults = true;
+      DatabaseHelper.updateProjectFlags(_projectId, hasResults: true);
+    }
+
     final savedCreds = await DatabaseHelper.getCredentialsByProject(project.id!);
     _credentials.clear();
     _credentialFingerprints.clear();
@@ -342,6 +350,20 @@ Raise confidence to HIGH for any finding where these credentials directly enable
       _targets.add(target);
     }
     notifyListeners();
+  }
+
+  Future<void> removeTargetByAddress(String address) async {
+    final target = _targets.firstWhere(
+      (t) => t.address == address,
+      orElse: () => Target(address: address),
+    );
+    if (target.id != null) {
+      await deleteTarget(target);
+    } else {
+      _targets.removeWhere((t) => t.address == address);
+      notifyListeners();
+    }
+    addDebugLog('Removed target $address — host unreachable');
   }
 
   Future<void> deleteTarget(Target target) async {

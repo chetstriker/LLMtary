@@ -1,4 +1,4 @@
-enum TargetStatus { pending, scanning, complete, excluded }
+enum TargetStatus { pending, scanning, complete, excluded, down }
 
 class Target {
   int? id;
@@ -9,6 +9,8 @@ class Target {
   TargetStatus status;
   bool analysisComplete;
   bool executionComplete;
+  /// True when analysis completed but produced 0 vulnerability findings.
+  bool noFindings;
 
   Target({
     this.id,
@@ -19,6 +21,7 @@ class Target {
     this.status = TargetStatus.pending,
     this.analysisComplete = false,
     this.executionComplete = false,
+    this.noFindings = false,
   });
 
   Map<String, dynamic> toMap() => {

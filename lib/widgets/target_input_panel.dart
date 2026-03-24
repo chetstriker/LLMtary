@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../utils/device_utils.dart';
 import '../utils/file_dialog.dart';
 import '../utils/scope_validator.dart';
 import '../models/target.dart';
@@ -248,25 +249,29 @@ class _TargetInputPanelState extends State<TargetInputPanel>
       }
 
       // --- Fast parallel host-alive pre-sweep ---
-      // Before starting full recon on any host, ping all targets concurrently
-      // to eliminate unreachable hosts and avoid wasting time/tokens on them.
+      // Use nmap -sn for the entire subnet when possible (seconds vs minutes).
+      // Falls back to parallel pings if nmap is unavailable.
       List<String> aliveHosts = toScan;
       if (toScan.length > 1) {
         setState(() => _statusMessage = 'Checking which of ${toScan.length} hosts are up...');
-        widget.onProgress('Host pre-sweep: pinging ${toScan.length} targets in parallel...');
-        final aliveResults = await Future.wait(
-          toScan.map((addr) => ReconService.quickHostAlive(addr).then((up) => MapEntry(addr, up))),
-        );
-        final deadHosts = aliveResults.where((e) => !e.value).map((e) => e.key).toList();
-        aliveHosts = aliveResults.where((e) => e.value).map((e) => e.key).toList();
-        // Mark dead hosts as excluded immediately
+        widget.onProgress('Host pre-sweep: running nmap -sn on ${toScan.length} targets...');
+        aliveHosts = await _nmapPingSweep(toScan, widget.onProgress);
+        if (aliveHosts.isEmpty) {
+          // nmap unavailable or returned nothing — fall back to parallel pings
+          widget.onProgress('nmap sweep returned no results — falling back to parallel ping...');
+          final aliveResults = await Future.wait(
+            toScan.map((addr) => ReconService.quickHostAlive(addr).then((up) => MapEntry(addr, up))),
+          );
+          aliveHosts = aliveResults.where((e) => e.value).map((e) => e.key).toList();
+        }
+        final deadHosts = toScan.where((a) => !aliveHosts.contains(a)).toList();
         for (final addr in deadHosts) {
           _liveTargets.removeWhere((t) => t.address == addr);
           widget.onProgress('[$addr] Pre-sweep: host is down — skipping');
         }
         if (aliveHosts.isEmpty) {
           setState(() {
-            _statusMessage = 'No hosts responded to ping — all ${toScan.length} target(s) appear down';
+            _statusMessage = 'No hosts responded — all ${toScan.length} target(s) appear down';
             _isScanning = false;
           });
           return;
@@ -277,34 +282,52 @@ class _TargetInputPanelState extends State<TargetInputPanel>
 
       setState(() => _statusMessage = 'Scanning ${aliveHosts.length} target(s)...');
 
-      for (int i = 0; i < aliveHosts.length; i++) {
-        final addr = aliveHosts[i];
-        _updateTargetStatus(addr, TargetStatus.scanning);
+      // --- Parallel recon: N=4 internal, N=2 external ---
+      // Determine concurrency from the first address scope
+      final firstScope = aliveHosts.isNotEmpty
+          ? DeviceUtils.classifyTarget(aliveHosts.first)
+          : TargetScope.internal;
+      final concurrency = firstScope == TargetScope.external ? 2 : 4;
 
-        final recon = ReconService(
-          settings: widget.llmSettings,
-          requireApproval: widget.requireApproval,
-          adminPassword: widget.adminPassword,
-          onApprovalNeeded: widget.onApprovalNeeded,
-          onPasswordNeeded: widget.onInstallPasswordNeeded,
-          onCommandExecuted: widget.onCommandExecuted,
-          onProgress: (msg) {
-            widget.onProgress(msg);
-            if (mounted) setState(() => _statusMessage = msg);
-          },
-          onPromptResponse: widget.onPromptResponse,
-        );
+      // Process in batches of [concurrency]
+      for (int batchStart = 0; batchStart < aliveHosts.length; batchStart += concurrency) {
+        final batch = aliveHosts.skip(batchStart).take(concurrency).toList();
+        for (final addr in batch) {
+          _updateTargetStatus(addr, TargetStatus.scanning);
+        }
 
-        final filePath = await recon.reconTarget(
-          addr, widget.projectName,
-          projectId: widget.projectId,
-          targetId: widget.getTargetId?.call(addr) ?? 0,
-        );
+        final batchResults = await Future.wait(batch.map((addr) async {
+          final recon = ReconService(
+            settings: widget.llmSettings,
+            requireApproval: widget.requireApproval,
+            adminPassword: widget.adminPassword,
+            onApprovalNeeded: widget.onApprovalNeeded,
+            onPasswordNeeded: widget.onInstallPasswordNeeded,
+            onCommandExecuted: widget.onCommandExecuted,
+            onProgress: (msg) {
+              widget.onProgress(msg);
+              if (mounted) setState(() => _statusMessage = msg);
+            },
+            onPromptResponse: widget.onPromptResponse,
+          );
+          return MapEntry(
+            addr,
+            await recon.reconTarget(
+              addr, widget.projectName,
+              projectId: widget.projectId,
+              targetId: widget.getTargetId?.call(addr) ?? 0,
+            ),
+          );
+        }));
 
-        if (filePath != null) {
-          _updateTargetStatus(addr, TargetStatus.complete, jsonFilePath: filePath);
-        } else {
-          _updateTargetStatus(addr, TargetStatus.excluded);
+        for (final entry in batchResults) {
+          final addr = entry.key;
+          final filePath = entry.value;
+          if (filePath != null) {
+            _updateTargetStatus(addr, TargetStatus.complete, jsonFilePath: filePath);
+          } else {
+            _updateTargetStatus(addr, TargetStatus.excluded);
+          }
         }
 
         final useful = _liveTargets.where((t) => t.status == TargetStatus.complete).toList();
@@ -324,6 +347,31 @@ class _TargetInputPanelState extends State<TargetInputPanel>
         _statusMessage = 'Error: $e';
         _isScanning = false;
       });
+    }
+  }
+
+  /// Run a single nmap -sn sweep over all [addresses] and return the live ones.
+  /// Returns an empty list if nmap is unavailable or the sweep fails.
+  static Future<List<String>> _nmapPingSweep(
+    List<String> addresses,
+    void Function(String) onProgress,
+  ) async {
+    try {
+      final result = await Process.run(
+        'nmap',
+        ['-sn', '-T4', '--open', '-oG', '-', ...addresses],
+      ).timeout(const Duration(minutes: 3));
+      if (result.exitCode != 0) return [];
+      final output = result.stdout as String;
+      if (output.isEmpty) return [];
+      final alive = RegExp(r'Host:\s+(\d{1,3}(?:\.\d{1,3}){3})\s')
+          .allMatches(output)
+          .map((m) => m.group(1)!)
+          .toList();
+      onProgress('nmap -sn found ${alive.length}/${addresses.length} live hosts');
+      return alive;
+    } catch (_) {
+      return [];
     }
   }
 
@@ -359,6 +407,8 @@ class _TargetInputPanelState extends State<TargetInputPanel>
         return _cyan;
       case TargetStatus.excluded:
         return Colors.white24;
+      case TargetStatus.down:
+        return Colors.white12;
       case TargetStatus.pending:
         return Colors.white38;
     }
@@ -372,6 +422,8 @@ class _TargetInputPanelState extends State<TargetInputPanel>
         return Icons.radar;
       case TargetStatus.excluded:
         return Icons.remove_circle_outline;
+      case TargetStatus.down:
+        return Icons.cancel_outlined;
       case TargetStatus.pending:
         return Icons.circle_outlined;
     }
@@ -513,9 +565,10 @@ class _TargetInputPanelState extends State<TargetInputPanel>
             Flexible(
               child: ListView.builder(
                 shrinkWrap: true,
-                itemCount: _liveTargets.length,
+                itemCount: _liveTargets.where((t) => t.status != TargetStatus.down).length,
                 itemBuilder: (context, index) {
-                  final t = _liveTargets[index];
+                  final visibleTargets = _liveTargets.where((t) => t.status != TargetStatus.down).toList();
+                  final t = visibleTargets[index];
                   final color = _statusColor(t.status);
                   final isSelectable = t.status == TargetStatus.complete;
                   final isSelected = widget.selectedTarget?.address == t.address;
@@ -551,6 +604,21 @@ class _TargetInputPanelState extends State<TargetInputPanel>
                                   fontFamily: 'monospace'),
                             ),
                           ),
+                          // "?" badge: analysis complete but 0 findings
+                          if (t.noFindings)
+                            Tooltip(
+                              message: 'Analyzed — no findings generated',
+                              child: Container(
+                                margin: const EdgeInsets.only(right: 4),
+                                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                                decoration: BoxDecoration(
+                                  color: Colors.white12,
+                                  borderRadius: BorderRadius.circular(4),
+                                  border: Border.all(color: Colors.white24),
+                                ),
+                                child: const Text('?', style: TextStyle(color: Colors.white38, fontSize: 10, fontWeight: FontWeight.bold)),
+                              ),
+                            ),
                           if (isSelected)
                             const Icon(Icons.chevron_right, size: 12, color: _cyan),
                           if (!isScanning)

@@ -26,8 +26,12 @@ class ReportGenerator {
     DateTime? startDate,
     DateTime? endDate,
     String? attackNarrative,
+    bool confirmedOnly = true,
   }) {
-    final sorted = _sortedVulns(vulnerabilities);
+    final vulnsToReport = confirmedOnly
+        ? vulnerabilities.where((v) => v.status == VulnerabilityStatus.confirmed).toList()
+        : vulnerabilities;
+    final sorted = _sortedVulns(vulnsToReport);
     final byTarget = _groupByTarget(sorted, targets);
     final stats = _computeStats(sorted);
     final date = _formatDate(DateTime.now());
@@ -141,7 +145,7 @@ class ReportGenerator {
     <div class="meta-item"><label>Assessment Start</label><p>${startDate != null ? _formatDate(startDate) : '—'}</p></div>
     <div class="meta-item"><label>Assessment End</label><p>${endDate != null ? _formatDate(endDate) : '—'}</p></div>
     <div class="meta-item"><label>Targets Assessed</label><p>${targets.length}</p></div>
-    <div class="meta-item"><label>Total Findings</label><p>${vulnerabilities.length}</p></div>
+    <div class="meta-item"><label>Total Findings</label><p>${sorted.length}${confirmedOnly ? ' (confirmed only)' : ''}</p></div>
   </div>
 </div>
 
@@ -261,8 +265,12 @@ ${project.conclusion?.isNotEmpty == true ? '''
     DateTime? startDate,
     DateTime? endDate,
     String? attackNarrative,
+    bool confirmedOnly = true,
   }) {
-    final sorted = _sortedVulns(vulnerabilities);
+    final vulnsToReport = confirmedOnly
+        ? vulnerabilities.where((v) => v.status == VulnerabilityStatus.confirmed).toList()
+        : vulnerabilities;
+    final sorted = _sortedVulns(vulnsToReport);
     final stats = _computeStats(sorted);
     final date = _formatDate(DateTime.now());
     final reportTitle = project.reportTitle?.isNotEmpty == true
@@ -425,11 +433,17 @@ ${project.conclusion?.isNotEmpty == true ? '''
   }
 
   /// Generate a CSV export for remediation tracking.
+  /// CSV always includes all findings (confirmedOnly=false by default) with a
+  /// Status column so the full set can be used for triage.
   static String generateCsv({
     required List<Vulnerability> vulnerabilities,
     List<CommandLog> commandLogs = const [],
+    bool confirmedOnly = false,
   }) {
-    final sorted = _sortedVulns(vulnerabilities);
+    final vulnsToReport = confirmedOnly
+        ? vulnerabilities.where((v) => v.status == VulnerabilityStatus.confirmed).toList()
+        : vulnerabilities;
+    final sorted = _sortedVulns(vulnsToReport);
     final proofByCommand = _buildProofIndex(commandLogs);
     final buf = StringBuffer();
     buf.writeln('ID,Title,Target,CVE,Severity,Status,Status Reason,Type,CVSS Vector,Recommendation,Proof Output');

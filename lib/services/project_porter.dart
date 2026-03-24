@@ -554,6 +554,33 @@ class ProjectPorter {
       );
     }
 
+    // Recompute hasResults from imported vulnerability data — the stored flag
+    // may be false even when confirmed findings exist (e.g. exported before
+    // execution completed, or flag was never persisted).
+    final importedVulns = (manifest['vulnerabilities'] as List? ?? []).cast<Map<String, dynamic>>();
+    final hasConfirmed = importedVulns.any((v) => (v['status'] as String? ?? '') == 'confirmed');
+    if (hasConfirmed && !insertedProject.hasResults) {
+      await DatabaseHelper.updateProjectFlags(projectId, hasResults: true);
+      return Project(
+        id: insertedProject.id,
+        name: insertedProject.name,
+        folderPath: insertedProject.folderPath,
+        createdAt: insertedProject.createdAt,
+        lastOpenedAt: insertedProject.lastOpenedAt,
+        scanComplete: insertedProject.scanComplete,
+        analysisComplete: insertedProject.analysisComplete,
+        hasResults: true,
+        firstAnalysisAt: insertedProject.firstAnalysisAt,
+        lastExecutionAt: insertedProject.lastExecutionAt,
+        reportTitle: insertedProject.reportTitle,
+        pentesterName: insertedProject.pentesterName,
+        executiveSummary: insertedProject.executiveSummary,
+        methodology: insertedProject.methodology,
+        riskRatingModel: insertedProject.riskRatingModel,
+        conclusion: insertedProject.conclusion,
+      );
+    }
+
     return insertedProject;
   }
 

@@ -41,7 +41,9 @@ class ReportContentService {
 
   static String buildExecutiveSummaryPrompt(AppState state) {
     final project = state.currentProject;
-    final vulns = state.vulnerabilities;
+    final vulns = state.vulnerabilities
+        .where((v) => v.status == VulnerabilityStatus.confirmed)
+        .toList();
     final targets = state.targets;
 
     final counts = _countBySeverity(vulns);
@@ -219,7 +221,9 @@ Write 2–4 paragraphs covering: (1) what the vulnerability is and where it was 
 
   static String buildConclusionPrompt(AppState state) {
     final project = state.currentProject;
-    final vulns = state.vulnerabilities;
+    final vulns = state.vulnerabilities
+        .where((v) => v.status == VulnerabilityStatus.confirmed)
+        .toList();
     final counts = _countBySeverity(vulns);
     final confirmed = vulns.where((v) => v.status == VulnerabilityStatus.confirmed).length;
     final topFindings = vulns
