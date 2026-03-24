@@ -7,6 +7,7 @@ import 'widgets/app_state.dart';
 import 'widgets/resize_border.dart';
 
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
   if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
     sqfliteFfiInit();
     databaseFactory = databaseFactoryFfi;

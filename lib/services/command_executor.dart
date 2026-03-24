@@ -1140,8 +1140,13 @@ Respond ONLY with valid JSON.''';
     try {
       // For commands that need elevation, use Start-Process with -Verb RunAs
       // For now, execute as-is and let Windows UAC handle elevation prompts
-      final process = await Process.start('powershell', ['-Command', command])
-          .timeout(const Duration(minutes: 5));
+      Process? process;
+      final isFullPortScan = command.contains('nmap') && command.contains('-p-');
+      final timeout = isFullPortScan
+          ? const Duration(minutes: 15)
+          : const Duration(minutes: 4);
+
+      process = await Process.start('powershell', ['-Command', command]);
 
       final stdoutBuffer = StringBuffer();
       final stderrBuffer = StringBuffer();
@@ -1160,7 +1165,7 @@ Respond ONLY with valid JSON.''';
         stderrBuffer.write(sanitized);
       });
 
-      final exitCode = await process.exitCode;
+      final exitCode = await process.exitCode.timeout(timeout);
       return CommandResult(exitCode, stdoutBuffer.toString(), stderrBuffer.toString());
     } on TimeoutException {
       return CommandResult(-1, "", "Command timed out.");
@@ -1172,9 +1177,14 @@ Respond ONLY with valid JSON.''';
   // Output sanitization moved to OutputSanitizer class
 
   static Future<CommandResult> _executeInShell(String command) async {
+    Process? process;
     try {
-      final process = await Process.start('/bin/bash', ['-c', command])
-          .timeout(const Duration(minutes: 5));
+      final isFullPortScan = command.contains('nmap') && command.contains('-p-');
+      final timeout = isFullPortScan
+          ? const Duration(minutes: 15)
+          : const Duration(minutes: 4);
+
+      process = await Process.start('/bin/bash', ['-c', command]);
 
       final stdoutBuffer = StringBuffer();
       final stderrBuffer = StringBuffer();
@@ -1193,11 +1203,16 @@ Respond ONLY with valid JSON.''';
         stderrBuffer.write(sanitized);
       });
 
-      final exitCode = await process.exitCode;
+      final exitCode = await process.exitCode.timeout(timeout);
       return CommandResult(exitCode, stdoutBuffer.toString(), stderrBuffer.toString());
     } on TimeoutException {
+      process?.kill(ProcessSignal.sigkill);
+      if (process != null) {
+        await Process.run('pkill', ['-9', '-P', '${process.pid}']).catchError((_) => ProcessResult(0, 0, '', ''));
+      }
       return CommandResult(-1, "", "Command timed out.");
     } catch (e) {
+      process?.kill(ProcessSignal.sigkill);
       return CommandResult(-1, "", "Error: $e");
     }
   }

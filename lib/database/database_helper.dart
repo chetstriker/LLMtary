@@ -1,4 +1,4 @@
-import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:path/path.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
@@ -9,31 +9,32 @@ import '../models/project.dart';
 import '../models/credential.dart';
 
 class DatabaseHelper {
-  static Database? _database;
-
-  static Future<void> initialize() async {
-    if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
-      sqfliteFfiInit();
-      databaseFactory = databaseFactoryFfi;
-    }
-  }
+  static Future<Database>? _initFuture;
 
   static Future<Database> get database async {
-    if (_database != null) return _database!;
-    _database = await _initDatabase();
-    return _database!;
+    _initFuture ??= _initDatabase();
+    return _initFuture!;
   }
 
   static Future<Database> _initDatabase() async {
+    debugPrint('[DB] _initDatabase() called');
     final appDir = await getApplicationSupportDirectory();
+    debugPrint('[DB] appSupportDir=${appDir.path}');
     await appDir.create(recursive: true);
+    debugPrint('[DB] directory ensured');
     final path = join(appDir.path, 'penexecute.db');
-    print('Database path: $path');
-    
-    return await openDatabase(
+    debugPrint('[DB] opening database at $path');
+
+    final db = await openDatabase(
       path,
       version: 17,
+      singleInstance: false,
+      onConfigure: (db) async {
+        await db.execute('PRAGMA busy_timeout=5000');
+        debugPrint('[DB] onConfigure: busy_timeout set');
+      },
       onCreate: (db, version) async {
+        debugPrint('[DB] onCreate: creating fresh schema at version $version');
         await db.execute('''
           CREATE TABLE vulnerabilities (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -201,6 +202,7 @@ class DatabaseHelper {
         ''');
       },
       onUpgrade: (db, oldVersion, newVersion) async {
+        debugPrint('[DB] onUpgrade: $oldVersion → $newVersion');
         if (oldVersion < 2) {
           await db.execute('ALTER TABLE vulnerabilities ADD COLUMN vulnerabilityType TEXT');
         }
@@ -355,6 +357,9 @@ class DatabaseHelper {
         }
       },
     );
+    final version = await db.getVersion();
+    debugPrint('[DB] openDatabase() returned successfully, schema version=$version');
+    return db;
   }
 
   static Future<int> insertVulnerability(Vulnerability vuln) async {
@@ -471,8 +476,11 @@ class DatabaseHelper {
   }
 
   static Future<List<Project>> getProjects() async {
+    debugPrint('[DB] getProjects() called');
     final db = await database;
+    debugPrint('[DB] getProjects() got database handle, querying projects table...');
     final maps = await db.query('projects', orderBy: 'lastOpenedAt DESC');
+    debugPrint('[DB] getProjects() found ${maps.length} row(s): ${maps.map((m) => m['name']).toList()}');
     return maps.map((m) => Project.fromMap(m)).toList();
   }
 

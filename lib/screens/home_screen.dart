@@ -29,11 +29,22 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _loadProjects() async {
+    debugPrint('[HomeScreen] _loadProjects() started, mounted=$mounted');
     setState(() => _loading = true);
     try {
+      debugPrint('[HomeScreen] calling DatabaseHelper.getProjects()...');
       _projects = await DatabaseHelper.getProjects();
+      debugPrint('[HomeScreen] getProjects() returned ${_projects.length} project(s): ${_projects.map((p) => p.name).toList()}');
+    } catch (e, st) {
+      debugPrint('[HomeScreen] getProjects() threw: $e\n$st');
     } finally {
-      if (mounted) setState(() => _loading = false);
+      debugPrint('[HomeScreen] finally block, mounted=$mounted');
+      if (mounted) {
+        setState(() => _loading = false);
+        debugPrint('[HomeScreen] _loading set to false');
+      } else {
+        debugPrint('[HomeScreen] widget not mounted, _loading NOT cleared');
+      }
     }
   }
 
