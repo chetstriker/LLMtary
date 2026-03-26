@@ -1184,81 +1184,186 @@ Respond ONLY with valid JSON.''';
     }
   }
 
+  /// Max combined stdout+stderr size before we kill the process (25 MB).
+  static const int _maxOutputBytes = 25 * 1024 * 1024;
+
+  /// Detect repetitive/useless output: if the last N lines are identical,
+  /// the command is stuck in a loop producing no new information.
+  static const int _repetitionThreshold = 50;
+
+  /// Global command timeout. Generous to accommodate any tool the LLM chooses.
+  static const Duration _commandTimeout = Duration(minutes: 30);
+
+  /// Kill a process and all its children to prevent orphaned subprocesses.
+  static Future<void> _killProcessTree(Process process) async {
+    try {
+      process.kill(ProcessSignal.sigkill);
+      if (!Platform.isWindows) {
+        await Process.run('pkill', ['-9', '-P', '${process.pid}'])
+            .timeout(const Duration(seconds: 3))
+            .catchError((_) => ProcessResult(0, 0, '', ''));
+      }
+    } catch (_) {}
+  }
+
+  /// Check if recent output lines are all identical (stuck in a loop).
+  static bool _isRepetitiveOutput(List<String> recentLines) {
+    if (recentLines.length < _repetitionThreshold) return false;
+    final last = recentLines.last.trim();
+    if (last.isEmpty) return false;
+    int count = 0;
+    for (int i = recentLines.length - 1; i >= 0 && count < _repetitionThreshold; i--) {
+      if (recentLines[i].trim() == last) {
+        count++;
+      } else {
+        break;
+      }
+    }
+    return count >= _repetitionThreshold;
+  }
+
   static Future<CommandResult> _executeInWsl(String command) async {
     Process? process;
     try {
-      // nmap -p- scans can take 10+ minutes; other commands are fast.
-      // Use a longer timeout for full port scans.
-      final isFullPortScan = command.contains('nmap') && command.contains('-p-');
-      final timeout = isFullPortScan
-          ? const Duration(minutes: 15)
-          : const Duration(minutes: 5);
       process = await Process.start('wsl', ['bash', '-c', command])
-          .timeout(timeout);
+          .timeout(_commandTimeout);
 
       final stdoutBuffer = StringBuffer();
       final stderrBuffer = StringBuffer();
+      int totalBytes = 0;
+      bool killed = false;
+      String? killReason;
+      final recentLines = <String>[];
 
-      // Use Utf8Decoder with allowMalformed to handle invalid UTF-8 sequences
       final decoder = Utf8Decoder(allowMalformed: true);
 
       process.stdout.transform(decoder).listen((data) {
+        if (killed) return;
         final sanitized = OutputSanitizer.sanitize(data);
+        totalBytes += sanitized.length;
+        // Track recent lines for repetition detection
+        final lines = sanitized.split('\n');
+        for (final line in lines) {
+          if (line.trim().isNotEmpty) {
+            recentLines.add(line);
+            if (recentLines.length > _repetitionThreshold + 10) {
+              recentLines.removeAt(0);
+            }
+          }
+        }
+        if (totalBytes > _maxOutputBytes) {
+          killed = true;
+          killReason = 'Output exceeded ${_maxOutputBytes ~/ 1024}KB limit';
+          _killProcessTree(process!);
+          return;
+        }
+        if (_isRepetitiveOutput(recentLines)) {
+          killed = true;
+          killReason = 'Repetitive output detected (${_repetitionThreshold}+ identical lines)';
+          _killProcessTree(process!);
+          return;
+        }
         print('[STDOUT] $sanitized');
         stdoutBuffer.write(sanitized);
       });
 
       process.stderr.transform(decoder).listen((data) {
+        if (killed) return;
         final sanitized = OutputSanitizer.sanitize(data);
+        totalBytes += sanitized.length;
+        if (totalBytes > _maxOutputBytes) {
+          killed = true;
+          killReason = 'Output exceeded ${_maxOutputBytes ~/ 1024}KB limit';
+          _killProcessTree(process!);
+          return;
+        }
         print('[STDERR] $sanitized');
         stderrBuffer.write(sanitized);
       });
 
-      final exitCode = await process.exitCode.timeout(timeout);
+      final exitCode = await process.exitCode.timeout(_commandTimeout);
+      if (killed) {
+        return CommandResult(-1, stdoutBuffer.toString(),
+            'KILLED: $killReason. The command was producing excessive or repetitive output and was terminated.');
+      }
       return CommandResult(exitCode, stdoutBuffer.toString(), stderrBuffer.toString());
     } on TimeoutException {
-      process?.kill(ProcessSignal.sigkill);
+      if (process != null) await _killProcessTree(process);
       return CommandResult(-1, "", "Command timed out.");
     } catch (e) {
-      process?.kill(ProcessSignal.sigkill);
+      if (process != null) await _killProcessTree(process);
       return CommandResult(-1, "", "Error: $e");
     }
   }
 
   static Future<CommandResult> _executeInPowerShell(String command) async {
+    Process? process;
     try {
-      // For commands that need elevation, use Start-Process with -Verb RunAs
-      // For now, execute as-is and let Windows UAC handle elevation prompts
-      Process? process;
-      final isFullPortScan = command.contains('nmap') && command.contains('-p-');
-      final timeout = isFullPortScan
-          ? const Duration(minutes: 15)
-          : const Duration(minutes: 4);
-
       process = await Process.start('powershell', ['-Command', command]);
 
       final stdoutBuffer = StringBuffer();
       final stderrBuffer = StringBuffer();
+      int totalBytes = 0;
+      bool killed = false;
+      String? killReason;
+      final recentLines = <String>[];
 
       final decoder = Utf8Decoder(allowMalformed: true);
 
       process.stdout.transform(decoder).listen((data) {
+        if (killed) return;
         final sanitized = OutputSanitizer.sanitize(data);
+        totalBytes += sanitized.length;
+        final lines = sanitized.split('\n');
+        for (final line in lines) {
+          if (line.trim().isNotEmpty) {
+            recentLines.add(line);
+            if (recentLines.length > _repetitionThreshold + 10) {
+              recentLines.removeAt(0);
+            }
+          }
+        }
+        if (totalBytes > _maxOutputBytes) {
+          killed = true;
+          killReason = 'Output exceeded ${_maxOutputBytes ~/ 1024}KB limit';
+          _killProcessTree(process!);
+          return;
+        }
+        if (_isRepetitiveOutput(recentLines)) {
+          killed = true;
+          killReason = 'Repetitive output detected (${_repetitionThreshold}+ identical lines)';
+          _killProcessTree(process!);
+          return;
+        }
         print('[STDOUT] $sanitized');
         stdoutBuffer.write(sanitized);
       });
 
       process.stderr.transform(decoder).listen((data) {
+        if (killed) return;
         final sanitized = OutputSanitizer.sanitize(data);
+        totalBytes += sanitized.length;
+        if (totalBytes > _maxOutputBytes) {
+          killed = true;
+          killReason = 'Output exceeded ${_maxOutputBytes ~/ 1024}KB limit';
+          _killProcessTree(process!);
+          return;
+        }
         print('[STDERR] $sanitized');
         stderrBuffer.write(sanitized);
       });
 
-      final exitCode = await process.exitCode.timeout(timeout);
+      final exitCode = await process.exitCode.timeout(_commandTimeout);
+      if (killed) {
+        return CommandResult(-1, stdoutBuffer.toString(),
+            'KILLED: $killReason. The command was producing excessive or repetitive output and was terminated.');
+      }
       return CommandResult(exitCode, stdoutBuffer.toString(), stderrBuffer.toString());
     } on TimeoutException {
+      if (process != null) await _killProcessTree(process);
       return CommandResult(-1, "", "Command timed out.");
     } catch (e) {
+      if (process != null) await _killProcessTree(process);
       return CommandResult(-1, "", "Error: $e");
     }
   }
@@ -1268,40 +1373,71 @@ Respond ONLY with valid JSON.''';
   static Future<CommandResult> _executeInShell(String command) async {
     Process? process;
     try {
-      final isFullPortScan = command.contains('nmap') && command.contains('-p-');
-      final timeout = isFullPortScan
-          ? const Duration(minutes: 15)
-          : const Duration(minutes: 4);
-
       process = await Process.start('/bin/bash', ['-c', command]);
 
       final stdoutBuffer = StringBuffer();
       final stderrBuffer = StringBuffer();
+      int totalBytes = 0;
+      bool killed = false;
+      String? killReason;
+      final recentLines = <String>[];
 
       final decoder = Utf8Decoder(allowMalformed: true);
 
       process.stdout.transform(decoder).listen((data) {
+        if (killed) return;
         final sanitized = OutputSanitizer.sanitize(data);
+        totalBytes += sanitized.length;
+        final lines = sanitized.split('\n');
+        for (final line in lines) {
+          if (line.trim().isNotEmpty) {
+            recentLines.add(line);
+            if (recentLines.length > _repetitionThreshold + 10) {
+              recentLines.removeAt(0);
+            }
+          }
+        }
+        if (totalBytes > _maxOutputBytes) {
+          killed = true;
+          killReason = 'Output exceeded ${_maxOutputBytes ~/ 1024}KB limit';
+          _killProcessTree(process!);
+          return;
+        }
+        if (_isRepetitiveOutput(recentLines)) {
+          killed = true;
+          killReason = 'Repetitive output detected (${_repetitionThreshold}+ identical lines)';
+          _killProcessTree(process!);
+          return;
+        }
         print('[STDOUT] $sanitized');
         stdoutBuffer.write(sanitized);
       });
 
       process.stderr.transform(decoder).listen((data) {
+        if (killed) return;
         final sanitized = OutputSanitizer.sanitize(data);
+        totalBytes += sanitized.length;
+        if (totalBytes > _maxOutputBytes) {
+          killed = true;
+          killReason = 'Output exceeded ${_maxOutputBytes ~/ 1024}KB limit';
+          _killProcessTree(process!);
+          return;
+        }
         print('[STDERR] $sanitized');
         stderrBuffer.write(sanitized);
       });
 
-      final exitCode = await process.exitCode.timeout(timeout);
+      final exitCode = await process.exitCode.timeout(_commandTimeout);
+      if (killed) {
+        return CommandResult(-1, stdoutBuffer.toString(),
+            'KILLED: $killReason. The command was producing excessive or repetitive output and was terminated.');
+      }
       return CommandResult(exitCode, stdoutBuffer.toString(), stderrBuffer.toString());
     } on TimeoutException {
-      process?.kill(ProcessSignal.sigkill);
-      if (process != null) {
-        await Process.run('pkill', ['-9', '-P', '${process.pid}']).catchError((_) => ProcessResult(0, 0, '', ''));
-      }
+      if (process != null) await _killProcessTree(process);
       return CommandResult(-1, "", "Command timed out.");
     } catch (e) {
-      process?.kill(ProcessSignal.sigkill);
+      if (process != null) await _killProcessTree(process);
       return CommandResult(-1, "", "Error: $e");
     }
   }
