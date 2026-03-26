@@ -641,29 +641,29 @@ $deviceJson
 - Any other non-web service: banner grab → version → CVE match
 
 ## IPv6 ATTACK SURFACE (Phase 14.5)
-IPv6 is enabled by default on all modern operating systems and network equipment. Even networks that appear to be IPv4-only frequently have active IPv6 traffic that is unmonitored and un-firewalled.
+Generate IPv6 findings ONLY when IPv6 addresses, IPv6 services, or dual-stack indicators are directly observed in the scan data. Do NOT generate IPv6 findings based solely on the OS type. If no IPv6 evidence is present, skip this section entirely.
 
 **Rogue Router Advertisement (RA):**
 An attacker on the local segment can broadcast Router Advertisement messages claiming to be the default IPv6 gateway — without any authentication. Hosts that accept the advertisement will route all IPv6 traffic through the attacker, enabling man-in-the-middle attacks.
-Evidence: any IPv6 address in device data; Windows or Linux hosts present (IPv6 enabled by default).
+Evidence: IPv6 address in device data; dual-stack configuration indicators; IPv6-related services observed.
 Severity: HIGH — passive traffic interception for all IPv6 traffic on the segment.
 
 **DHCPv6 Rogue Server:**
 A rogue DHCPv6 server can provide IPv6 addresses and DNS server configuration to all hosts on the segment, redirecting DNS resolution to an attacker-controlled resolver.
-Evidence: any Windows or Linux hosts present; dual-stack configuration indicators.
+Evidence: DHCPv6 service indicators or IPv6 addresses observed in scan data.
 Severity: HIGH — DNS redirection enables phishing and credential capture.
 
 **IPv6 Firewall Bypass:**
 IPv4 firewall rules frequently have no IPv6 equivalents. Services blocked on IPv4 may be accessible on the same host via IPv6.
-Evidence: any host with both IPv4 and IPv6 addresses in recon data; services that appear filtered on IPv4.
+Evidence: host with both IPv4 and IPv6 addresses in recon data; services that appear filtered on IPv4.
 Severity: MEDIUM — specific severity depends on which services become accessible.
 
 **IPv6 Tunneling Protocol Bypass:**
 IPv6 tunneling protocols (6to4, Teredo, ISATAP) may bypass network segmentation controls by tunneling IPv6 over IPv4 UDP.
-Evidence: Windows hosts present (Teredo is enabled by default on older Windows); ISATAP or 6to4 indicators in interface data.
+Evidence: Teredo or ISATAP indicators in interface data; IPv6 tunnel endpoints observed.
 Severity: MEDIUM — network segmentation controls may be bypassed.
 
-Generate IPv6 findings at LOW-MEDIUM confidence as attack surface recommendations — IPv6 testing cannot be fully assessed from recon data alone but the attack surface should always be noted for internal targets.
+Generate IPv6 findings ONLY when direct IPv6 evidence is present in the scan data. Do NOT generate these findings based on OS type alone.
 
 ## SMB/NFS SHARE PERMISSION TESTING (Phase 33)
 File share access control misconfigurations are among the most consistently found internal findings. Generate findings for each condition below when the relevant ports or services are evidenced.
@@ -1938,6 +1938,9 @@ Return a JSON array. Each entry is one specific exploitable issue.
   }
 ]
 EVIDENCE RULE: The "evidence_quote" field is MANDATORY. It must be an exact substring from the device data above. Findings that cannot be grounded in the provided data MUST have confidence: LOW.
+CVE ATTRIBUTION RULE: A CVE ID in the "cve" field MUST correspond to a vulnerability in the exact product identified in the scan data. Do NOT assign a CVE to a finding if the CVE's affected product does not match the observed product name or service banner. If you are uncertain whether a CVE applies to the observed product, leave the "cve" field empty and describe the vulnerability class in the description instead. A wrong CVE is worse than no CVE.
+SERVICE GROUNDING RULE: Every finding must be grounded in a service or endpoint that is directly observed in the device data above. Do NOT generate findings for services, ports, or technologies that are not present in the open_ports, web_findings, nmap_scripts, or other_findings sections. Theoretical attack paths that require infrastructure not observed in the scan data must be rated LOW confidence and must clearly state what additional evidence would be needed to confirm them.
+DEDUPLICATION RULE: Each distinct vulnerability should appear ONCE in your output. Do not emit multiple findings that describe the same attack (e.g. do not emit both "SMB Relay Attack" and "NTLM Relay via SMB Signing Not Required" — pick the most precise description and emit it once). If a finding has multiple exploitation paths, describe them all within a single finding's description field rather than creating separate findings.
 PROOF COMMAND RULE: The "proofCommand" field is REQUIRED for every finding with severity HIGH or CRITICAL. It must be a real, runnable command specific to this target — not a placeholder like "curl http://TARGET". Use the actual observed IP address, port number, and path from the device data.''';
 
   /// Extracts a named section (### HEADER ... next ###) from [source].
@@ -4810,6 +4813,8 @@ You are an expert penetration tester. Analyze the device data and identify print
 
 ## DEVICE DATA:
 $deviceJson
+
+SCOPE RESTRICTION: Only generate findings for vulnerabilities that are SPECIFIC to printer/MFP devices and not already covered by the general network service analysis (FTP, Telnet, SSL/TLS). Do NOT re-generate findings for anonymous FTP, cleartext Telnet, or weak TLS certificates — those are handled by other analysis passes. Focus on printer-specific attack surfaces: web admin interface default credentials, print job interception, SNMP community strings, PJL/PostScript command injection, firmware update mechanisms, and scan-to-email credential exposure.
 
 ## WHAT TO IDENTIFY:
 

@@ -30,7 +30,11 @@ class EnvironmentInfo {
     }
     buf.writeln('- Sudo/root: ${hasRoot ? 'available' : 'NOT available — do not use sudo or commands requiring root'}');
     if (!hasRoot) {
-      buf.writeln('- UDP scans: NOT possible (requires root) — skip all UDP scanning');
+      buf.writeln('- UDP port scanning (nmap -sU): NOT possible (requires root) — skip UDP port discovery scans');
+      buf.writeln('- UDP service interaction: STILL POSSIBLE without root — tools that query specific UDP services');
+      buf.writeln('  (e.g. SNMP queries on port 161, DNS queries on port 53, NTP queries on port 123, IPMI on port 623)');
+      buf.writeln('  work fine without root because they use standard UDP sockets, not raw sockets.');
+      buf.writeln('  You SHOULD still attempt these when the service is likely present.');
     }
 
     if (availableWordlists.isNotEmpty) {

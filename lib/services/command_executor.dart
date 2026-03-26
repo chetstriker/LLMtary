@@ -586,7 +586,6 @@ Respond ONLY with valid JSON.''';
 
     // Check for Windows native (without WSL)
     if (Platform.isWindows && !await isWslAvailable()) {
-      // Windows uses chocolatey, scoop, or winget
       final managers = ['choco', 'scoop', 'winget'];
       for (final manager in managers) {
         try {
@@ -597,27 +596,95 @@ Respond ONLY with valid JSON.''';
       return 'choco'; // Default for Windows (most common)
     }
 
-    // For Linux (native or WSL)
-    final managers = ['apt-get', 'yum', 'dnf', 'pacman', 'zypper', 'apk'];
-    
-    if (Platform.isWindows && await isWslAvailable()) {
-      // Check inside WSL
-      for (final manager in managers) {
-        try {
-          final result = await Process.run('wsl', ['which', manager]);
-          if (result.exitCode == 0) return manager;
-        } catch (e) {}
-      }
-    } else {
-      // Native Linux
-      for (final manager in managers) {
-        try {
-          final result = await Process.run('which', [manager]);
-          if (result.exitCode == 0) return manager;
-        } catch (e) {}
-      }
+    // For Linux (native or WSL): detect distro family from /etc/os-release
+    // first, then pick the correct package manager. This prevents false
+    // positives when multiple package managers are installed (e.g. CachyOS
+    // ships apt as a compatibility layer but pacman is the real manager).
+    final isWsl = Platform.isWindows && await isWslAvailable();
+    final distroFamily = await _detectDistroFamily(isWsl);
+
+    // Map distro family to the correct package manager order
+    List<String> prioritizedManagers;
+    switch (distroFamily) {
+      case 'arch':
+        // Check for AUR helpers first (paru, yay), then pacman
+        prioritizedManagers = ['paru', 'yay', 'pacman'];
+        break;
+      case 'debian':
+        prioritizedManagers = ['apt-get'];
+        break;
+      case 'fedora':
+        prioritizedManagers = ['dnf', 'yum'];
+        break;
+      case 'rhel':
+        prioritizedManagers = ['yum', 'dnf'];
+        break;
+      case 'suse':
+        prioritizedManagers = ['zypper'];
+        break;
+      case 'alpine':
+        prioritizedManagers = ['apk'];
+        break;
+      default:
+        // Unknown distro — fall back to which-based scan in a sensible order
+        prioritizedManagers = ['pacman', 'apt-get', 'dnf', 'yum', 'zypper', 'apk'];
     }
+
+    for (final manager in prioritizedManagers) {
+      try {
+        final ProcessResult result;
+        if (isWsl) {
+          result = await Process.run('wsl', ['which', manager]);
+        } else {
+          result = await Process.run('which', [manager]);
+        }
+        if (result.exitCode == 0) return manager;
+      } catch (e) {}
+    }
+
     return 'apt-get'; // Default fallback
+  }
+
+  /// Detect the Linux distro family from /etc/os-release.
+  /// Returns 'arch', 'debian', 'fedora', 'rhel', 'suse', 'alpine', or 'unknown'.
+  static Future<String> _detectDistroFamily(bool isWsl) async {
+    try {
+      final cmd = 'cat /etc/os-release 2>/dev/null';
+      final ProcessResult result;
+      if (isWsl) {
+        result = await Process.run('wsl', ['bash', '-c', cmd])
+            .timeout(const Duration(seconds: 5));
+      } else {
+        result = await Process.run('bash', ['-c', cmd])
+            .timeout(const Duration(seconds: 5));
+      }
+      final content = (result.stdout as String? ?? '').toLowerCase();
+      if (content.isEmpty) return 'unknown';
+
+      // Parse ID and ID_LIKE fields
+      String id = '';
+      String idLike = '';
+      for (final line in content.split('\n')) {
+        if (line.startsWith('id=')) {
+          id = line.substring(3).replaceAll('"', '').trim();
+        } else if (line.startsWith('id_like=')) {
+          idLike = line.substring(8).replaceAll('"', '').trim();
+        }
+      }
+
+      // Check ID_LIKE first (e.g. cachyos has id_like=arch)
+      final combined = '$id $idLike';
+      if (combined.contains('arch')) return 'arch';
+      if (combined.contains('debian') || combined.contains('ubuntu')) return 'debian';
+      if (combined.contains('fedora')) return 'fedora';
+      if (combined.contains('rhel') || combined.contains('centos')) return 'rhel';
+      if (combined.contains('suse') || combined.contains('opensuse')) return 'suse';
+      if (id == 'alpine') return 'alpine';
+
+      return 'unknown';
+    } catch (_) {
+      return 'unknown';
+    }
   }
 
   static Future<bool> installTool(String tool, LLMSettings settings, LLMService llmService, {String? adminPassword, Future<String?> Function(String)? onPasswordNeeded}) async {
@@ -662,6 +729,9 @@ Respond ONLY with valid JSON.''';
       } else if (packageManager == 'pacman') {
         packageManagerInfo = 'Arch Linux using pacman';
         exampleCommand = 'sudo pacman -S --noconfirm PACKAGE_NAME';
+      } else if (packageManager == 'paru' || packageManager == 'yay') {
+        packageManagerInfo = 'Arch Linux using $packageManager (AUR helper)';
+        exampleCommand = '$packageManager -S --noconfirm PACKAGE_NAME';
       } else {
         packageManagerInfo = 'Linux using $packageManager';
         exampleCommand = 'sudo $packageManager install PACKAGE_NAME';
@@ -699,6 +769,16 @@ Debian/Ubuntu (apt-get):
 - nmap: {"command": "sudo apt-get install -y nmap", "package": "nmap"}
 - searchsploit: {"command": "sudo apt-get install -y exploitdb", "package": "exploitdb"}
 
+Arch Linux (pacman):
+- nmap: {"command": "sudo pacman -S --noconfirm nmap", "package": "nmap"}
+- impacket: {"command": "sudo pacman -S --noconfirm impacket", "package": "impacket"}
+- Note: Many pentesting tools are in the AUR, not the official repos
+
+Arch Linux (paru/yay AUR helper):
+- nmap: {"command": "paru -S --noconfirm nmap", "package": "nmap"}
+- metasploit: {"command": "paru -S --noconfirm metasploit", "package": "metasploit"}
+- Note: paru/yay do NOT use sudo — they handle elevation internally
+
 macOS (brew):
 - metasploit: {"command": "brew install metasploit", "package": "metasploit"}
 - nmap: {"command": "brew install nmap", "package": "nmap"}
@@ -726,7 +806,7 @@ Respond ONLY with valid JSON.''';
       // Validate that the LLM's command uses the correct package manager.
       // If the LLM suggests apt-get but we detected pacman (or vice versa),
       // regenerate the command using the correct package manager.
-      const knownManagers = ['apt-get', 'apt', 'yum', 'dnf', 'pacman', 'zypper', 'apk', 'brew', 'choco', 'scoop', 'winget'];
+      const knownManagers = ['apt-get', 'apt', 'yum', 'dnf', 'pacman', 'paru', 'yay', 'zypper', 'apk', 'brew', 'choco', 'scoop', 'winget'];
       final wrongManager = knownManagers.where((m) => m != packageManager && installCmd.contains(m)).firstOrNull;
       if (wrongManager != null) {
         print('${_timestamp()} DEBUG: LLM suggested $wrongManager but detected $packageManager — regenerating command');
@@ -749,6 +829,11 @@ Respond ONLY with valid JSON.''';
         installCmd = installCmd.replaceAll('sudo ', '');
       }
 
+      // For AUR helpers (paru/yay), no sudo needed — they handle elevation internally
+      if ((packageManager == 'paru' || packageManager == 'yay') && installCmd.contains('sudo')) {
+        installCmd = installCmd.replaceAll('sudo ', '');
+      }
+
       // For Windows package managers, handle elevation differently
       final isWindowsNative = Platform.isWindows && !isWsl;
       if (isWindowsNative && (packageManager == 'choco' || packageManager == 'scoop' || packageManager == 'winget')) {
@@ -759,7 +844,7 @@ Respond ONLY with valid JSON.''';
 
       // Sudo handling: two paths depending on whether an admin password is available.
       final hasSudo = installCmd.contains('sudo ');
-      if (hasSudo && !isWindowsNative && packageManager != 'brew') {
+      if (hasSudo && !isWindowsNative && packageManager != 'brew' && packageManager != 'paru' && packageManager != 'yay') {
         if (adminPassword != null && adminPassword.isNotEmpty) {
           // Password provided — verify it works with sudo -S, then let the install
           // command run via "echo PASSWORD | sudo -S ..." below. No -n transformation needed.
@@ -1011,6 +1096,10 @@ Respond ONLY with valid JSON.''';
         return 'sudo dnf install -y $package';
       case 'pacman':
         return 'sudo pacman -S --noconfirm $package';
+      case 'paru':
+        return 'paru -S --noconfirm $package';
+      case 'yay':
+        return 'yay -S --noconfirm $package';
       case 'zypper':
         return 'sudo zypper install -y $package';
       case 'apk':

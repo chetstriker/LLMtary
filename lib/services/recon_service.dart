@@ -276,10 +276,23 @@ class ReconService {
     final unavailableTools = <String>{};
     // Track per-port tool failures to enable fast fallback (e.g. gobuster → ffuf)
     final portToolFailures = <String, Set<String>>{}; // 'port:tool' → failed
+    // Per-port probe counter: tracks how many commands have targeted each port.
+    // After maxProbesPerPort attempts on a single port, further commands
+    // targeting that port are skipped to prevent spinning (e.g. 35 binary
+    // handshake variations on an obscure port).
+    final portProbeCounts = <String, int>{};
+    final exhaustedPorts = <String>{};
+    const maxProbesPerPort = 5;
     int consecutiveFailures = 0;
     bool exhaustedOptions = false;
     int connectivityFailures = 0;
     int concludeOverrides = 0;
+    // Phase 1: approach failure tracking (protocol+method pattern → failure count)
+    final approachFailureCounts = <String, int>{};
+    // Phase 2: per-approach failure reasons for prompt injection
+    final approachFailureReasons = <String, String>{};
+    // Phase 6: timed-out web endpoints for scheme fallback hints
+    final timedOutEndpoints = <String>{};
 
     if (scope == TargetScope.external && ReconService._isDomainName(address)) {
       onProgress?.call('[$address] Running passive OSINT...');
@@ -349,6 +362,43 @@ class ReconService {
               'You MUST CONCLUDE now with host_useful=false.\n'
               'Do NOT run any more DNS or ping commands.');
         }
+        if (exhaustedPorts.isNotEmpty) {
+          parts.add('## EXHAUSTED PORTS — do NOT probe these ports any further:\n'
+              '${exhaustedPorts.map((p) => '- Port $p: already probed $maxProbesPerPort+ times with no new data. Move on.').join('\n')}\n'
+              'Any command targeting these ports will be SKIPPED automatically.');
+        }
+        // Phase 1.2: inject failed approach hints
+        final failedApproaches = approachFailureCounts.entries
+            .where((e) => e.value >= 2)
+            .toList();
+        if (failedApproaches.isNotEmpty) {
+          final lines = failedApproaches.map((e) {
+            final reason = approachFailureReasons[e.key] ?? 'produced no useful data';
+            return '- ${e.key}: failed ${e.value} times ($reason)\n'
+                '  → Use a fundamentally different method to collect this data';
+          }).join('\n');
+          parts.add('## FAILED APPROACHES — do NOT retry these methods:\n$lines');
+        }
+        // Phase 6.2: inject timed-out endpoint fallback hints
+        if (timedOutEndpoints.isNotEmpty) {
+          final openPorts = (findings['open_ports'] as List? ?? [])
+              .map((p) => (p as Map)['port'] as int?)
+              .whereType<int>()
+              .toSet();
+          final lines = timedOutEndpoints.map((ep) {
+            final isHttp = ep.startsWith('http://');
+            final hasHttps = openPorts.contains(443) || openPorts.contains(8443);
+            final hasHttp = openPorts.contains(80) || openPorts.contains(8080);
+            var hint = '- $ep timed out — do NOT retry this endpoint.';
+            if (isHttp && hasHttps) {
+              hint += '\n  Port 443 (HTTPS) is open — retry this objective over HTTPS instead.';
+            } else if (!isHttp && hasHttp) {
+              hint += '\n  Port 80 (HTTP) is open — retry this objective over HTTP instead.';
+            }
+            return hint;
+          }).join('\n');
+          parts.add('## TIMED OUT ENDPOINTS:\n$lines');
+        }
         if (parts.isNotEmpty) historyHint = '\n${parts.join('\n\n')}\n';
       }
 
@@ -361,6 +411,9 @@ class ReconService {
         history: history,
         historyHint: historyHint,
         envInfo: envInfo,
+        iteration: iteration,
+        maxIterations: maxIter,
+        commandCount: executedCommands.length,
       );
 
       String response;
@@ -382,7 +435,12 @@ class ReconService {
         // Don't conclude early if there are still unprobed ports/services,
         // but cap overrides to prevent infinite loops on stubborn targets.
         if (concludeOverrides < 3) {
-          final focusHints = _buildFocusHints(address, findings, env, scope);
+          final focusHints = _buildFocusHints(
+            address, findings, env, scope,
+            portProbeCounts: portProbeCounts,
+            exhaustedPorts: exhaustedPorts,
+            approachFailureCounts: approachFailureCounts,
+          );
           if (focusHints.isNotEmpty) {
             concludeOverrides++;
             history += 'Iteration ${iteration + 1}: LLM tried to CONCLUDE but unprobed services remain (override $concludeOverrides/3) — continuing.\n\n';
@@ -418,6 +476,25 @@ class ReconService {
 
       if (CommandUtils.isSimilarCommand(command, executedCommands)) {
         history += 'Iteration ${iteration + 1}: SKIPPED duplicate: $command\n\n';
+        consecutiveFailures++;
+        if (consecutiveFailures >= 5) { exhaustedOptions = true; break; }
+        continue;
+      }
+
+      // Phase 1.3: skip commands whose approach category has failed ≥3 times
+      final cmdApproach = CommandUtils.classifyReconApproach(command, address);
+      if ((approachFailureCounts[cmdApproach] ?? 0) >= 3) {
+        history += 'Iteration ${iteration + 1}: SKIPPED — approach "$cmdApproach" has failed 3+ times: $command\n\n';
+        consecutiveFailures++;
+        if (consecutiveFailures >= 5) { exhaustedOptions = true; break; }
+        continue;
+      }
+
+      // Per-port probe cap: extract the target port from the command and check
+      // if we've already probed it too many times.
+      final cmdTargetPort = _extractTargetPort(command, address);
+      if (cmdTargetPort != null && exhaustedPorts.contains(cmdTargetPort)) {
+        history += 'Iteration ${iteration + 1}: SKIPPED — port $cmdTargetPort already exhausted ($maxProbesPerPort+ probes): $command\n\n';
         consecutiveFailures++;
         if (consecutiveFailures >= 5) { exhaustedOptions = true; break; }
         continue;
@@ -513,6 +590,13 @@ class ReconService {
       if (commandTimedOut) {
         history += 'Iteration ${iteration + 1}: TIMED OUT: $command — do NOT retry this command\n\n';
         onProgress?.call('[$address] Command timed out, skipping...');
+        // Phase 6.1: track timed-out web endpoints for scheme fallback
+        final epMatch = RegExp(r'(https?://[^/\s]+)').firstMatch(command);
+        if (epMatch != null) timedOutEndpoints.add(epMatch.group(1)!);
+        // Phase 1: record timeout as approach failure
+        final toApproach = CommandUtils.classifyReconApproach(command, address);
+        approachFailureCounts[toApproach] = (approachFailureCounts[toApproach] ?? 0) + 1;
+        approachFailureReasons[toApproach] = 'timed out';
         continue;
       }
 
@@ -586,6 +670,31 @@ class ReconService {
         }
       }
 
+      // Track per-port probe count and mark exhausted when threshold reached
+      if (cmdTargetPort != null) {
+        portProbeCounts[cmdTargetPort] = (portProbeCounts[cmdTargetPort] ?? 0) + 1;
+        if (portProbeCounts[cmdTargetPort]! >= maxProbesPerPort &&
+            !exhaustedPorts.contains(cmdTargetPort)) {
+          exhaustedPorts.add(cmdTargetPort);
+          onProgress?.call('[$address] Port $cmdTargetPort exhausted ($maxProbesPerPort probes) — skipping further probes');
+          history += 'NOTE: Port $cmdTargetPort has been probed $maxProbesPerPort times. It is now EXHAUSTED — do NOT target this port again.\n\n';
+        }
+      }
+
+      // Phase 2.1: detect echoed-input output pattern
+      final isEchoed = CommandUtils.isEchoedInput(command, output);
+      if (isEchoed) {
+        final echoApproach = CommandUtils.classifyReconApproach(command, address);
+        approachFailureCounts[echoApproach] = (approachFailureCounts[echoApproach] ?? 0) + 1;
+        approachFailureReasons[echoApproach] = 'command input was echoed back — tool did not process commands in piped/scripted context';
+        history += 'Iteration ${iteration + 1}:\n'
+            'Command: $command\n'
+            'Purpose: $purpose\n'
+            'Exit: $exitCode\n'
+            'Output: (ECHOED INPUT — tool did not process piped commands)\n\n';
+        continue;
+      }
+
       history += 'Iteration ${iteration + 1}:\n'
           'Command: $command\n'
           'Purpose: $purpose\n'
@@ -594,7 +703,21 @@ class ReconService {
 
       if (output.isNotEmpty) {
         onProgress?.call('[$address] Parsing output...');
+        // Phase 2.2: snapshot findings before merge to detect zero-new-data
+        final preCount = _findingsItemCount(findings);
         await _mergeFindings(llmService, address, command, purpose, output, findings);
+        final postCount = _findingsItemCount(findings);
+        if (postCount <= preCount) {
+          // No new data extracted — record as approach failure
+          final noDataApproach = CommandUtils.classifyReconApproach(command, address);
+          approachFailureCounts[noDataApproach] = (approachFailureCounts[noDataApproach] ?? 0) + 1;
+          approachFailureReasons.putIfAbsent(noDataApproach, () => 'produced no new data after parsing');
+        }
+      } else {
+        // Empty output — record as approach failure
+        final emptyApproach = CommandUtils.classifyReconApproach(command, address);
+        approachFailureCounts[emptyApproach] = (approachFailureCounts[emptyApproach] ?? 0) + 1;
+        approachFailureReasons.putIfAbsent(emptyApproach, () => 'produced empty output');
       }
     }
 
@@ -619,12 +742,26 @@ class ReconService {
     required String history,
     required String historyHint,
     EnvironmentInfo? envInfo,
+    int iteration = 0,
+    int maxIterations = 100,
+    int commandCount = 0,
   }) {
-    final focusHints = _buildFocusHints(address, findings, env, scope);
+    final focusHints = _buildFocusHints(
+      address, findings, env, scope,
+      portProbeCounts: {},
+      exhaustedPorts: {},
+      approachFailureCounts: {},
+    );
     final baseline = scope == TargetScope.external
         ? _externalBaseline(address, env)
         : _internalBaseline(address, env);
     final scopeLabel = scope == TargetScope.external ? 'EXTERNAL (internet-facing)' : 'INTERNAL (LAN)';
+    // Phase 4.1: embedded device detection
+    final embeddedHint = _buildEmbeddedDeviceHint(findings);
+
+    // Phase 4.2: iteration budget awareness
+    final budgetHint = _buildBudgetHint(iteration, maxIterations, commandCount);
+
     return '''You are an expert penetration tester performing RECONNAISSANCE ONLY on target: $address
 Target scope: $scopeLabel
 Your sole goal is to COLLECT DATA. Do NOT test exploits, do NOT attempt logins, do NOT modify anything on the target.
@@ -675,7 +812,8 @@ $history
 $historyHint
 
 $focusHints
-
+$embeddedHint
+$budgetHint
 $baseline
 
 ## TOOL SYNTAX NOTE — NUCLEI (if used):
@@ -876,7 +1014,15 @@ Use passive sources — do not send emails or interact with mail servers.
   // Findings-driven focus hints
   // ---------------------------------------------------------------------------
 
-  String _buildFocusHints(String address, Map<String, dynamic> findings, _ExecEnv env, TargetScope scope) {
+  String _buildFocusHints(
+    String address,
+    Map<String, dynamic> findings,
+    _ExecEnv env,
+    TargetScope scope, {
+    Map<String, int> portProbeCounts = const {},
+    Set<String> exhaustedPorts = const {},
+    Map<String, int> approachFailureCounts = const {},
+  }) {
     final isExternal = scope == TargetScope.external;
     final ports = (findings['open_ports'] as List? ?? []).cast<Map<String, dynamic>>();
     final webFindings = (findings['web_findings'] as List? ?? []);
@@ -1033,10 +1179,6 @@ Use passive sources — do not send emails or interact with mail servers.
 
     // Web hints
     for (final port in webPorts) {
-      final portEntry = ports.firstWhere((p) => (p['port'] as num?)?.toInt() == port, orElse: () => {});
-      final svc = (portEntry['service'] as String? ?? '').toLowerCase();
-      final scheme = svc.contains('https') || svc.contains('ssl') ? 'https' : 'http';
-      final url = '$scheme://$address:$port';
       final existingFinding = webFindings.cast<Map<String, dynamic>>().firstWhere(
           (w) => (w['url'] as String? ?? '').contains(':$port'), orElse: () => {});
       final rootStatus = existingFinding['status'] as int? ?? 0;
@@ -1089,107 +1231,195 @@ Use passive sources — do not send emails or interact with mail servers.
       }
     }
 
-    // SMB hints — internal only
+    // SMB hints — internal only, Phase 3.1: data-aware
     for (final port in smbPorts) {
       if (isExternal) continue;
-      final alreadyProbed = smbFindings.isNotEmpty;
+      final portStr = port.toString();
+      if (exhaustedPorts.contains(portStr)) continue;
+      final alreadyProbed = smbFindings.isNotEmpty || (portProbeCounts[portStr] ?? 0) >= 2;
       if (!alreadyProbed) {
         hints.add('- SMB port $port not yet probed — collect: share list, null session access, signing status, OS info, domain/workgroup, SMB version, known vulnerabilities (MS17-010, CVE-2017-7494)');
       }
     }
 
-    // FTP hints
+    // FTP hints — Phase 3.1: data-aware
     for (final port in ftpPorts) {
-      hints.add('- FTP port $port — collect: banner/version, anonymous access status, directory listing if accessible');
+      final portStr = port.toString();
+      if (exhaustedPorts.contains(portStr)) continue;
+      final probes = portProbeCounts[portStr] ?? 0;
+      final portEntry = ports.firstWhere((p) => (p['port'] as num?)?.toInt() == port, orElse: () => {});
+      final hasBanner = (portEntry['banner'] as String? ?? '').isNotEmpty ||
+          (portEntry['version'] as String? ?? '').isNotEmpty ||
+          (portEntry['product'] as String? ?? '').isNotEmpty;
+      final ftpFindings = (findings['ftp_findings'] as List? ?? []);
+      final hasFtpData = ftpFindings.isNotEmpty;
+      if (hasBanner && (hasFtpData || probes >= 2)) continue;
+      if (probes >= 2) {
+        hints.add('- FTP port $port: probed $probes times with limited results — one more targeted attempt allowed');
+      } else {
+        hints.add('- FTP port $port — collect: banner/version, anonymous access status, directory listing if accessible');
+      }
     }
 
-    // SSH hints
+    // SSH hints — Phase 3.1: data-aware
     for (final port in sshPorts) {
+      final portStr = port.toString();
+      if (exhaustedPorts.contains(portStr)) continue;
+      final portEntry = ports.firstWhere((p) => (p['port'] as num?)?.toInt() == port, orElse: () => {});
+      final hasVersion = (portEntry['version'] as String? ?? '').isNotEmpty ||
+          (portEntry['banner'] as String? ?? '').isNotEmpty ||
+          (portEntry['product'] as String? ?? '').isNotEmpty;
+      if (hasVersion) continue;
       hints.add('- SSH port $port — collect: exact version string, supported algorithms, host key fingerprint, authentication methods');
     }
 
-    // DNS hints
+    // DNS hints — Phase 3.1: data-aware
     for (final port in dnsPorts) {
+      final portStr = port.toString();
+      if (exhaustedPorts.contains(portStr)) continue;
+      final dnsFindings = (findings['dns_findings'] as List? ?? []);
+      if (dnsFindings.isNotEmpty) continue;
       hints.add('- DNS port $port — collect: all record types, zone transfer attempt, recursion status, version string');
     }
 
-    // SNMP hints
+    // SNMP hints — Phase 3.1: data-aware
     for (final port in snmpPorts) {
+      final portStr = port.toString();
+      if (exhaustedPorts.contains(portStr)) continue;
+      final hasSnmpData = (findings['other_findings'] as List? ?? [])
+          .cast<Map<String, dynamic>>()
+          .any((f) => (f['type'] as String? ?? '').toLowerCase() == 'snmp');
+      if (hasSnmpData || (portProbeCounts[portStr] ?? 0) >= 2) continue;
       hints.add('- SNMP port $port — collect: system info, interface table, running processes, installed software (try community strings: public, private, community)');
     }
 
-    // RDP hints
+    // RDP hints — Phase 3.1: data-aware
     for (final port in rdpPorts) {
+      final portStr = port.toString();
+      if (exhaustedPorts.contains(portStr)) continue;
+      final portEntry = ports.firstWhere((p) => (p['port'] as num?)?.toInt() == port, orElse: () => {});
+      final hasVersion = (portEntry['version'] as String? ?? '').isNotEmpty ||
+          (portEntry['product'] as String? ?? '').isNotEmpty;
+      if (hasVersion && (portProbeCounts[portStr] ?? 0) >= 1) continue;
       hints.add('- RDP port $port — collect: NLA requirement, encryption level, version, known vulnerabilities (BlueKeep CVE-2019-0708, DejaBlue)');
     }
 
-    // Telnet hints
+    // Telnet hints — Phase 3.1: data-aware
     for (final port in telnetPorts) {
+      final portStr = port.toString();
+      if (exhaustedPorts.contains(portStr)) continue;
+      final portEntry = ports.firstWhere((p) => (p['port'] as num?)?.toInt() == port, orElse: () => {});
+      final hasBanner = (portEntry['banner'] as String? ?? '').isNotEmpty;
+      final probes = portProbeCounts[portStr] ?? 0;
+      if (hasBanner || probes >= 1) continue;
       hints.add('- Telnet port $port — collect: banner, device type, authentication prompt');
     }
 
-    // Database hints
+    // Database hints — Phase 3.1: data-aware
     for (final port in mysqlPorts) {
+      final portStr = port.toString();
+      if (exhaustedPorts.contains(portStr)) continue;
+      final portEntry = ports.firstWhere((p) => (p['port'] as num?)?.toInt() == port, orElse: () => {});
+      if ((portEntry['version'] as String? ?? '').isNotEmpty && (portProbeCounts[portStr] ?? 0) >= 1) continue;
       hints.add('- MySQL port $port — collect: exact version, unauthenticated access, accessible databases');
     }
     for (final port in postgresPorts) {
+      final portStr = port.toString();
+      if (exhaustedPorts.contains(portStr)) continue;
+      final portEntry = ports.firstWhere((p) => (p['port'] as num?)?.toInt() == port, orElse: () => {});
+      if ((portEntry['version'] as String? ?? '').isNotEmpty && (portProbeCounts[portStr] ?? 0) >= 1) continue;
       hints.add('- PostgreSQL port $port — collect: exact version, authentication method, accessible databases');
     }
     for (final port in mssqlPorts) {
+      final portStr = port.toString();
+      if (exhaustedPorts.contains(portStr)) continue;
+      final portEntry = ports.firstWhere((p) => (p['port'] as num?)?.toInt() == port, orElse: () => {});
+      if ((portEntry['version'] as String? ?? '').isNotEmpty && (portProbeCounts[portStr] ?? 0) >= 1) continue;
       hints.add('- MSSQL port $port — collect: exact version, instance name, authentication method, sa account status');
     }
 
-    // LDAP hints — internal only
+    // LDAP hints — internal only, Phase 3.1: data-aware
     for (final port in ldapPorts) {
       if (isExternal) continue;
+      final portStr = port.toString();
+      if (exhaustedPorts.contains(portStr) || (portProbeCounts[portStr] ?? 0) >= 2) continue;
       hints.add('- LDAP port $port — collect: domain name, base DN, null bind (unauthenticated query), naming contexts, domain controllers list, password policy');
     }
 
-    // Kerberos hints — internal only
+    // Kerberos hints — internal only, Phase 3.1: data-aware
     for (final port in kerberosPorts) {
       if (isExternal) continue;
+      final portStr = port.toString();
+      if (exhaustedPorts.contains(portStr) || (portProbeCounts[portStr] ?? 0) >= 2) continue;
       hints.add('- Kerberos port $port — collect: domain name, enumerate valid usernames, check for accounts with pre-auth disabled (AS-REP roasting candidates), list SPNs (Kerberoasting candidates)');
     }
 
-    // WinRM hints — internal only
+    // WinRM hints — internal only, Phase 3.1: data-aware
     for (final port in winrmPorts) {
       if (isExternal) continue;
+      final portStr = port.toString();
+      if (exhaustedPorts.contains(portStr) || (portProbeCounts[portStr] ?? 0) >= 2) continue;
       hints.add('- WinRM port $port — collect: authentication methods accepted, OS version, test for unauthenticated access or default/weak credentials');
     }
 
-    // Redis hints — internal only
+    // Redis hints — internal only, Phase 3.1: data-aware
     for (final port in redisPorts) {
       if (isExternal) continue;
+      final portStr = port.toString();
+      if (exhaustedPorts.contains(portStr) || (portProbeCounts[portStr] ?? 0) >= 2) continue;
       hints.add('- Redis port $port — collect: unauthenticated access (try connecting with no password), server version, CONFIG GET, keyspace listing, check for write access (critical: can write SSH keys or cron jobs)');
     }
 
-    // MongoDB hints — internal only
+    // MongoDB hints — internal only, Phase 3.1: data-aware
     for (final port in mongoPorts) {
       if (isExternal) continue;
+      final portStr = port.toString();
+      if (exhaustedPorts.contains(portStr) || (portProbeCounts[portStr] ?? 0) >= 2) continue;
       hints.add('- MongoDB port $port — collect: unauthenticated access, database and collection listing, version, check for sensitive data exposure');
     }
 
-    // Elasticsearch hints — internal only
+    // Elasticsearch hints — internal only, Phase 3.1: data-aware
     for (final port in elasticPorts) {
       if (isExternal) continue;
+      final portStr = port.toString();
+      if (exhaustedPorts.contains(portStr) || (portProbeCounts[portStr] ?? 0) >= 2) continue;
       hints.add('- Elasticsearch port $port — collect: unauthenticated access (HTTP GET /), cluster info, index listing, version, check for sensitive data in indices');
     }
 
-    // NFS hints — internal only
+    // NFS hints — internal only, Phase 3.1: data-aware
     for (final port in nfsPorts) {
       if (isExternal) continue;
+      final portStr = port.toString();
+      if (exhaustedPorts.contains(portStr) || (portProbeCounts[portStr] ?? 0) >= 2) continue;
       hints.add('- NFS port $port — collect: exported shares list, mount permissions per share, root squash status, check for world-readable or world-writable exports');
     }
 
     // Unknown ports — only hint if they genuinely lack identification data
+    // Phase 3.1: also skip if exhausted or probed enough
     for (final p in unknownPorts) {
       final port = (p['port'] as num?)?.toInt() ?? 0;
+      final portStr = port.toString();
+      if (exhaustedPorts.contains(portStr)) continue;
       final hasProduct = (p['product'] as String? ?? '').isNotEmpty;
       final hasVersion = (p['version'] as String? ?? '').isNotEmpty;
       final hasBanner = (p['banner'] as String? ?? '').isNotEmpty;
       final hasExtraInfo = (p['extra_info'] as String? ?? '').isNotEmpty;
-      if (!hasProduct && !hasVersion && !hasBanner && !hasExtraInfo) {
-        hints.add('- Port $port has no banner or version yet — grab banner and identify service');
+      if (hasProduct || hasVersion || hasBanner || hasExtraInfo) continue;
+      if ((portProbeCounts[portStr] ?? 0) >= 2) continue;
+      hints.add('- Port $port has no banner or version yet — grab banner and identify service');
+    }
+
+    // Phase 5.2: SNMP hint for internal embedded devices (UDP 161 won't appear in TCP scan)
+    if (!isExternal && _isEmbeddedDevice(findings)) {
+      final hasSnmpData = (findings['other_findings'] as List? ?? [])
+          .cast<Map<String, dynamic>>()
+          .any((f) => (f['type'] as String? ?? '').toLowerCase() == 'snmp');
+      final snmpApproachFailed = (approachFailureCounts['snmp-query:161'] ?? 0) >= 2;
+      if (!hasSnmpData && !snmpApproachFailed && snmpPorts.isEmpty) {
+        hints.add('- SNMP (UDP 161) not yet probed — embedded devices almost always respond to SNMP.\n'
+            '  Query with common community strings (public, private) to collect: system description,\n'
+            '  firmware version, serial number, network interfaces, uptime.\n'
+            '  This does NOT require root — use a standard SNMP query tool.');
       }
     }
 
@@ -1205,6 +1435,85 @@ Use passive sources — do not send emails or interact with mail servers.
       }
     }
     return '';
+  }
+
+  /// Count total items across all findings list keys for change detection.
+  static int _findingsItemCount(Map<String, dynamic> findings) {
+    int count = 0;
+    for (final v in findings.values) {
+      if (v is List) count += v.length;
+      if (v is Map) count += v.length;
+    }
+    return count;
+  }
+
+  /// Detect if the target appears to be an embedded device.
+  static bool _isEmbeddedDevice(Map<String, dynamic> findings) {
+    final indicators = [
+      'printer', 'router', 'switch', 'camera', 'nas', 'iot',
+      'embedded', 'firmware', 'modem', 'access point', 'ups',
+    ];
+    final embeddedServers = [
+      'debut', 'goahead', 'boa', 'mini_httpd', 'micro_httpd',
+      'thttpd', 'lighttpd', 'uhttpd', 'mongoose',
+    ];
+    final device = findings['device'] as Map<String, dynamic>? ?? {};
+    final ports = (findings['open_ports'] as List? ?? []).cast<Map<String, dynamic>>();
+
+    // Check device name/OS
+    final deviceStr = '${device['name'] ?? ''} ${device['os'] ?? ''}'.toLowerCase();
+    if (indicators.any((i) => deviceStr.contains(i))) return true;
+
+    // Check port products and banners
+    for (final p in ports) {
+      final product = (p['product'] as String? ?? '').toLowerCase();
+      final banner = (p['banner'] as String? ?? '').toLowerCase();
+      final combined = '$product $banner';
+      if (indicators.any((i) => combined.contains(i))) return true;
+      if (embeddedServers.any((s) => product.contains(s))) return true;
+    }
+
+    // Check web findings for embedded device indicators
+    final webFindings = (findings['web_findings'] as List? ?? []).cast<Map<String, dynamic>>();
+    for (final w in webFindings) {
+      final title = (w['title'] as String? ?? '').toLowerCase();
+      final server = (w['server'] as String? ?? '').toLowerCase();
+      if (indicators.any((i) => title.contains(i))) return true;
+      if (embeddedServers.any((s) => server.contains(s))) return true;
+    }
+
+    return false;
+  }
+
+  /// Build embedded device context hint for the LLM prompt.
+  static String _buildEmbeddedDeviceHint(Map<String, dynamic> findings) {
+    if (!_isEmbeddedDevice(findings)) return '';
+    final device = findings['device'] as Map<String, dynamic>? ?? {};
+    final name = device['name'] as String? ?? 'unknown';
+    return '''\n## TARGET TYPE: Embedded device ($name)
+Embedded devices have limited attack surface. Focus on:
+- Admin/management interfaces and their authentication status
+- Firmware version (from status pages, SNMP, or service banners — NOT from CSS/JS assets)
+- Default credential exposure
+- Known vulnerabilities for the identified product + version
+- Protocol-level weaknesses (unencrypted management, SNMP community strings)
+Do NOT waste iterations on: static CSS/JS assets, image files, font files, or generic UI resources.
+These never contain version or vulnerability information on embedded devices.\n''';
+  }
+
+  /// Build iteration/command budget hint for the LLM prompt.
+  static String _buildBudgetHint(int iteration, int maxIterations, int commandCount) {
+    const commandCap = 80;
+    final iterPct = maxIterations > 0 ? (iteration / maxIterations * 100).round() : 0;
+    final buf = StringBuffer();
+    buf.writeln('## BUDGET: Iteration ${iteration + 1} of $maxIterations | Commands: $commandCount of $commandCap');
+    if (iterPct > 75 || commandCount > 60) {
+      buf.writeln('WRAP UP: Only pursue actions that will definitively reveal new attack surface. Conclude if no high-value targets remain.');
+    } else if (iterPct > 50 || commandCount > 40) {
+      buf.writeln('Focus on HIGH-VALUE actions only. Do not fetch static assets, CSS, JS, or images.\n'
+          'Prioritize: unenumerated services, admin interfaces, version-revealing endpoints, protocol weaknesses.');
+    }
+    return buf.toString();
   }
 
   // ---------------------------------------------------------------------------
@@ -1410,6 +1719,34 @@ Respond ONLY with valid JSON.''';
     return _unixAlways.contains(t);
   }
 
+  /// Extract the primary target port number from a command string.
+  /// Returns the port as a string, or null if no specific port is targeted.
+  static String? _extractTargetPort(String command, String address) {
+    final cmd = command.toLowerCase();
+    // Skip broad port scans — these target many ports, not one
+    if (cmd.contains('-p-') || cmd.contains('--top-ports')) return null;
+    // Skip commands with multiple comma-separated ports
+    final multiPort = RegExp(r'-p\s*\d+,\d+').firstMatch(cmd);
+    if (multiPort != null) return null;
+    // URL-based: http://host:PORT or https://host:PORT
+    final urlPort = RegExp(r'https?://[^:/\s]+:(\d+)').firstMatch(cmd);
+    if (urlPort != null) return urlPort.group(1);
+    // nmap -p PORT (single port)
+    final nmapPort = RegExp(r'-p\s*(\d+)\b').firstMatch(cmd);
+    if (nmapPort != null) return nmapPort.group(1);
+    // -connect host:PORT (openssl)
+    final connectPort = RegExp(r'-connect\s+\S+:(\d+)').firstMatch(cmd);
+    if (connectPort != null) return connectPort.group(1);
+    // ncat/nc TARGET PORT at end of command
+    final addrEsc = RegExp.escape(address.toLowerCase());
+    final ncPort = RegExp('(?:ncat|nc)\\s+$addrEsc\\s+(\\d+)').firstMatch(cmd);
+    if (ncPort != null) return ncPort.group(1);
+    // Piped ncat: ... | ncat TARGET PORT
+    final pipeNcat = RegExp(r'ncat\s+\S+\s+(\d+)').firstMatch(cmd);
+    if (pipeNcat != null) return pipeNcat.group(1);
+    return null;
+  }
+
   // ---------------------------------------------------------------------------
   // Deterministic pre-LLM baseline runner (Phase 3.1)
   // Executes a fixed set of discovery commands before the LLM loop so the LLM
@@ -1528,7 +1865,14 @@ Respond ONLY with valid JSON.''';
     final nmapCmd = isInternal
         ? 'nmap -sV -sC --open -T4 --top-ports 1000 $address -oX "$nmapXmlPath"'
         : 'nmap -sV --open -T3 --top-ports 2000 $address -oX "$nmapXmlPath"';
-    await runStep(nmapCmd, 'top port scan');
+    final nmapOut = await runStep(nmapCmd, 'top port scan');
+
+    // Detect if nmap timed out: the output says "Command timed out" or the
+    // XML file is missing the closing </nmaprun> tag (incomplete write).
+    bool nmapTimedOut = false;
+    if (nmapOut != null && nmapOut.contains('Command timed out')) {
+      nmapTimedOut = true;
+    }
 
     // Parse the saved XML directly to update findings and detect web/SMB ports
     try {
@@ -1536,8 +1880,12 @@ Respond ONLY with valid JSON.''';
       if (await xmlFile.exists()) {
         final xmlContent = await xmlFile.readAsString();
         if (xmlContent.isNotEmpty) {
+          // Check for truncated XML (nmap killed before finishing)
+          if (!xmlContent.contains('</nmaprun>')) {
+            nmapTimedOut = true;
+          }
           final parsedPorts = ReconService.parseNmapXml(xmlContent);
-          if (parsedPorts.isEmpty) {
+          if (parsedPorts.isEmpty && !nmapTimedOut) {
             onProgress?.call('[$address] nmap found 0 open ports — host may be filtered or down');
           }
           final existingPorts = (findings['open_ports'] as List)
@@ -1557,8 +1905,53 @@ Respond ONLY with valid JSON.''';
           });
           hasSmbPort = parsedPorts.any((p) => p['port'] == 445);
         }
+      } else {
+        nmapTimedOut = true;
       }
     } catch (_) {}
+
+    // B2b — Fast fallback scan if the full -sV -sC scan timed out.
+    // The host is alive (passed liveness check) but version detection was too
+    // slow. Retry with a fast connect scan (no -sV/-sC) to at least get the
+    // port list before handing off to the LLM.
+    if (nmapTimedOut && (findings['open_ports'] as List).isEmpty) {
+      onProgress?.call('[$address] nmap -sV timed out — retrying with fast connect scan...');
+      final fastXmlPath = '$outDir/nmap_fast_fallback.xml';
+      final fastCmd = isInternal
+          ? 'nmap --open -T4 --top-ports 1000 $address -oX "$fastXmlPath"'
+          : 'nmap --open -T3 --top-ports 2000 $address -oX "$fastXmlPath"';
+      await runStep(fastCmd, 'fast fallback port scan (no version detection)');
+      try {
+        final fastXml = File(fastXmlPath);
+        if (await fastXml.exists()) {
+          final fastContent = await fastXml.readAsString();
+          if (fastContent.isNotEmpty) {
+            final fastPorts = ReconService.parseNmapXml(fastContent);
+            if (fastPorts.isNotEmpty) {
+              onProgress?.call('[$address] Fast scan found ${fastPorts.length} open port(s)');
+              final existingPorts = (findings['open_ports'] as List)
+                  .map((p) => (p as Map)['port'])
+                  .toSet();
+              for (final port in fastPorts) {
+                if (!existingPorts.contains(port['port'])) {
+                  (findings['open_ports'] as List).add(port);
+                }
+              }
+              hasWebPorts = fastPorts.any((p) {
+                final portNum = p['port'] as int? ?? 0;
+                final svc = (p['service'] as String? ?? '').toLowerCase();
+                return portNum == 80 || portNum == 443 ||
+                    portNum == 8080 || portNum == 8443 ||
+                    svc.contains('http');
+              });
+              hasSmbPort = fastPorts.any((p) => p['port'] == 445);
+            } else {
+              onProgress?.call('[$address] Fast scan also found 0 open ports — host may be filtered');
+            }
+          }
+        }
+      } catch (_) {}
+    }
 
     // B3 — High-port second pass for web/API hosts (catches non-standard service ports)
     if (hasWebPorts && !isWin) {
@@ -1609,6 +2002,25 @@ Respond ONLY with valid JSON.''';
       await runStep(
           'nmap -p 445 --script smb-security-mode,smb2-security-mode,smb-os-discovery $address',
           'SMB signing and OS discovery');
+    }
+
+    // B7 — SNMP baseline for internal embedded devices (Phase 5.3)
+    // SNMP queries use standard UDP sockets and do NOT require root.
+    if (isInternal && !isWin) {
+      final isEmbedded = ReconService._isEmbeddedDevice(findings);
+      if (isEmbedded) {
+        final hasSnmpTool = envInfo?.availableTools.containsKey('snmpwalk') == true ||
+            envInfo?.availableTools.containsKey('snmpget') == true ||
+            envInfo?.availableTools.containsKey('snmpbulkwalk') == true;
+        if (hasSnmpTool) {
+          final snmpTool = envInfo!.availableTools.containsKey('snmpwalk')
+              ? 'snmpwalk' : envInfo.availableTools.containsKey('snmpbulkwalk')
+              ? 'snmpbulkwalk' : 'snmpget';
+          await runStep(
+              'timeout 15 $snmpTool -v2c -c public $address 1.3.6.1.2.1.1 2>&1',
+              'SNMP system info query (embedded device)');
+        }
+      }
     }
 
     return _BaselineResult(

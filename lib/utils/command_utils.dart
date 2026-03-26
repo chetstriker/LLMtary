@@ -33,6 +33,96 @@ class CommandUtils {
     return 'other:${cmd.split(' ').first}';
   }
 
+  /// Classify a command into a recon approach category.
+  ///
+  /// Groups by *protocol interaction pattern* rather than attack technique.
+  /// Used for detecting when the same data collection method keeps failing
+  /// (e.g. piping commands into an interactive FTP client 3 times).
+  static String classifyReconApproach(String command, String address) {
+    final cmd = command.toLowerCase();
+    final addrLower = address.toLowerCase();
+
+    // Extract target port from command
+    final urlPort = RegExp(r'https?://[^:/\s]+:(\d+)').firstMatch(cmd)?.group(1);
+    final nmapPort = RegExp(r'-p\s*(\d+)\b').firstMatch(cmd)?.group(1);
+    final connectPort = RegExp(r'-connect\s+\S+:(\d+)').firstMatch(cmd)?.group(1);
+    final addrEsc = RegExp.escape(addrLower);
+    final trailingPort = RegExp('$addrEsc\\s+(\\d+)').firstMatch(cmd)?.group(1);
+    final port = urlPort ?? nmapPort ?? connectPort ?? trailingPort ?? '';
+
+    // Interactive stdin-piped session (heredoc, echo|pipe, printf|pipe into a client)
+    final hasPipedInput = cmd.contains('<<') ||
+        RegExp(r'(echo|printf)\s+.*\|\s*\S').hasMatch(cmd) ||
+        (cmd.contains('-n') && RegExp(r'\|\s*(ftp|telnet|nc|ncat)').hasMatch(cmd));
+    if (hasPipedInput) {
+      // Identify the target protocol from the receiving tool
+      if (cmd.contains('ftp')) return 'interactive-stdin:ftp:$port';
+      if (cmd.contains('telnet')) return 'interactive-stdin:telnet:$port';
+      if (cmd.contains('nc') || cmd.contains('ncat')) return 'interactive-stdin:netcat:$port';
+      return 'interactive-stdin:unknown:$port';
+    }
+
+    // URL-based fetch (curl, wget to a specific scheme+port)
+    if (cmd.contains('curl') || cmd.contains('wget')) {
+      final scheme = cmd.contains('https') ? 'https' : cmd.contains('ftp://') ? 'ftp' : 'http';
+      return 'url-fetch:$scheme:$port';
+    }
+
+    // Script-based scan (nmap scripts against a port)
+    if (cmd.contains('nmap') && cmd.contains('--script')) {
+      return 'nmap-script:$port';
+    }
+    if (cmd.contains('nmap')) return 'nmap-scan:$port';
+
+    // Directory/path brute-force
+    if (cmd.contains('gobuster') || cmd.contains('ffuf') || cmd.contains('dirb') || cmd.contains('feroxbuster')) {
+      return 'dirbust:$port';
+    }
+
+    // SNMP queries
+    if (cmd.contains('snmp')) return 'snmp-query:$port';
+
+    // SSL/TLS probing
+    if (cmd.contains('openssl') || cmd.contains('sslscan') || cmd.contains('testssl')) {
+      return 'tls-probe:$port';
+    }
+
+    // DNS queries
+    if (cmd.contains('dig') || cmd.contains('host ') || cmd.contains('nslookup')) {
+      return 'dns-query';
+    }
+
+    return 'other:$port:${cmd.split(' ').first}';
+  }
+
+  /// Detect if command output is just the piped input echoed back.
+  ///
+  /// Returns true when an interactive tool (ftp, telnet, etc.) received
+  /// piped input but printed it to stdout instead of sending it to the server.
+  static bool isEchoedInput(String command, String output) {
+    if (output.isEmpty || output.length > 2000) return false;
+    // Extract lines that look like they were piped in
+    final inputLines = <String>[];
+    // Heredoc content
+    final heredocMatch = RegExp(r'<<\s*["\x27]?(\w+)["\x27]?\s*\n(.*?)\n\1', dotAll: true)
+        .firstMatch(command);
+    if (heredocMatch != null) {
+      inputLines.addAll(heredocMatch.group(2)!.split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty));
+    }
+    // echo/printf piped content
+    final echoMatch = RegExp(r'(?:echo|printf)\s+["\x27]([^"\x27]+)["\x27]').firstMatch(command);
+    if (echoMatch != null) {
+      inputLines.addAll(echoMatch.group(1)!.split(RegExp(r'\\n')).map((l) => l.trim()).where((l) => l.isNotEmpty));
+    }
+    if (inputLines.isEmpty) return false;
+    final outputLower = output.toLowerCase();
+    int matched = 0;
+    for (final line in inputLines) {
+      if (outputLower.contains(line.toLowerCase())) matched++;
+    }
+    return matched >= (inputLines.length * 0.7).ceil();
+  }
+
   /// Check if the LLM response contains degenerate repetition.
   /// Returns true if the response has excessive repeated phrases.
   static bool hasRepetitionLoop(String response, {int threshold = 5}) {
