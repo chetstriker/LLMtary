@@ -13,8 +13,8 @@ class MainFlutterWindow: NSWindow {
     super.awakeFromNib()
     
     // Set minimum and default window size for macOS
-    self.setContentSize(NSSize(width: 1375, height: 700))
-    self.minSize = NSSize(width: 1375, height: 700)
+    self.setContentSize(NSSize(width: 1425, height: 750))
+    self.minSize = NSSize(width: 1425, height: 750)
     self.center()
   }
 }

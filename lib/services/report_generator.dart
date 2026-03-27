@@ -41,7 +41,7 @@ class ReportGenerator {
     final preparedBy = project.pentesterName?.isNotEmpty == true
         ? project.pentesterName!
         : 'PenExecute';
-    final proofByCommand = _buildProofIndex(commandLogs);
+    final proofByCommand = _buildProofIndex(commandLogs, vulnsToReport);
     final effectiveScope = scope.isNotEmpty
         ? scope
         : targets.map((t) => t.address).toSet().toList()..sort();
@@ -279,7 +279,7 @@ ${project.conclusion?.isNotEmpty == true ? '''
     final preparedBy = project.pentesterName?.isNotEmpty == true
         ? project.pentesterName!
         : 'PenExecute';
-    final proofByCommand = _buildProofIndex(commandLogs);
+    final proofByCommand = _buildProofIndex(commandLogs, vulnsToReport);
     final effectiveScope = scope.isNotEmpty
         ? scope
         : targets.map((t) => t.address).toSet().toList()..sort();
@@ -367,6 +367,7 @@ ${project.conclusion?.isNotEmpty == true ? '''
     buf.writeln();
     for (int i = 0; i < sorted.length; i++) {
       final v = sorted[i];
+      final isInitialEvidence = v.proofCommand == 'Initial Evidence Analysis';
       buf.writeln('### ${i + 1}. ${v.problem}');
       buf.writeln();
       buf.writeln('- **Severity:** ${v.severity}');
@@ -387,13 +388,17 @@ ${project.conclusion?.isNotEmpty == true ? '''
         buf.writeln('```');
         buf.writeln();
       }
-      if (v.proofCommand != null && v.proofCommand!.isNotEmpty) {
+      if (isInitialEvidence) {
+        // Evidence already shown above; no proof command block needed
+      } else if (v.proofCommand != null && v.proofCommand!.isNotEmpty) {
         buf.writeln('**Proof Command:**');
         buf.writeln('```bash');
         buf.writeln(v.proofCommand);
         buf.writeln('```');
         buf.writeln();
-        final proofLog = proofByCommand[v.proofCommand!.trim()];
+        final proofLog = v.id != null
+            ? proofByCommand[v.id]
+            : null;
         if (proofLog != null) {
           final output = proofLog.output.length > 3000
               ? '${proofLog.output.substring(0, 3000)}\n... [truncated]'
@@ -444,13 +449,14 @@ ${project.conclusion?.isNotEmpty == true ? '''
         ? vulnerabilities.where((v) => v.status == VulnerabilityStatus.confirmed).toList()
         : vulnerabilities;
     final sorted = _sortedVulns(vulnsToReport);
-    final proofByCommand = _buildProofIndex(commandLogs);
+    final proofByCommand = _buildProofIndex(commandLogs, vulnsToReport);
     final buf = StringBuffer();
     buf.writeln('ID,Title,Target,CVE,Severity,Status,Status Reason,Type,CVSS Vector,Recommendation,Proof Output');
     for (int i = 0; i < sorted.length; i++) {
       final v = sorted[i];
-      final proofLog = v.proofCommand != null && v.proofCommand!.isNotEmpty
-          ? proofByCommand[v.proofCommand!.trim()]
+      final proofLog = (v.proofCommand != 'Initial Evidence Analysis' &&
+              v.id != null)
+          ? proofByCommand[v.id]
           : null;
       final rawOut = proofLog?.output ?? '';
       final proofOutput = rawOut.replaceAll('\n', ' | ')
@@ -596,13 +602,15 @@ ${critical > 0 ? ' $critical <strong>Critical</strong> severity finding(s) repre
   }
 
   static String _detailedFindings(
-      List<Vulnerability> vulns, Map<String, CommandLog> proofByCommand) {
+      List<Vulnerability> vulns, Map<int, CommandLog> proofByCommand) {
     final buf = StringBuffer();
     for (int i = 0; i < vulns.length; i++) {
       final v = vulns[i];
       final sev = v.severity.toUpperCase();
-      final proofLog = v.proofCommand != null && v.proofCommand!.isNotEmpty
-          ? proofByCommand[v.proofCommand!.trim()]
+      // For Initial Evidence Analysis findings, use the evidence field directly.
+      final isInitialEvidence = v.proofCommand == 'Initial Evidence Analysis';
+      final proofLog = (!isInitialEvidence && v.id != null)
+          ? proofByCommand[v.id]
           : null;
       final proofBlock = proofLog != null
           ? '''          <dt>Proof Output</dt><dd>
@@ -612,7 +620,9 @@ ${critical > 0 ? ' $critical <strong>Critical</strong> severity finding(s) repre
               <pre class="proof-output">${_esc(proofLog.output.length > 3000 ? '${proofLog.output.substring(0, 3000)}\n... [truncated]' : proofLog.output)}</pre>
             </details>
           </dd>'''
-          : '';
+          : isInitialEvidence && v.evidence.isNotEmpty
+              ? '''          <dt>Proof (Initial Evidence)</dt><dd><pre>${_esc(v.evidence.length > 3000 ? '${v.evidence.substring(0, 3000)}\n... [truncated]' : v.evidence)}</pre></dd>'''
+              : '';
       buf.writeln('''    <div class="finding-card" id="finding-$i">
       <div class="finding-header sev-$sev">
         <h4>${_esc(v.problem)}</h4>
@@ -628,7 +638,7 @@ ${critical > 0 ? ' $critical <strong>Critical</strong> severity finding(s) repre
           <dt>CVSS Vector</dt><dd><span class="cvss-vector">${_cvssVector(v)}</span></dd>
           <dt>Description</dt><dd>${_esc(v.description).replaceAll('\n', '<br>')}</dd>
           ${v.evidence.isNotEmpty ? '<dt>Evidence</dt><dd><pre>${_esc(v.evidence)}</pre></dd>' : ''}
-          ${v.proofCommand != null && v.proofCommand!.isNotEmpty ? '<dt>Proof Command</dt><dd><pre>${_esc(v.proofCommand!)}</pre></dd>' : ''}
+          ${v.proofCommand != null && v.proofCommand!.isNotEmpty && !isInitialEvidence ? '<dt>Proof Command</dt><dd><pre>${_esc(v.proofCommand!)}</pre></dd>' : ''}
           $proofBlock
           <dt>Recommendation</dt><dd>${_esc(v.recommendation).replaceAll('\n', '<br>')}</dd>
         </dl>
@@ -679,12 +689,32 @@ ${critical > 0 ? ' $critical <strong>Critical</strong> severity finding(s) repre
     return buf.toString();
   }
 
-  /// Build an index of command logs keyed by trimmed command string for O(1) lookup.
-  static Map<String, CommandLog> _buildProofIndex(List<CommandLog> logs) {
-    final index = <String, CommandLog>{};
+  /// Build an index of command logs keyed by the vulnerability's database ID for O(1) lookup.
+  /// Prefers logs whose command starts with "PROOF:" for a given vulnerability;
+  /// falls back to the most recent log for that vulnerability.
+  /// [allVulns] is the original unsorted list used to map vulnerabilityIndex → id.
+  static Map<int, CommandLog> _buildProofIndex(
+      List<CommandLog> logs, List<Vulnerability> allVulns) {
+    // Build a map from list-index → vulnerability id
+    final indexToId = <int, int>{};
+    for (int i = 0; i < allVulns.length; i++) {
+      final id = allVulns[i].id;
+      if (id != null) indexToId[i] = id;
+    }
+
+    final index = <int, CommandLog>{};
     for (final log in logs) {
-      final key = log.command.trim();
-      if (key.isNotEmpty) index[key] = log;
+      final listIdx = log.vulnerabilityIndex;
+      if (listIdx == null) continue;
+      final vulnId = indexToId[listIdx];
+      if (vulnId == null) continue;
+      final existing = index[vulnId];
+      final isProof = log.command.startsWith('PROOF:');
+      final existingIsProof = existing?.command.startsWith('PROOF:') ?? false;
+      if (existing == null || (isProof && !existingIsProof) ||
+          (!existingIsProof && log.timestamp.isAfter(existing.timestamp))) {
+        index[vulnId] = log;
+      }
     }
     return index;
   }

@@ -11,8 +11,6 @@ import '../models/llm_provider.dart';
 import '../models/target.dart';
 import '../services/vulnerability_analyzer.dart';
 import '../services/exploit_executor.dart';
-import '../services/report_content_service.dart';
-import '../services/report_generator.dart';
 import '../services/command_executor.dart';
 import '../database/database_helper.dart';
 import 'settings_screen.dart';
@@ -1086,101 +1084,15 @@ class _MainScreenState extends State<MainScreen> {
     }
     if (state.currentProject == null) return;
 
-    final config = await showDialog<ReportConfig>(
+    // Phase 11: barrierDismissible=false so user can't dismiss while report is generating
+    await showDialog<void>(
       context: context,
       barrierDismissible: false,
       builder: (_) => ReportConfigDialog(appState: state),
     );
-    if (config == null || !mounted) return;
-
-    final slug = config.reportTitle
-        .replaceAll(RegExp(r'[^a-zA-Z0-9]+'), '_')
-        .replaceAll(RegExp(r'^_+|_+$'), '');
-    final fileName = switch (config.format) {
-      'html' => '${slug}_Report.html',
-      'md'   => '${slug}_Report.md',
-      'csv'  => '${slug}_Findings.csv',
-      _      => '${slug}_Report.html',
-    };
-
-    final path = await FileDialog.saveFile(
-      dialogTitle: 'Save Report',
-      fileName: fileName,
-    );
-    if (path == null || !mounted) return;
-
-    final project = state.currentProject!.copyWith(
-      reportTitle:      config.reportTitle,
-      pentesterName:    config.pentesterName,
-      executiveSummary: config.executiveSummary,
-      methodology:      config.methodology,
-      riskRatingModel:  config.riskRatingModel,
-      conclusion:       config.conclusion,
-    );
-
-    final commandLogs = state.currentProject?.id != null
-        ? await DatabaseHelper.getCommandLogs(state.currentProject!.id!)
-        : <CommandLog>[];
     if (!mounted) return;
-
-    // Generate attack narrative via LLM when there are confirmed findings and
-    // the format is not CSV (narrative is prose — not useful in tabular output).
-    String? attackNarrative;
-    if (config.format != 'csv') {
-      final narrativePrompt = ReportContentService.buildAttackNarrativePrompt(state);
-      if (narrativePrompt != null) {
-        try {
-          attackNarrative = await ReportContentService.generateSection(
-            prompt: narrativePrompt,
-            settings: state.llmSettings,
-          );
-        } catch (_) {
-          // Narrative generation failure is non-fatal — proceed without it.
-        }
-      }
-    }
-    if (!mounted) return;
-
-    final content = switch (config.format) {
-      'html' => ReportGenerator.generateHtml(
-          project: project,
-          targets: state.targets,
-          vulnerabilities: state.vulnerabilities,
-          credentials: state.credentials.toList(),
-          commandLogs: commandLogs,
-          scope: state.projectScope,
-          llmSettings: state.llmSettings,
-          startDate: config.startDate,
-          endDate: config.endDate,
-          attackNarrative: attackNarrative,
-          confirmedOnly: config.confirmedOnly,
-        ),
-      'md'   => ReportGenerator.generateMarkdown(
-          project: project,
-          targets: state.targets,
-          vulnerabilities: state.vulnerabilities,
-          credentials: state.credentials.toList(),
-          commandLogs: commandLogs,
-          scope: state.projectScope,
-          llmSettings: state.llmSettings,
-          startDate: config.startDate,
-          endDate: config.endDate,
-          attackNarrative: attackNarrative,
-          confirmedOnly: config.confirmedOnly,
-        ),
-      'csv'  => ReportGenerator.generateCsv(
-          vulnerabilities: state.vulnerabilities,
-          commandLogs: commandLogs,
-          confirmedOnly: false,
-        ),
-      _      => '',
-    };
-
-    await File(path).writeAsString(content);
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Report saved to $path')),
-      );
-    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Report saved')),
+    );
   }
 }

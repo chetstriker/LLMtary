@@ -1801,6 +1801,38 @@ Respond ONLY with a valid JSON array. No markdown, no explanations.''';
   static String knowledgeForType(String vulnerabilityType) {
     final type = vulnerabilityType.toLowerCase();
 
+    // Phase 4: SSL/TLS testing strategy — always start with nmap NSE scripts
+    if (type.contains('ssl') || type.contains('tls') || type.contains('poodle') ||
+        type.contains('heartbleed') || type.contains('beast') || type.contains('sweet32')) {
+      return '''SSL/TLS TESTING STRATEGY:
+- ALWAYS start with nmap NSE scripts — they are the most reliable approach:
+  nmap --script ssl-enum-ciphers,ssl-poodle,ssl-heartbleed,ssl-ccs-injection,ssl-dh-params -p PORT TARGET
+- Use openssl s_client for certificate inspection only (not protocol downgrade testing):
+  echo | openssl s_client -connect TARGET:PORT -showcerts 2>/dev/null | openssl x509 -text -noout
+- Do NOT attempt manual protocol downgrade via openssl flags (-ssl3, -tls1) —
+  modern OpenSSL builds remove deprecated protocol support and these will always fail
+- Do NOT attempt python ssl.PROTOCOL_SSLv3 — removed from Python 3.10+
+- If nmap ssl-poodle returns "State: VULNERABLE", that IS confirmed exploitation proof
+
+${_toolUsageSection()}''';
+    }
+
+    // Phase 6: FTP testing notes — FTP requires two connections
+    if (type.contains('ftp') || type.contains('anonymous ftp')) {
+      return '''FTP TESTING NOTES:
+- FTP requires TWO connections: a control channel (port 21) and a separate data channel
+- Raw TCP tools (ncat, netcat, openssl s_client) can only handle the control channel
+- They will show a successful login banner (230 User logged in) but CANNOT transfer files
+- For actual file listing and download, use a proper FTP client:
+  * Python ftplib (passive mode by default): python3 -c "import ftplib; ftp=ftplib.FTP(\'TARGET\'); ftp.login(\'anonymous\',\'anon@\'); print(ftp.nlst()); ftp.quit()"
+  * curl with passive mode: curl --ftp-pasv -u anonymous:anonymous ftp://TARGET/
+  * The system ftp binary with passive mode: ftp -p TARGET (then: ls, get FILE)
+- Passive mode is required when the attacker is behind NAT (almost always the case)
+- Active mode (PORT command) requires the server to connect back to the attacker — usually blocked
+
+${_toolUsageSection()}''';
+    }
+
     // Map type → section header keywords in the knowledge base
     final sectionMap = <String, List<String>>{
       'sqli': ['SQL INJECTION'],

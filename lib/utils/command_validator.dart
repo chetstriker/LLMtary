@@ -280,10 +280,25 @@ class CommandValidator {
     LLMService llmService,
   ) async {
     try {
-      // 6.4a — Pull cached ToolUsageInfo (free after first call per session)
       final toolInfo = await CommandExecutor.getToolUsageInfo(tool, settings, llmService)
           .timeout(const Duration(seconds: 15));
-      final toolRef = CommandExecutor.formatToolUsageForPrompt(toolInfo);
+      var toolRef = CommandExecutor.formatToolUsageForPrompt(toolInfo);
+
+      // Phase 10: For nuclei, append runtime-detected flag summary to toolRef
+      // so corrections use the exact flags of the installed version.
+      if (tool == 'nuclei') {
+        try {
+          final flagCheck = await CommandExecutor.executeCommand(
+            'nuclei -h 2>&1 | grep -E "^\\s+-(t|id|template-id|tags|severity)" | head -10',
+            false,
+          ).timeout(const Duration(seconds: 8));
+          final flagOutput = (flagCheck['output'] ?? '').toString().trim();
+          if (flagOutput.isNotEmpty) {
+            toolRef += '\n\nACTUAL INSTALLED FLAGS (from nuclei -h):\n$flagOutput\n'
+                'Use ONLY these exact flag names. Do not invent flags not shown above.';
+          }
+        } catch (_) {}
+      }
 
       final osInfo = await CommandExecutor.getOsInfo();
 

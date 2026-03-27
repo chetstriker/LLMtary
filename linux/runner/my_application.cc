@@ -65,7 +65,7 @@ static void my_application_activate(GApplication* application) {
     gtk_window_set_title(window, "penexecuter");
   }
 
-  gtk_window_set_default_size(window, 1280, 720);
+  gtk_window_set_default_size(window, 1330, 770);
   gtk_window_set_resizable(window, TRUE);
   gtk_window_set_decorated(window, TRUE);
   gtk_window_set_type_hint(window, GDK_WINDOW_TYPE_HINT_NORMAL);

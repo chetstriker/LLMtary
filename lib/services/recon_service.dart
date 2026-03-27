@@ -287,6 +287,8 @@ class ReconService {
     bool exhaustedOptions = false;
     int connectivityFailures = 0;
     int concludeOverrides = 0;
+    int consecutiveDuplicateSkips = 0; // Phase 3: track duplicate skips
+    int timeoutCount = 0; // Phase 9: track LLM timeouts
     // Phase 1: approach failure tracking (protocol+method pattern → failure count)
     final approachFailureCounts = <String, int>{};
     // Phase 2: per-approach failure reasons for prompt injection
@@ -400,6 +402,18 @@ class ReconService {
           parts.add('## TIMED OUT ENDPOINTS:\n$lines');
         }
         if (parts.isNotEmpty) historyHint = '\n${parts.join('\n\n')}\n';
+        // Phase 3: inject scan approach exhausted hint after 2+ consecutive duplicate skips
+        if (consecutiveDuplicateSkips >= 2) {
+          historyHint += '''
+
+## SCAN APPROACH EXHAUSTED
+Full TCP port scanning has been attempted and produced no open ports.
+Do NOT propose another port scan variant. Instead:
+- Try a targeted probe on a specific common port (80, 443, 22, 445)
+- Attempt an IPv6 discovery probe
+- If all connectivity approaches fail, CONCLUDE with host_useful=false
+''';
+        }
       }
 
       final prompt = _buildCommandPrompt(
@@ -407,7 +421,7 @@ class ReconService {
         env: env,
         scope: scope,
         outDir: outDir,
-        findings: findings,
+        findings: timeoutCount >= 2 ? _trimFindingsForPrompt(findings) : findings,
         history: history,
         historyHint: historyHint,
         envInfo: envInfo,
@@ -423,6 +437,9 @@ class ReconService {
         onProgress?.call('[$address] LLM error: $e');
         history += 'Iteration ${iteration + 1}: LLM error: $e\n\n';
         consecutiveFailures++;
+        if (e.toString().contains('TimeoutException') || e.toString().contains('timed out')) {
+          timeoutCount++;
+        }
         if (consecutiveFailures >= 3) { exhaustedOptions = true; break; }
         continue;
       }
@@ -477,6 +494,7 @@ class ReconService {
       if (CommandUtils.isSimilarCommand(command, executedCommands)) {
         history += 'Iteration ${iteration + 1}: SKIPPED duplicate: $command\n\n';
         consecutiveFailures++;
+        consecutiveDuplicateSkips++;
         if (consecutiveFailures >= 5) { exhaustedOptions = true; break; }
         continue;
       }
@@ -564,6 +582,7 @@ class ReconService {
 
       executedCommands.add(command);
       consecutiveFailures = 0;
+      consecutiveDuplicateSkips = 0; // Phase 3: reset on successful execution
       onProgress?.call('[$address] Running: $purpose');
 
       Map<String, dynamic> result;
@@ -732,6 +751,24 @@ class ReconService {
   // ---------------------------------------------------------------------------
   // Prompt builder
   // ---------------------------------------------------------------------------
+
+  /// Phase 3: Trim findings JSON for prompt when all list fields are empty,
+  /// to prevent context bloat from accumulating empty arrays.
+  static Map<String, dynamic> _trimFindingsForPrompt(Map<String, dynamic> findings) {
+    final listKeys = ['nmap_scripts', 'web_findings', 'smb_findings',
+        'dns_findings', 'waf_findings', 'other_findings', 'ftp_findings',
+        'ssh_findings', 'db_findings', 'osint_findings', 'osint_dorks'];
+    final allEmpty = listKeys.every((k) {
+      final v = findings[k];
+      return v == null || (v is List && v.isEmpty);
+    });
+    if (!allEmpty) return findings;
+    // Return only device and open_ports
+    return {
+      'device': findings['device'],
+      'open_ports': findings['open_ports'] ?? [],
+    };
+  }
 
   String _buildCommandPrompt({
     required String address,

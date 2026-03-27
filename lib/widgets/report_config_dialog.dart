@@ -1,6 +1,10 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import '../database/database_helper.dart';
+import '../models/command_log.dart';
 import '../services/report_content_service.dart';
+import '../services/report_generator.dart';
+import '../utils/file_dialog.dart';
 import '../widgets/app_state.dart';
 
 // ---------------------------------------------------------------------------
@@ -60,6 +64,7 @@ class _ReportConfigDialogState extends State<ReportConfigDialog> {
   DateTime? _endDate;
   String _format = 'html';
   bool _confirmedOnly = true;
+  bool _savingReport = false; // Phase 11: progress indicator state
 
   // Per-field generation loading state
   final Map<String, bool> _generating = {
@@ -69,7 +74,7 @@ class _ReportConfigDialogState extends State<ReportConfigDialog> {
     'conclusion': false,
   };
 
-  bool get _anyGenerating => _generating.values.any((v) => v);
+  bool get _anyGenerating => _generating.values.any((v) => v) || _savingReport;
 
   @override
   void initState() {
@@ -193,19 +198,97 @@ class _ReportConfigDialogState extends State<ReportConfigDialog> {
       );
     }
 
-    if (mounted) {
-      Navigator.of(context).pop(ReportConfig(
+    // Phase 11: Pick save path before showing progress (so user can cancel before generation starts)
+    final format = _format;
+    final slug = _titleCtrl.text.trim()
+        .replaceAll(RegExp(r'[^a-zA-Z0-9]+'), '_')
+        .replaceAll(RegExp(r'^_+|_+$'), '');
+    final fileName = switch (format) {
+      'html' => '${slug}_Report.html',
+      'md'   => '${slug}_Report.md',
+      'csv'  => '${slug}_Findings.csv',
+      _      => '${slug}_Report.html',
+    };
+    final path = await FileDialog.saveFile(
+      dialogTitle: 'Save Report',
+      fileName: fileName,
+    );
+    if (path == null || !mounted) return;
+
+    // Phase 11: Show progress indicator, keep dialog open
+    setState(() => _savingReport = true);
+    try {
+      final updatedProject = (project ?? widget.appState.currentProject!).copyWith(
         reportTitle: _titleCtrl.text.trim(),
         pentesterName: _pentesterCtrl.text.trim(),
-        startDate: _startDate,
-        endDate: _endDate,
         executiveSummary: _execSummaryCtrl.text.trim(),
         methodology: _methodologyCtrl.text.trim(),
         riskRatingModel: _riskRatingCtrl.text.trim(),
         conclusion: _conclusionCtrl.text.trim(),
-        format: _format,
-        confirmedOnly: _confirmedOnly,
-      ));
+      );
+
+      final commandLogs = updatedProject.id != null
+          ? await DatabaseHelper.getCommandLogs(updatedProject.id!)
+          : <CommandLog>[];
+
+      String? attackNarrative;
+      if (format != 'csv') {
+        final narrativePrompt = ReportContentService.buildAttackNarrativePrompt(widget.appState);
+        if (narrativePrompt != null) {
+          try {
+            attackNarrative = await ReportContentService.generateSection(
+              prompt: narrativePrompt,
+              settings: widget.appState.llmSettings,
+            );
+          } catch (_) {}
+        }
+      }
+
+      final confirmedOnly = _confirmedOnly;
+      final content = switch (format) {
+        'html' => ReportGenerator.generateHtml(
+            project: updatedProject,
+            targets: widget.appState.targets,
+            vulnerabilities: widget.appState.vulnerabilities,
+            credentials: widget.appState.credentials.toList(),
+            commandLogs: commandLogs,
+            scope: widget.appState.projectScope,
+            llmSettings: widget.appState.llmSettings,
+            startDate: _startDate,
+            endDate: _endDate,
+            attackNarrative: attackNarrative,
+            confirmedOnly: confirmedOnly,
+          ),
+        'md' => ReportGenerator.generateMarkdown(
+            project: updatedProject,
+            targets: widget.appState.targets,
+            vulnerabilities: widget.appState.vulnerabilities,
+            credentials: widget.appState.credentials.toList(),
+            commandLogs: commandLogs,
+            scope: widget.appState.projectScope,
+            llmSettings: widget.appState.llmSettings,
+            startDate: _startDate,
+            endDate: _endDate,
+            attackNarrative: attackNarrative,
+            confirmedOnly: confirmedOnly,
+          ),
+        'csv' => ReportGenerator.generateCsv(
+            vulnerabilities: widget.appState.vulnerabilities,
+            commandLogs: commandLogs,
+            confirmedOnly: false,
+          ),
+        _ => '',
+      };
+
+      await File(path).writeAsString(content);
+      if (mounted) Navigator.of(context).pop();
+    } catch (e) {
+      if (mounted) {
+        setState(() => _savingReport = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Report generation failed: $e'), backgroundColor: Colors.red[800]),
+        );
+      }
     }
   }
 
@@ -272,7 +355,7 @@ class _ReportConfigDialogState extends State<ReportConfigDialog> {
           const Spacer(),
           IconButton(
             icon: const Icon(Icons.close, color: Colors.white54, size: 20),
-            onPressed: () => Navigator.of(context).pop(),
+            onPressed: _savingReport ? null : () => Navigator.of(context).pop(),
             tooltip: 'Cancel',
           ),
         ],
@@ -709,11 +792,23 @@ class _ReportConfigDialogState extends State<ReportConfigDialog> {
           ),
           const Spacer(),
           TextButton(
-            onPressed: () => Navigator.of(context).pop(),
+            onPressed: _savingReport ? null : () => Navigator.of(context).pop(),
             style: TextButton.styleFrom(foregroundColor: Colors.white54),
             child: const Text('Cancel'),
           ),
           const SizedBox(width: 12),
+          // Phase 11: Show loading indicator while saving, button otherwise
+          if (_savingReport)
+            const Row(
+              children: [
+                SizedBox(width: 16, height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: _accent)),
+                SizedBox(width: 12),
+                Text('Generating report…',
+                  style: TextStyle(color: Colors.white54, fontSize: 13)),
+              ],
+            )
+          else
           // Rebuild when text changes so the button enables/disables live
           AnimatedBuilder(
             animation: Listenable.merge([_titleCtrl, _pentesterCtrl]),
