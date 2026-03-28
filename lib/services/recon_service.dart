@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:convert';
 import '../models/llm_settings.dart';
@@ -196,8 +197,21 @@ class ReconService {
   final Function(String)? onTargetDown;
   final void Function(int sent, int received)? onTokensUsed;
 
+  /// Set to true to request cancellation of the current recon loop.
+  /// The loop checks this flag at the start of each iteration.
+  bool _cancelRequested = false;
+
+  /// Request cancellation of the running recon loop.
+  void cancel() {
+    _cancelRequested = true;
+  }
+
   static const int _maxIterations = 100;
   static const int _maxIterationsExternal = 100;
+
+  /// Maximum time to wait for a single LLM round-trip in the recon loop.
+  /// Acts as a hard safety net in case the HTTP-level timeout fails.
+  static const Duration _llmIterationTimeout = Duration(minutes: 8);
 
   ReconService({
     required this.settings,
@@ -336,6 +350,12 @@ class ReconService {
     onProgress?.call('[$address] Baseline complete (${baseline.commandsRun.length} steps). Starting LLM-guided deep scan...');
 
     for (int iteration = 0; iteration < maxIter; iteration++) {
+      // Check for cancellation at the top of each iteration.
+      if (_cancelRequested) {
+        onProgress?.call('[$address] Recon cancelled by user');
+        break;
+      }
+
       onProgress?.call('[$address] Iteration ${iteration + 1}...');
 
       // Per-target command cap: warn at 50, hard stop at 80
@@ -434,7 +454,15 @@ Do NOT propose another port scan variant. Instead:
 
       String response;
       try {
-        response = await llmService.sendMessage(settings, prompt, onTokensUsed: onTokensUsed);
+        response = await llmService.sendMessage(settings, prompt, onTokensUsed: onTokensUsed)
+            .timeout(_llmIterationTimeout);
+      } on TimeoutException {
+        onProgress?.call('[$address] LLM call timed out (iteration ${iteration + 1})');
+        history += 'Iteration ${iteration + 1}: LLM call timed out\n\n';
+        consecutiveFailures++;
+        timeoutCount++;
+        if (consecutiveFailures >= 3) { exhaustedOptions = true; break; }
+        continue;
       } catch (e) {
         onProgress?.call('[$address] LLM error: $e');
         history += 'Iteration ${iteration + 1}: LLM error: $e\n\n';
@@ -1641,7 +1669,8 @@ Schema:
 Respond ONLY with valid JSON.''';
 
     try {
-      final response = await llmService.sendMessage(settings, prompt, onTokensUsed: onTokensUsed);
+      final response = await llmService.sendMessage(settings, prompt, onTokensUsed: onTokensUsed)
+          .timeout(_llmIterationTimeout);
       final parsed = JsonParser.tryParseJson(response);
       if (parsed != null) _deepMerge(findings, parsed);
     } catch (_) {}
@@ -1676,7 +1705,8 @@ Port 80/443 behind Cloudflare = web application is fully testable for XSS, CSRF,
 Respond ONLY with valid JSON.''';
 
     try {
-      final response = await llmService.sendMessage(settings, prompt, onTokensUsed: onTokensUsed);
+      final response = await llmService.sendMessage(settings, prompt, onTokensUsed: onTokensUsed)
+          .timeout(_llmIterationTimeout);
       final eval = JsonParser.tryParseJson(response);
       if (eval == null || eval['useful'] != true) {
         onProgress?.call('[$address] Excluded: ${eval?['reason'] ?? 'no useful data'}');

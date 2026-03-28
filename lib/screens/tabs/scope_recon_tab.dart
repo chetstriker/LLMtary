@@ -146,6 +146,7 @@ class _ScopeReconTabState extends State<ScopeReconTab> {
                       isExecuting: widget.isExecuting,
                       isAnalyzing: widget.isAnalyzing,
                       onGo: () => _targetPanelKey.currentState?.startScan(_scopeCtrl.text),
+                      onStop: () => _targetPanelKey.currentState?.stopScan(),
                     ),
                   ),
                   // Hidden TargetInputPanel — holds scan logic, renders nothing
@@ -253,6 +254,7 @@ class _ScopePanel extends StatelessWidget {
   final bool isExecuting;
   final bool isAnalyzing;
   final VoidCallback onGo;
+  final VoidCallback? onStop;
   static const _purple = Color(0xFF7C5CFC);
   static const _hint = Color(0xFF8892B0);
   static const _card = Color(0xFF161929);
@@ -270,6 +272,7 @@ class _ScopePanel extends StatelessWidget {
     required this.isExecuting,
     required this.isAnalyzing,
     required this.onGo,
+    this.onStop,
   });
 
   @override
@@ -357,16 +360,12 @@ class _ScopePanel extends StatelessWidget {
                   width: 140,
                   height: 44,
                   child: ElevatedButton.icon(
-                    onPressed: null,
-                    icon: const SizedBox(
-                        width: 13,
-                        height: 13,
-                        child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2)),
-                    label: const Text('SCANNING...',
+                    onPressed: onStop,
+                    icon: const Icon(Icons.stop, color: Colors.white, size: 16),
+                    label: const Text('STOP',
                         style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13)),
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: _purple.withValues(alpha: 0.5),
-                      disabledBackgroundColor: _purple.withValues(alpha: 0.3),
+                      backgroundColor: Colors.red.withValues(alpha: 0.7),
                       padding: const EdgeInsets.symmetric(vertical: 10),
                     ),
                   ),

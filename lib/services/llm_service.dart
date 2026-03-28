@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../models/llm_settings.dart';
@@ -95,6 +96,11 @@ class LLMService {
   // --- Shared HTTP helpers ---
 
   /// Send an HTTP POST with debug logging and error checking.
+  ///
+  /// Uses a dedicated [http.Client] per request so that on timeout the client
+  /// is forcibly closed, tearing down the underlying TCP socket. Without this,
+  /// `Future.timeout()` on `http.post()` can hang indefinitely when the server
+  /// accepts the connection but stops responding mid-stream.
   Future<http.Response> _sendHttpPost(
     String url,
     Map<String, String> headers,
@@ -110,20 +116,31 @@ class LLMService {
       }
     }
 
-    final response = await http.post(
-      Uri.parse(url),
-      headers: headers,
-      body: json.encode(body),
-    ).timeout(timeout);
+    final client = http.Client();
+    try {
+      final response = await client.post(
+        Uri.parse(url),
+        headers: headers,
+        body: json.encode(body),
+      ).timeout(timeout, onTimeout: () {
+        // Forcibly close the client to tear down the TCP socket.
+        client.close();
+        throw TimeoutException('$providerName request timed out after ${timeout.inSeconds}s', timeout);
+      });
 
-    if (enableDebugLogging) {
-      print('${_ts()} DEBUG [$providerName]: Response status: ${response.statusCode}');
-      if (response.statusCode != 200) {
-        print('${_ts()} DEBUG [$providerName]: Response body: ${response.body}');
+      if (enableDebugLogging) {
+        print('${_ts()} DEBUG [$providerName]: Response status: ${response.statusCode}');
+        if (response.statusCode != 200) {
+          print('${_ts()} DEBUG [$providerName]: Response body: ${response.body}');
+        }
       }
-    }
 
-    return response;
+      return response;
+    } catch (e) {
+      // Ensure the client is always closed, even on non-timeout errors.
+      client.close();
+      rethrow;
+    }
   }
 
   /// Build the standard OpenAI-compatible messages array.

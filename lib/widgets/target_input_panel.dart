@@ -61,6 +61,9 @@ class TargetInputPanelState extends State<TargetInputPanel> {
   bool _isScanning = false;
   String _statusMessage = '';
 
+  // Active ReconService instances so we can cancel them on stop.
+  final List<ReconService> _activeRecons = [];
+
   // Live target list built during scanning (mutable so we can update status)
   final List<Target> _liveTargets = [];
 
@@ -226,14 +229,14 @@ class TargetInputPanelState extends State<TargetInputPanel> {
               appState.recordTokenUsage('recon', sent, received);
             },
           );
-          return MapEntry(
-            addr,
-            await recon.reconTarget(
-              addr, widget.projectName,
-              projectId: widget.projectId,
-              targetId: widget.getTargetId?.call(addr) ?? 0,
-            ),
+          _activeRecons.add(recon);
+          final result = await recon.reconTarget(
+            addr, widget.projectName,
+            projectId: widget.projectId,
+            targetId: widget.getTargetId?.call(addr) ?? 0,
           );
+          _activeRecons.remove(recon);
+          return MapEntry(addr, result);
         }));
 
         for (final entry in batchResults) {
@@ -318,6 +321,18 @@ class TargetInputPanelState extends State<TargetInputPanel> {
   }
 
   bool get isScanning => _isScanning;
+
+  /// Cancel all active recon loops.
+  void stopScan() {
+    for (final recon in _activeRecons) {
+      recon.cancel();
+    }
+    _activeRecons.clear();
+    setState(() {
+      _statusMessage = 'Scan stopped by user';
+      _isScanning = false;
+    });
+  }
   String get statusMessage => _statusMessage;
 
   @override
