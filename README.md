@@ -124,6 +124,45 @@ Analysis runs in two sequential phases, mirroring the structure of a professiona
 
 Provider settings are saved per-provider — switching providers restores that provider's previously saved API key, model, and base URL.
 
+### LLM Requirements
+
+PenExecute's prompts are large and require strong reasoning capabilities. Not all models will produce usable results. The exploit system prompt alone exceeds 6,000 tokens, and the recon system prompt exceeds 5,600 tokens — a 4K context window is physically too small.
+
+#### Local Model Tiers (Ollama / LM Studio)
+
+| Tier | Model Size | JSON Reliability | Quality | VRAM (Q4) | Recommendation |
+|------|-----------|-----------------|---------|-----------|----------------|
+| **Not usable** | 7-8B | ~50-60% | Poor — hallucinates flags, repeats failed approaches, can't chain reasoning | ~6 GB | Not supported |
+| **Bare minimum** | 14B | ~70-80% | Fair — handles single-step vulns, struggles with complex chains | ~12 GB | Usable for simple targets; expect some retries |
+| **Recommended minimum** | 32B | ~85-90% | Good — reliable multi-step reasoning, solid exploit chains | ~24 GB | Recommended for serious penetration testing |
+| **Professional** | 70B+ | ~95%+ | Very good — best local results, handles all prompt complexity | ~48 GB | Best local experience; dual GPU setups work well |
+
+#### Minimum Local Requirements
+
+| Requirement | Minimum | Recommended |
+|-------------|---------|-------------|
+| **Parameters** | 14B (e.g., Qwen 2.5 14B, Llama 3 14B) | 32B+ (e.g., Qwen 2.5 32B, Llama 3 70B) |
+| **Context window** | 8K tokens (absolute floor) | 32K+ tokens (64K+ preferred) |
+| **Quantization** | Q4_K_M or higher | Q5_K_M or higher |
+| **VRAM** | ~12 GB (14B Q4) | ~24 GB (32B Q4) or ~48 GB (70B Q4) |
+| **RAM (CPU inference)** | 16 GB+ (14B, very slow) | 64 GB+ (32B-70B) |
+| **Inference speed** | Functional at any speed | 15+ tokens/second for interactive use |
+
+> **Note:** Models below 14B parameters are not supported. They produce unreliable JSON output, hallucinate tool flags and command syntax, and fail at the multi-step reasoning required for exploit chains.
+
+#### Cloud Providers (no hardware requirements)
+
+Cloud providers (Claude, ChatGPT, Gemini, OpenRouter) handle all compute remotely. Any machine that can run the Flutter desktop app is sufficient. Recommended models:
+
+| Provider | Recommended Models |
+|----------|-------------------|
+| **Anthropic** | Claude Opus, Claude Sonnet |
+| **OpenAI** | GPT-4o, GPT-4 Turbo |
+| **Google** | Gemini 1.5 Pro, Gemini 2.5 Pro |
+| **OpenRouter** | Any of the above via unified API |
+
+Cloud providers offer the best results due to large context windows (128K-200K tokens) and frontier-class reasoning. They are recommended when local hardware is limited.
+
 ---
 
 ## Setup

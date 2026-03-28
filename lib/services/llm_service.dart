@@ -1,13 +1,84 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../models/llm_settings.dart';
 import '../models/llm_provider.dart';
 import '../utils/app_exceptions.dart';
 
+/// Phase A.3: Simple counting semaphore for limiting concurrent LLM calls.
+///
+/// Used by [LLMService] to prevent cloud providers from being overwhelmed when
+/// multiple targets are analyzed in parallel. Local providers (Ollama, LM Studio)
+/// are exempt — call [LLMSemaphore.isCloudProvider] to check.
+class LLMSemaphore {
+  final int maxConcurrent;
+  int _current = 0;
+  final _queue = Queue<Completer<void>>();
+
+  LLMSemaphore(this.maxConcurrent);
+
+  /// Returns true for cloud LLM providers that need rate-limit protection.
+  static bool isCloudProvider(LLMProvider provider) {
+    switch (provider) {
+      case LLMProvider.claude:
+      case LLMProvider.chatGPT:
+      case LLMProvider.gemini:
+      case LLMProvider.openRouter:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  Future<void> acquire() async {
+    if (_current < maxConcurrent) {
+      _current++;
+      return;
+    }
+    final completer = Completer<void>();
+    _queue.add(completer);
+    await completer.future;
+  }
+
+  void release() {
+    if (_queue.isNotEmpty) {
+      final next = _queue.removeFirst();
+      next.complete();
+    } else {
+      _current--;
+    }
+  }
+
+  /// Convenience wrapper: acquires the semaphore, runs [fn], then releases.
+  Future<T> run<T>(Future<T> Function() fn) async {
+    await acquire();
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  }
+}
+
 class LLMService {
   final Function(String, String)? onPromptResponse;
   bool enableDebugLogging;
+
+  /// Phase E.4: Session-level retry counter — incremented on every retry across
+  /// all LLM calls. When it exceeds [_retryWarningThreshold], a suggestion is
+  /// logged to encourage the user to check their provider.
+  int _sessionRetryCount = 0;
+  static const int _retryWarningThreshold = 10;
+
+  /// Phase E.1: Maximum retry attempts (first attempt + 2 retries = 3 total).
+  static const int _maxRetries = 2;
+
+  /// Phase A.3: Global semaphore shared across all LLMService instances.
+  /// Limits concurrent in-flight calls to cloud providers (Claude, ChatGPT,
+  /// Gemini, OpenRouter) to avoid overwhelming rate limits when many targets
+  /// are analyzed in parallel. Default: 10 concurrent cloud calls.
+  static final LLMSemaphore globalCloudSemaphore = LLMSemaphore(10);
 
   LLMService({this.onPromptResponse, this.enableDebugLogging = false});
 
@@ -51,39 +122,94 @@ class LLMService {
 
   Future<String> sendMessage(LLMSettings settings, String message, {
     bool useSystemPrompt = true,
+    String? systemPromptOverride,
     void Function(int sent, int received)? onTokensUsed,
   }) async {
     final timeout = Duration(seconds: settings.timeoutSeconds);
-    final systemPrompt = useSystemPrompt ? _securityExpertSystemPrompt : null;
+    final systemPrompt = systemPromptOverride ?? (useSystemPrompt ? _securityExpertSystemPrompt : null);
 
     print('${_ts()}\n=== LLM REQUEST ===');
     print('${_ts()} Provider: ${settings.provider.displayName}');
     print('${_ts()} Model: ${settings.modelName}');
     _printLong('Prompt', message);
 
-    String response;
-    switch (settings.provider) {
-      case LLMProvider.ollama:
-        response = await _sendOllama(settings, message, timeout, systemPrompt, onTokensUsed: onTokensUsed);
+    // Phase E.1: Retry loop — up to _maxRetries retries on timeout and transient errors.
+    // E.3: Timeout is unchanged on retries so the model has a full budget per attempt.
+    // Max wall-clock time: (1 + _maxRetries) * timeoutSeconds + backoff delays.
+    String response = '';
+    Exception? lastException;
+    for (int attempt = 0; attempt <= _maxRetries; attempt++) {
+      if (attempt > 0) {
+        _sessionRetryCount++;
+        print('${_ts()} LLM call failed, retrying (attempt ${attempt + 1}/${_maxRetries + 1})...');
+        // E.4: warn when session accumulates many retries
+        if (_sessionRetryCount == _retryWarningThreshold) {
+          print('${_ts()} WARNING: Multiple LLM timeouts detected ($_sessionRetryCount retries). '
+              'Consider increasing timeout in AI Settings or checking provider status.');
+        }
+      }
+
+      try {
+        // Phase A.3: Acquire the global semaphore for cloud providers to prevent
+        // overwhelming rate limits when multiple targets run analysis in parallel.
+        // Local providers (Ollama, LM Studio) skip the semaphore entirely.
+        Future<String> doProviderCall() async {
+          switch (settings.provider) {
+            case LLMProvider.ollama:
+              return await _sendOllama(settings, message, timeout, systemPrompt, onTokensUsed: onTokensUsed);
+            case LLMProvider.lmStudio:
+              return await _sendLMStudio(settings, message, timeout, systemPrompt, onTokensUsed: onTokensUsed);
+            case LLMProvider.claude:
+              return await _sendClaude(settings, message, timeout, systemPrompt, onTokensUsed: onTokensUsed);
+            case LLMProvider.chatGPT:
+              return await _sendChatGPT(settings, message, timeout, systemPrompt, onTokensUsed: onTokensUsed);
+            case LLMProvider.gemini:
+              return await _sendGemini(settings, message, timeout, systemPrompt, onTokensUsed: onTokensUsed);
+            case LLMProvider.openRouter:
+              return await _sendOpenRouter(settings, message, timeout, systemPrompt, onTokensUsed: onTokensUsed);
+            default:
+              throw const ConfigurationException('No AI provider selected');
+          }
+        }
+
+        if (LLMSemaphore.isCloudProvider(settings.provider)) {
+          response = await globalCloudSemaphore.run(doProviderCall);
+        } else {
+          response = await doProviderCall();
+        }
+        // Success — exit retry loop
+        lastException = null;
         break;
-      case LLMProvider.lmStudio:
-        response = await _sendLMStudio(settings, message, timeout, systemPrompt, onTokensUsed: onTokensUsed);
-        break;
-      case LLMProvider.claude:
-        response = await _sendClaude(settings, message, timeout, systemPrompt, onTokensUsed: onTokensUsed);
-        break;
-      case LLMProvider.chatGPT:
-        response = await _sendChatGPT(settings, message, timeout, systemPrompt, onTokensUsed: onTokensUsed);
-        break;
-      case LLMProvider.gemini:
-        response = await _sendGemini(settings, message, timeout, systemPrompt, onTokensUsed: onTokensUsed);
-        break;
-      case LLMProvider.openRouter:
-        response = await _sendOpenRouter(settings, message, timeout, systemPrompt, onTokensUsed: onTokensUsed);
-        break;
-      default:
-        throw const ConfigurationException('No AI provider selected');
+      } on LLMApiException catch (e) {
+        // Retry on transient HTTP errors (429, 5xx); rethrow on client errors (4xx)
+        if (e.statusCode == 429 || e.statusCode >= 500) {
+          lastException = e;
+          if (attempt < _maxRetries) {
+            // Phase E.1: 429 uses Retry-After if available, else exponential backoff
+            final backoffSeconds = attempt == 0 ? 5 : 15;
+            print('${_ts()} HTTP ${e.statusCode} from ${settings.provider.displayName} — '
+                'waiting ${backoffSeconds}s before retry ${attempt + 2}/${_maxRetries + 1}...');
+            await Future.delayed(Duration(seconds: backoffSeconds));
+          }
+        } else {
+          rethrow; // 400/401/403 — don't retry
+        }
+      } on TimeoutException catch (e) {
+        lastException = e;
+        if (attempt < _maxRetries) {
+          final backoffSeconds = attempt == 0 ? 3 : 10;
+          print('${_ts()} LLM call timed out — waiting ${backoffSeconds}s before retry '
+              '${attempt + 2}/${_maxRetries + 1}...');
+          await Future.delayed(Duration(seconds: backoffSeconds));
+        }
+      } catch (e) {
+        // Non-retryable errors (config errors, network hard failures, etc.)
+        rethrow;
+      }
     }
+
+    // If all attempts failed, rethrow the last exception
+    if (lastException != null) throw lastException;
 
     print('${_ts()}\n=== LLM RESPONSE ===');
     _printLong('Response', response);
@@ -144,6 +270,177 @@ class LLMService {
   }
 
   /// Build the standard OpenAI-compatible messages array.
+  /// Send a multi-turn conversation as a pre-built message list.
+  /// For providers that support multi-turn (OpenAI-compatible: LM Studio,
+  /// ChatGPT, OpenRouter), this sends the full conversation. For others,
+  /// it falls back to extracting the last user message and system prompt.
+  /// Phase E.2: sendMessages() uses the same retry logic as sendMessage().
+  /// The retry wraps the outer provider call so all providers benefit from it.
+  Future<String> sendMessages(LLMSettings settings, List<Map<String, String>> messages, {
+    void Function(int sent, int received)? onTokensUsed,
+  }) async {
+    // Extract system prompt and last user message for providers that need them
+    String? systemPrompt;
+    String lastUserMessage = '';
+    for (final msg in messages) {
+      if (msg['role'] == 'system') systemPrompt = msg['content'];
+      if (msg['role'] == 'user') lastUserMessage = msg['content'] ?? '';
+    }
+
+    final timeout = Duration(seconds: settings.timeoutSeconds);
+
+    print('${_ts()}\n=== LLM CONVERSATION ===');
+    print('${_ts()} Provider: ${settings.provider.displayName}');
+    print('${_ts()} Messages: ${messages.length}');
+
+    // Non-OpenAI providers fall back to sendMessage() which already has retry logic
+    switch (settings.provider) {
+      case LLMProvider.lmStudio:
+      case LLMProvider.chatGPT:
+      case LLMProvider.openRouter:
+        break; // handled below with retry loop
+      default:
+        return await sendMessage(settings, lastUserMessage,
+            systemPromptOverride: systemPrompt, onTokensUsed: onTokensUsed);
+    }
+
+    // Phase E.2: Retry loop for OpenAI-compatible multi-turn providers
+    String response = '';
+    Exception? lastException;
+    for (int attempt = 0; attempt <= _maxRetries; attempt++) {
+      if (attempt > 0) {
+        _sessionRetryCount++;
+        print('${_ts()} LLM conversation failed, retrying (attempt ${attempt + 1}/${_maxRetries + 1})...');
+        if (_sessionRetryCount == _retryWarningThreshold) {
+          print('${_ts()} WARNING: Multiple LLM timeouts detected ($_sessionRetryCount retries). '
+              'Consider increasing timeout in AI Settings or checking provider status.');
+        }
+      }
+
+      try {
+        Future<String> doConversationCall() async {
+          switch (settings.provider) {
+            case LLMProvider.lmStudio:
+              return await _sendLMStudioMessages(settings, messages, timeout, onTokensUsed: onTokensUsed);
+            case LLMProvider.chatGPT:
+              return await _sendChatGPTMessages(settings, messages, timeout, onTokensUsed: onTokensUsed);
+            case LLMProvider.openRouter:
+              return await _sendOpenRouterMessages(settings, messages, timeout, onTokensUsed: onTokensUsed);
+            default:
+              return '';
+          }
+        }
+        // Phase A.3: All conversation providers here are cloud providers
+        response = await globalCloudSemaphore.run(doConversationCall);
+        lastException = null;
+        break;
+      } on LLMApiException catch (e) {
+        if (e.statusCode == 429 || e.statusCode >= 500) {
+          lastException = e;
+          if (attempt < _maxRetries) {
+            final backoffSeconds = attempt == 0 ? 5 : 15;
+            print('${_ts()} HTTP ${e.statusCode} — waiting ${backoffSeconds}s before retry '
+                '${attempt + 2}/${_maxRetries + 1}...');
+            await Future.delayed(Duration(seconds: backoffSeconds));
+          }
+        } else {
+          rethrow;
+        }
+      } on TimeoutException catch (e) {
+        lastException = e;
+        if (attempt < _maxRetries) {
+          final backoffSeconds = attempt == 0 ? 3 : 10;
+          print('${_ts()} LLM conversation timed out — waiting ${backoffSeconds}s before retry '
+              '${attempt + 2}/${_maxRetries + 1}...');
+          await Future.delayed(Duration(seconds: backoffSeconds));
+        }
+      } catch (e) {
+        rethrow;
+      }
+    }
+
+    if (lastException != null) throw lastException;
+
+    print('${_ts()}\n=== LLM RESPONSE ===');
+    _printLong('Response', response);
+    print('${_ts()} ==================\n');
+
+    onPromptResponse?.call(lastUserMessage, response);
+    return response;
+  }
+
+  /// LM Studio: send full conversation message list.
+  Future<String> _sendLMStudioMessages(LLMSettings settings, List<Map<String, String>> messages, Duration timeout, {void Function(int, int)? onTokensUsed}) async {
+    final body = <String, dynamic>{
+      'model': settings.modelName,
+      'messages': messages,
+      'temperature': settings.temperature,
+      'max_tokens': settings.maxTokens,
+    };
+    final url = '${settings.baseUrl}/v1/chat/completions';
+    final response = await _sendHttpPost(
+      url, {'Content-Type': 'application/json'}, body, timeout, 'LM Studio',
+    );
+    if (response.statusCode == 200) {
+      final decoded = json.decode(response.body);
+      final usage = decoded['usage'] as Map<String, dynamic>?;
+      if (onTokensUsed != null && usage != null) {
+        onTokensUsed(usage['prompt_tokens'] as int? ?? 0, usage['completion_tokens'] as int? ?? 0);
+      }
+    }
+    return _extractChatResponse(response, 'LM Studio');
+  }
+
+  /// ChatGPT: send full conversation message list.
+  Future<String> _sendChatGPTMessages(LLMSettings settings, List<Map<String, String>> messages, Duration timeout, {void Function(int, int)? onTokensUsed}) async {
+    final body = <String, dynamic>{
+      'model': settings.modelName,
+      'messages': messages,
+      'temperature': settings.temperature,
+      'max_tokens': settings.maxTokens,
+      'store': false,
+    };
+    if (settings.modelName.contains('gpt-4o') || settings.modelName.contains('gpt-4-turbo')) {
+      body['response_format'] = {'type': 'json_object'};
+    }
+    final response = await _sendHttpPost(
+      'https://api.openai.com/v1/chat/completions',
+      {'Content-Type': 'application/json', 'Authorization': 'Bearer ${settings.apiKey ?? ''}'},
+      body, timeout, 'ChatGPT',
+    );
+    if (response.statusCode == 200) {
+      final decoded = json.decode(response.body);
+      final usage = decoded['usage'] as Map<String, dynamic>?;
+      if (onTokensUsed != null && usage != null) {
+        onTokensUsed(usage['prompt_tokens'] as int? ?? 0, usage['completion_tokens'] as int? ?? 0);
+      }
+    }
+    return _extractChatResponse(response, 'ChatGPT');
+  }
+
+  /// OpenRouter: send full conversation message list.
+  Future<String> _sendOpenRouterMessages(LLMSettings settings, List<Map<String, String>> messages, Duration timeout, {void Function(int, int)? onTokensUsed}) async {
+    final body = <String, dynamic>{
+      'model': settings.modelName,
+      'messages': messages,
+      'temperature': settings.temperature,
+      'max_tokens': settings.maxTokens,
+    };
+    final response = await _sendHttpPost(
+      'https://openrouter.ai/api/v1/chat/completions',
+      {'Content-Type': 'application/json', 'Authorization': 'Bearer ${settings.apiKey ?? ''}'},
+      body, timeout, 'OpenRouter',
+    );
+    if (response.statusCode == 200) {
+      final decoded = json.decode(response.body);
+      final usage = decoded['usage'] as Map<String, dynamic>?;
+      if (onTokensUsed != null && usage != null) {
+        onTokensUsed(usage['prompt_tokens'] as int? ?? 0, usage['completion_tokens'] as int? ?? 0);
+      }
+    }
+    return _extractChatResponse(response, 'OpenRouter');
+  }
+
   List<Map<String, String>> _buildChatMessages(String message, String? systemPrompt) {
     final messages = <Map<String, String>>[];
     if (systemPrompt != null) {

@@ -185,7 +185,61 @@ class _BaselineResult {
   });
 }
 
+/// Single recon iteration history entry — supports sliding window compression.
+class _HistoryEntry {
+  final int iteration;
+  final String command;
+  final String? purpose;
+  final int? exitCode;
+  final String? output; // null for skip/error entries
+  final String summary; // one-line summary for compressed view
+
+  _HistoryEntry({
+    required this.iteration,
+    required this.command,
+    this.purpose,
+    this.exitCode,
+    this.output,
+    required this.summary,
+  });
+
+  /// Full multi-line representation for recent entries.
+  String get full {
+    final buf = StringBuffer('Iteration $iteration:\n');
+    buf.writeln('Command: $command');
+    if (purpose != null) buf.writeln('Purpose: $purpose');
+    if (exitCode != null) buf.writeln('Exit: $exitCode');
+    if (output != null) buf.writeln('Output: $output');
+    return buf.toString();
+  }
+
+  /// Compressed one-line representation for older entries.
+  String get compressed => 'Iter $iteration: $summary';
+}
+
+/// Build prompt history string with sliding window: full detail for recent
+/// entries, one-line summaries for older ones.
+String _buildWindowedHistory(List<_HistoryEntry> entries, int windowSize) {
+  if (entries.isEmpty) return '';
+  final buf = StringBuffer();
+  final cutoff = entries.length - windowSize;
+  if (cutoff > 0) {
+    buf.writeln('## EARLIER ITERATIONS (summary):');
+    for (var i = 0; i < cutoff; i++) {
+      buf.writeln(entries[i].compressed);
+    }
+    buf.writeln();
+  }
+  for (var i = cutoff < 0 ? 0 : cutoff; i < entries.length; i++) {
+    buf.writeln(entries[i].full);
+  }
+  return buf.toString();
+}
+
 class ReconService {
+  /// Sliding window size: full detail for last N history entries.
+  static const _historyWindowSize = 8;
+
   final LLMSettings settings;
   final bool requireApproval;
   final String? adminPassword;
@@ -208,6 +262,10 @@ class ReconService {
 
   static const int _maxIterations = 100;
   static const int _maxIterationsExternal = 100;
+
+  /// Phase D.2: Number of consecutive no-new-finding iterations before triggering
+  /// plateau detection early exit.
+  static const int _noNewFindingsLimit = 5;
 
   /// Maximum time to wait for a single LLM round-trip in the recon loop.
   /// Acts as a hard safety net in case the HTTP-level timeout fails.
@@ -283,7 +341,12 @@ class ReconService {
       'other_findings': <dynamic>[],
     };
 
-    String history = '';
+    // Sliding window command history: keep full details for recent iterations,
+    // compress older ones to one-line summaries to limit prompt growth.
+    final historyEntries = <_HistoryEntry>[];
+    // Track previous findings for delta computation (Phase 4.2).
+    Map<String, dynamic>? previousFindings;
+
     // Pre-load commands already run for this target from the DB so we never
     // repeat work across separate runs.
     final executedCommands = projectId > 0 && targetId > 0
@@ -311,6 +374,15 @@ class ReconService {
     final approachFailureReasons = <String, String>{};
     // Phase 6: timed-out web endpoints for scheme fallback hints
     final timedOutEndpoints = <String>{};
+    // Phase D.1/D.2: Plateau detection — track iterations without new findings
+    int iterationsSinceNewFinding = 0;
+    int plateauCoverageExtensions = 0;
+    // Phase D.3: Diminishing returns — track findings counts at key checkpoints
+    int? findingsCountAt10;
+    int? findingsCountAt20;
+    bool reducedBudget = false;
+    // effectiveMaxIter may be reduced by D.3 diminishing returns logic
+    int effectiveMaxIter = maxIter;
 
     if (scope == TargetScope.external && ReconService._isDomainName(address)) {
       onProgress?.call('[$address] Running passive OSINT...');
@@ -349,11 +421,73 @@ class ReconService {
     }
     onProgress?.call('[$address] Baseline complete (${baseline.commandsRun.length} steps). Starting LLM-guided deep scan...');
 
-    for (int iteration = 0; iteration < maxIter; iteration++) {
+    // Build the static recon system prompt once — contains role, platform rules,
+    // objectives, and response format. Passed as systemPromptOverride to avoid
+    // re-sending ~3-4K tokens of static instructions on every iteration.
+    final reconSystemPrompt = _buildReconSystemPrompt(
+      address: address,
+      env: env,
+      scope: scope,
+      outDir: outDir,
+      envInfo: envInfo,
+    );
+
+    for (int iteration = 0; iteration < effectiveMaxIter; iteration++) {
       // Check for cancellation at the top of each iteration.
       if (_cancelRequested) {
         onProgress?.call('[$address] Recon cancelled by user');
         break;
+      }
+
+      // Phase D.2: Plateau detection — too many iterations with no new findings
+      if (iterationsSinceNewFinding >= _noNewFindingsLimit) {
+        final coverageMet = _minimumCoverageMet(findings);
+        if (coverageMet || plateauCoverageExtensions >= 3) {
+          onProgress?.call('[$address] Recon plateau: no new findings for '
+              '$iterationsSinceNewFinding iterations after $iteration total. '
+              '${coverageMet ? "Minimum coverage met." : "Coverage check failed after 3 extensions — stopping."}');
+          break;
+        }
+        plateauCoverageExtensions++;
+        onProgress?.call('[$address] Plateau detected but minimum coverage not yet met '
+            '— extending ($plateauCoverageExtensions/3)');
+        iterationsSinceNewFinding = 0; // reset to give another chance
+      }
+
+      // Phase D.3: Track findings count at iterations 10 and 20 for diminishing returns
+      if (iteration == 10) {
+        findingsCountAt10 = _findingsItemCount(findings);
+      } else if (iteration == 20) {
+        findingsCountAt20 = _findingsItemCount(findings);
+        if (findingsCountAt10 != null &&
+            findingsCountAt20 == findingsCountAt10 &&
+            !reducedBudget) {
+          final cappedAt = iteration + 10;
+          if (cappedAt < effectiveMaxIter) {
+            effectiveMaxIter = cappedAt;
+            reducedBudget = true;
+            onProgress?.call('[$address] Diminishing returns: findings count unchanged '
+                'from iteration 10 to 20. Reducing budget to $effectiveMaxIter iterations total.');
+          }
+        }
+      }
+
+      // Phase D.4: Port exhaustion early exit — when ≥90% of open ports have been probed
+      if (executedCommands.length >= 5) {
+        final openPortStrings = (findings['open_ports'] as List? ?? [])
+            .map((p) => (p as Map)['port']?.toString())
+            .whereType<String>()
+            .toSet();
+        if (openPortStrings.isNotEmpty) {
+          final probedPorts = portProbeCounts.keys.toSet();
+          final coveredCount = probedPorts.intersection(openPortStrings).length;
+          final coverage = coveredCount / openPortStrings.length;
+          if (coverage >= 0.9) {
+            onProgress?.call('[$address] Port exhaustion: $coveredCount/${openPortStrings.length} '
+                'discovered ports fully probed (${(coverage * 100).toStringAsFixed(0)}% coverage) — stopping recon');
+            break;
+          }
+        }
       }
 
       onProgress?.call('[$address] Iteration ${iteration + 1}...');
@@ -444,28 +578,33 @@ Do NOT propose another port scan variant. Instead:
         scope: scope,
         outDir: outDir,
         findings: timeoutCount >= 2 ? _trimFindingsForPrompt(findings) : findings,
-        history: history,
+        previousFindings: previousFindings,
+        historyEntries: historyEntries,
         historyHint: historyHint,
         envInfo: envInfo,
         iteration: iteration,
         maxIterations: maxIter,
         commandCount: executedCommands.length,
       );
+      // Snapshot findings for next iteration's delta computation
+      previousFindings = json.decode(json.encode(findings)) as Map<String, dynamic>;
 
       String response;
       try {
-        response = await llmService.sendMessage(settings, prompt, onTokensUsed: onTokensUsed)
+        response = await llmService.sendMessage(settings, prompt,
+            systemPromptOverride: reconSystemPrompt,
+            onTokensUsed: onTokensUsed)
             .timeout(_llmIterationTimeout);
       } on TimeoutException {
         onProgress?.call('[$address] LLM call timed out (iteration ${iteration + 1})');
-        history += 'Iteration ${iteration + 1}: LLM call timed out\n\n';
+        historyEntries.add(_HistoryEntry(iteration: iteration + 1, command: '(LLM call)', summary: 'LLM call timed out'));
         consecutiveFailures++;
         timeoutCount++;
         if (consecutiveFailures >= 3) { exhaustedOptions = true; break; }
         continue;
       } catch (e) {
         onProgress?.call('[$address] LLM error: $e');
-        history += 'Iteration ${iteration + 1}: LLM error: $e\n\n';
+        historyEntries.add(_HistoryEntry(iteration: iteration + 1, command: '(LLM call)', summary: 'LLM error: $e'));
         consecutiveFailures++;
         if (e.toString().contains('TimeoutException') || e.toString().contains('timed out')) {
           timeoutCount++;
@@ -490,7 +629,7 @@ Do NOT propose another port scan variant. Instead:
           );
           if (focusHints.isNotEmpty) {
             concludeOverrides++;
-            history += 'Iteration ${iteration + 1}: LLM tried to CONCLUDE but unprobed services remain (override $concludeOverrides/3) — continuing.\n\n';
+            historyEntries.add(_HistoryEntry(iteration: iteration + 1, command: '(CONCLUDE override)', summary: 'CONCLUDE overridden ($concludeOverrides/3) — unprobed services remain'));
             onProgress?.call('[$address] Overriding early conclude — unprobed services remain ($concludeOverrides/3)');
             consecutiveFailures = 0;
             continue;
@@ -522,7 +661,7 @@ Do NOT propose another port scan variant. Instead:
       }
 
       if (CommandUtils.isSimilarCommand(command, executedCommands)) {
-        history += 'Iteration ${iteration + 1}: SKIPPED duplicate: $command\n\n';
+        historyEntries.add(_HistoryEntry(iteration: iteration + 1, command: command, summary: 'SKIPPED duplicate'));
         consecutiveFailures++;
         consecutiveDuplicateSkips++;
         if (consecutiveFailures >= 5) { exhaustedOptions = true; break; }
@@ -532,7 +671,7 @@ Do NOT propose another port scan variant. Instead:
       // Phase 1.3: skip commands whose approach category has failed ≥3 times
       final cmdApproach = CommandUtils.classifyReconApproach(command, address);
       if ((approachFailureCounts[cmdApproach] ?? 0) >= 3) {
-        history += 'Iteration ${iteration + 1}: SKIPPED — approach "$cmdApproach" has failed 3+ times: $command\n\n';
+        historyEntries.add(_HistoryEntry(iteration: iteration + 1, command: command, summary: 'SKIPPED — approach "$cmdApproach" failed 3+ times'));
         consecutiveFailures++;
         if (consecutiveFailures >= 5) { exhaustedOptions = true; break; }
         continue;
@@ -542,7 +681,7 @@ Do NOT propose another port scan variant. Instead:
       // if we've already probed it too many times.
       final cmdTargetPort = _extractTargetPort(command, address);
       if (cmdTargetPort != null && exhaustedPorts.contains(cmdTargetPort)) {
-        history += 'Iteration ${iteration + 1}: SKIPPED — port $cmdTargetPort already exhausted ($maxProbesPerPort+ probes): $command\n\n';
+        historyEntries.add(_HistoryEntry(iteration: iteration + 1, command: command, summary: 'SKIPPED — port $cmdTargetPort exhausted'));
         consecutiveFailures++;
         if (consecutiveFailures >= 5) { exhaustedOptions = true; break; }
         continue;
@@ -552,7 +691,7 @@ Do NOT propose another port scan variant. Instead:
       // (recon already merged the output into findings on the prior run)
       if (projectId > 0 && targetId > 0 &&
           await DatabaseHelper.wasCommandExecuted(projectId, targetId, command)) {
-        history += 'Iteration ${iteration + 1}: SKIPPED (already run in prior session): $command\n\n';
+        historyEntries.add(_HistoryEntry(iteration: iteration + 1, command: command, summary: 'SKIPPED (already run in prior session)'));
         onProgress?.call('[$address] Skipping previously run command...');
         consecutiveFailures++;
         if (consecutiveFailures >= 5) { exhaustedOptions = true; break; }
@@ -565,7 +704,7 @@ Do NOT propose another port scan variant. Instead:
       // Check tool availability (skip for always-available tools)
       if (tool.isNotEmpty && !_isAlwaysAvailable(tool, env)) {
         if (unavailableTools.contains(tool)) {
-          history += 'Iteration ${iteration + 1}: SKIPPED - $tool unavailable\n\n';
+          historyEntries.add(_HistoryEntry(iteration: iteration + 1, command: command, summary: 'SKIPPED — $tool unavailable'));
           consecutiveFailures++;
           continue;
         }
@@ -601,7 +740,7 @@ Do NOT propose another port scan variant. Instead:
 
           if (!installed) {
             unavailableTools.add(tool);
-            history += 'Iteration ${iteration + 1}: $tool not found and install failed\n\n';
+            historyEntries.add(_HistoryEntry(iteration: iteration + 1, command: command, summary: '$tool not found and install failed'));
             onProgress?.call('[$address] $tool not available, skipping...');
             consecutiveFailures++;
             continue;
@@ -624,7 +763,7 @@ Do NOT propose another port scan variant. Instead:
           onApprovalNeeded: onApprovalNeeded,
         );
       } catch (e) {
-        history += 'Iteration ${iteration + 1}:\nCommand: $command\nError: $e\n\n';
+        historyEntries.add(_HistoryEntry(iteration: iteration + 1, command: command, summary: 'Error: $e'));
         if (e.toString().contains('timed out') || e.toString().contains('TimeoutException')) {
           commandTimedOut = true;
         }
@@ -637,7 +776,7 @@ Do NOT propose another port scan variant. Instead:
       }
 
       if (commandTimedOut) {
-        history += 'Iteration ${iteration + 1}: TIMED OUT: $command — do NOT retry this command\n\n';
+        historyEntries.add(_HistoryEntry(iteration: iteration + 1, command: command, summary: 'TIMED OUT — do NOT retry'));
         onProgress?.call('[$address] Command timed out, skipping...');
         // Phase 6.1: track timed-out web endpoints for scheme fallback
         final epMatch = RegExp(r'(https?://[^/\s]+)').firstMatch(command);
@@ -715,7 +854,7 @@ Do NOT propose another port scan variant. Instead:
         portToolFailures.putIfAbsent(portKey, () => {}).add(toolName);
         // Inject hint into history so LLM knows to switch tools
         if (toolName == 'gobuster' && !portToolFailures[portKey]!.contains('ffuf')) {
-          history += 'NOTE: gobuster failed on port $portKey — switch to ffuf immediately, do NOT retry gobuster.\n\n';
+          // Note captured in historyHint via portToolFailures — no need to add to history
         }
       }
 
@@ -726,7 +865,7 @@ Do NOT propose another port scan variant. Instead:
             !exhaustedPorts.contains(cmdTargetPort)) {
           exhaustedPorts.add(cmdTargetPort);
           onProgress?.call('[$address] Port $cmdTargetPort exhausted ($maxProbesPerPort probes) — skipping further probes');
-          history += 'NOTE: Port $cmdTargetPort has been probed $maxProbesPerPort times. It is now EXHAUSTED — do NOT target this port again.\n\n';
+          // Note captured in historyHint via exhaustedPorts — no need to add to history
         }
       }
 
@@ -736,19 +875,20 @@ Do NOT propose another port scan variant. Instead:
         final echoApproach = CommandUtils.classifyReconApproach(command, address);
         approachFailureCounts[echoApproach] = (approachFailureCounts[echoApproach] ?? 0) + 1;
         approachFailureReasons[echoApproach] = 'command input was echoed back — tool did not process commands in piped/scripted context';
-        history += 'Iteration ${iteration + 1}:\n'
-            'Command: $command\n'
-            'Purpose: $purpose\n'
-            'Exit: $exitCode\n'
-            'Output: (ECHOED INPUT — tool did not process piped commands)\n\n';
+        historyEntries.add(_HistoryEntry(
+          iteration: iteration + 1, command: command, purpose: purpose,
+          exitCode: exitCode, output: '(ECHOED INPUT)',
+          summary: '$command → echoed input (tool did not process piped commands)',
+        ));
         continue;
       }
 
-      history += 'Iteration ${iteration + 1}:\n'
-          'Command: $command\n'
-          'Purpose: $purpose\n'
-          'Exit: $exitCode\n'
-          'Output: ${CommandUtils.truncateOutput(output, 1500)}\n\n';
+      historyEntries.add(_HistoryEntry(
+        iteration: iteration + 1, command: command, purpose: purpose,
+        exitCode: exitCode,
+        output: CommandUtils.truncateOutput(output, 1500),
+        summary: '$command → exit $exitCode${output.isEmpty ? ' (no output)' : ''}',
+      ));
 
       if (output.isNotEmpty) {
         onProgress?.call('[$address] Parsing output...');
@@ -756,13 +896,20 @@ Do NOT propose another port scan variant. Instead:
         final preCount = _findingsItemCount(findings);
         await _mergeFindings(llmService, address, command, purpose, output, findings);
         final postCount = _findingsItemCount(findings);
-        if (postCount <= preCount) {
+        if (postCount > preCount) {
+          // Phase D.1: New data found — reset plateau counter
+          iterationsSinceNewFinding = 0;
+        } else {
+          // Phase D.1: No new data — advance plateau counter
+          iterationsSinceNewFinding++;
           // No new data extracted — record as approach failure
           final noDataApproach = CommandUtils.classifyReconApproach(command, address);
           approachFailureCounts[noDataApproach] = (approachFailureCounts[noDataApproach] ?? 0) + 1;
           approachFailureReasons.putIfAbsent(noDataApproach, () => 'produced no new data after parsing');
         }
       } else {
+        // Phase D.1: Empty output — advance plateau counter
+        iterationsSinceNewFinding++;
         // Empty output — record as approach failure
         final emptyApproach = CommandUtils.classifyReconApproach(command, address);
         approachFailureCounts[emptyApproach] = (approachFailureCounts[emptyApproach] ?? 0) + 1;
@@ -800,34 +947,20 @@ Do NOT propose another port scan variant. Instead:
     };
   }
 
-  String _buildCommandPrompt({
+  /// Builds the static system prompt for recon — contains role, platform rules,
+  /// objectives, conclusion criteria, and response format. Sent once via
+  /// systemPromptOverride to avoid re-sending ~3-4K tokens every iteration.
+  String _buildReconSystemPrompt({
     required String address,
     required _ExecEnv env,
     required TargetScope scope,
     required String outDir,
-    required Map<String, dynamic> findings,
-    required String history,
-    required String historyHint,
     EnvironmentInfo? envInfo,
-    int iteration = 0,
-    int maxIterations = 100,
-    int commandCount = 0,
   }) {
-    final focusHints = _buildFocusHints(
-      address, findings, env, scope,
-      portProbeCounts: {},
-      exhaustedPorts: {},
-      approachFailureCounts: {},
-    );
     final baseline = scope == TargetScope.external
         ? _externalBaseline(address, env)
         : _internalBaseline(address, env);
     final scopeLabel = scope == TargetScope.external ? 'EXTERNAL (internet-facing)' : 'INTERNAL (LAN)';
-    // Phase 4.1: embedded device detection
-    final embeddedHint = _buildEmbeddedDeviceHint(findings);
-
-    // Phase 4.2: iteration budget awareness
-    final budgetHint = _buildBudgetHint(iteration, maxIterations, commandCount);
 
     return '''You are an expert penetration tester performing RECONNAISSANCE ONLY on target: $address
 Target scope: $scopeLabel
@@ -868,19 +1001,6 @@ Do NOT use command substitution like `\$(dig target.com +short)` inside another 
 If you need an IP from a DNS lookup, run the DNS lookup first in a separate command, read the result,
 then use the IP directly in the next command.
 
-## WHAT YOU HAVE FOUND SO FAR:
-${json.encode(findings)}
-${(findings['osint_dorks'] as List?)?.isNotEmpty == true ? '''
-## GOOGLE DORK QUERIES (generated for manual use — do NOT re-generate these):
-${(findings['osint_dorks'] as List).join('\n')}''' : ''}
-
-## PREVIOUS COMMANDS RUN:
-$history
-$historyHint
-
-$focusHints
-$embeddedHint
-$budgetHint
 $baseline
 
 ## TOOL SYNTAX NOTE — NUCLEI (if used):
@@ -913,6 +1033,86 @@ $baseline
 }
 
 Respond ONLY with valid JSON.''';
+  }
+
+  /// Builds the dynamic per-iteration user prompt — contains only data that
+  /// changes between iterations: findings, command history, focus hints, budget.
+  /// Interval at which full findings are sent instead of delta (prevents drift).
+  static const _fullRefreshInterval = 10;
+
+  String _buildCommandPrompt({
+    required String address,
+    required _ExecEnv env,
+    required TargetScope scope,
+    required String outDir,
+    required Map<String, dynamic> findings,
+    Map<String, dynamic>? previousFindings,
+    required List<_HistoryEntry> historyEntries,
+    required String historyHint,
+    EnvironmentInfo? envInfo,
+    int iteration = 0,
+    int maxIterations = 100,
+    int commandCount = 0,
+  }) {
+    final focusHints = _buildFocusHints(
+      address, findings, env, scope,
+      portProbeCounts: {},
+      exhaustedPorts: {},
+      approachFailureCounts: {},
+    );
+    // Phase 4.1: embedded device detection
+    final embeddedHint = _buildEmbeddedDeviceHint(findings);
+
+    // Phase 4.2: iteration budget awareness
+    final budgetHint = _buildBudgetHint(iteration, maxIterations, commandCount);
+
+    // Send full findings on first iteration, every _fullRefreshInterval, or when
+    // no previous snapshot exists. Otherwise send only the delta.
+    final sendFull = previousFindings == null || iteration == 0 ||
+        iteration % _fullRefreshInterval == 0;
+    final findingsBlock = sendFull
+        ? '## WHAT YOU HAVE FOUND SO FAR:\n${json.encode(findings)}'
+        : '## FINDINGS UPDATE (new/changed since last iteration):\n${_buildFindingsDelta(previousFindings, findings)}';
+
+    return '''$findingsBlock
+${(findings['osint_dorks'] as List?)?.isNotEmpty == true ? '''
+## GOOGLE DORK QUERIES (generated for manual use — do NOT re-generate these):
+${(findings['osint_dorks'] as List).join('\n')}''' : ''}
+
+## PREVIOUS COMMANDS RUN:
+${_buildWindowedHistory(historyEntries, _historyWindowSize)}
+$historyHint
+
+$focusHints
+$embeddedHint
+$budgetHint
+
+What is the next reconnaissance command to run? Respond with JSON only.''';
+  }
+
+  /// Compute delta between previous and current findings — only sections that
+  /// have new or changed entries. Returns a compact JSON string of changes only.
+  static String _buildFindingsDelta(
+      Map<String, dynamic> previous, Map<String, dynamic> current) {
+    final delta = <String, dynamic>{};
+    for (final key in current.keys) {
+      final prev = previous[key];
+      final curr = current[key];
+      if (curr is List && prev is List) {
+        if (curr.length > prev.length) {
+          // Only send new entries added since last snapshot
+          delta[key] = curr.sublist(prev.length);
+        }
+      } else if (curr is Map && prev is Map) {
+        if (json.encode(curr) != json.encode(prev)) {
+          delta[key] = curr;
+        }
+      } else if (curr != prev) {
+        delta[key] = curr;
+      }
+    }
+    if (delta.isEmpty) return '(no new findings since last iteration)';
+    return json.encode(delta);
   }
 
   String _internalBaseline(String address, _ExecEnv env) => '''
@@ -1504,6 +1704,42 @@ Use passive sources — do not send emails or interact with mail servers.
     return '';
   }
 
+  /// Phase D.2: Check whether the recon run has met minimum acceptable coverage
+  /// before allowing a plateau-based early exit.
+  ///
+  /// Minimum criteria:
+  ///   1. At least one port scan completed (open_ports is non-empty).
+  ///   2. At least one service banner grab (any port has a non-empty `product`
+  ///      or `version` field).
+  ///   3. If web ports are present (80/443/8080/8443), at least one web
+  ///      fingerprint was attempted (web_findings is non-empty).
+  static bool _minimumCoverageMet(Map<String, dynamic> findings) {
+    final openPorts = findings['open_ports'] as List? ?? [];
+    if (openPorts.isEmpty) return false;
+
+    // Require at least one banner/service identification
+    final hasServiceBanner = openPorts.any((p) {
+      final port = p as Map? ?? {};
+      return (port['product'] as String? ?? '').isNotEmpty ||
+          (port['version'] as String? ?? '').isNotEmpty ||
+          (port['service'] as String? ?? '').isNotEmpty;
+    });
+    if (!hasServiceBanner) return false;
+
+    // If web ports are open, require at least one web fingerprint
+    const webPorts = {80, 443, 8080, 8443, 8000, 8888, 3000};
+    final portNumbers = openPorts
+        .map((p) => (p as Map)['port'] as int? ?? 0)
+        .toSet();
+    final hasWebPorts = portNumbers.any((p) => webPorts.contains(p));
+    if (hasWebPorts) {
+      final webFindings = findings['web_findings'] as List? ?? [];
+      if (webFindings.isEmpty) return false;
+    }
+
+    return true;
+  }
+
   /// Count total items across all findings list keys for change detection.
   static int _findingsItemCount(Map<String, dynamic> findings) {
     int count = 0;
@@ -1595,6 +1831,14 @@ These never contain version or vulnerability information on embedded devices.\n'
     String output,
     Map<String, dynamic> findings,
   ) async {
+    // Phase 4.4: Try deterministic parsers first to avoid LLM token spend.
+    // Falls back to LLM parsing for complex/unknown output formats.
+    final deterministicResult = _tryDeterministicParse(command, output, address);
+    if (deterministicResult != null) {
+      _deepMerge(findings, deterministicResult);
+      return;
+    }
+
     final prompt = '''You are a penetration tester extracting reconnaissance data from command output.
 Target: $address
 Command run: $command
@@ -1674,6 +1918,214 @@ Respond ONLY with valid JSON.''';
       final parsed = JsonParser.tryParseJson(response);
       if (parsed != null) _deepMerge(findings, parsed);
     } catch (_) {}
+  }
+
+  // ---------------------------------------------------------------------------
+  // Deterministic parsers — bypass LLM for known output formats (Phase 4.4)
+  // ---------------------------------------------------------------------------
+
+  /// Attempts to parse command output deterministically. Returns a findings map
+  /// if successful, null if the output format is unrecognized or too complex.
+  Map<String, dynamic>? _tryDeterministicParse(String command, String output, String address) {
+    if (output.trim().isEmpty) return null;
+
+    final cmdLower = command.toLowerCase();
+
+    // --- dig output parser ---
+    if (cmdLower.contains('dig ') || cmdLower.contains('dig@')) {
+      return _parseDigOutput(output, address);
+    }
+
+    // --- curl -I (headers only) parser ---
+    if (cmdLower.contains('curl') && (cmdLower.contains(' -i') || cmdLower.contains(' -I') || cmdLower.contains('--head'))) {
+      return _parseCurlHeaders(output, address);
+    }
+
+    // --- nmap text output parser (non-XML) ---
+    if (cmdLower.contains('nmap ') && !output.contains('<?xml')) {
+      return _parseNmapText(output, address);
+    }
+
+    return null; // Unknown format — fall back to LLM
+  }
+
+  /// Parse dig/nslookup output into dns_findings entries.
+  Map<String, dynamic>? _parseDigOutput(String output, String address) {
+    final dnsFindings = <Map<String, dynamic>>[];
+    final lines = output.split('\n');
+
+    // Parse answer section lines like: "example.com.  300  IN  A  1.2.3.4"
+    final recordPattern = RegExp(r'^\s*(\S+)\s+(\d+)\s+IN\s+(\S+)\s+(.+)$');
+    for (final line in lines) {
+      final match = recordPattern.firstMatch(line.trim());
+      if (match != null) {
+        dnsFindings.add({
+          'name': match.group(1)!.replaceAll(RegExp(r'\.$'), ''),
+          'ttl': int.tryParse(match.group(2)!) ?? 0,
+          'record_type': match.group(3)!,
+          'value': match.group(4)!.trim(),
+        });
+      }
+    }
+
+    // Parse status from header
+    final statusMatch = RegExp(r'status:\s*(\w+)').firstMatch(output);
+    final status = statusMatch?.group(1);
+
+    if (dnsFindings.isEmpty && status != null) {
+      dnsFindings.add({
+        'record_type': 'STATUS',
+        'name': address,
+        'value': status,
+        'ttl': 0,
+      });
+    }
+
+    if (dnsFindings.isEmpty) return null;
+    return {'dns_findings': dnsFindings};
+  }
+
+  /// Parse curl -I header output into web_findings entries.
+  Map<String, dynamic>? _parseCurlHeaders(String output, String address) {
+    final lines = output.split('\n');
+    final headers = <String, String>{};
+    int? status;
+    String? server;
+    String? contentType;
+    String? poweredBy;
+
+    for (final line in lines) {
+      // Status line: HTTP/1.1 200 OK
+      final statusMatch = RegExp(r'^HTTP/[\d.]+\s+(\d+)').firstMatch(line);
+      if (statusMatch != null) {
+        status = int.tryParse(statusMatch.group(1)!);
+        continue;
+      }
+      // Header line: Key: Value
+      final headerMatch = RegExp(r'^([^:]+):\s*(.+)$').firstMatch(line.trim());
+      if (headerMatch != null) {
+        final key = headerMatch.group(1)!.trim();
+        final value = headerMatch.group(2)!.trim();
+        headers[key] = value;
+        if (key.toLowerCase() == 'server') server = value;
+        if (key.toLowerCase() == 'content-type') contentType = value;
+        if (key.toLowerCase() == 'x-powered-by') poweredBy = value;
+      }
+    }
+
+    if (headers.isEmpty && status == null) return null;
+
+    final webFinding = <String, dynamic>{
+      'url': 'http://$address',
+      'status': status ?? 0,
+      'headers': headers,
+    };
+    if (server != null) webFinding['server'] = server;
+    if (contentType != null) webFinding['content_type'] = contentType;
+    if (poweredBy != null) webFinding['powered_by'] = poweredBy;
+
+    // Extract technologies from headers
+    final techs = <String>[];
+    if (server != null) techs.add(server);
+    if (poweredBy != null) techs.add(poweredBy);
+    if (techs.isNotEmpty) webFinding['technologies'] = techs;
+
+    // Detect WAF
+    final wafFindings = <Map<String, dynamic>>[];
+    if (headers.keys.any((k) => k.toLowerCase() == 'cf-ray')) {
+      wafFindings.add({'waf': 'Cloudflare', 'detected_by': 'cf-ray header'});
+    }
+
+    final result = <String, dynamic>{'web_findings': [webFinding]};
+    if (wafFindings.isNotEmpty) result['waf_findings'] = wafFindings;
+    return result;
+  }
+
+  /// Parse nmap text output into open_ports and nmap_scripts entries.
+  Map<String, dynamic>? _parseNmapText(String output, String address) {
+    final ports = <Map<String, dynamic>>[];
+    final scripts = <Map<String, dynamic>>[];
+    final device = <String, dynamic>{};
+
+    final lines = output.split('\n');
+    // Port line pattern: "80/tcp  open  http  Apache httpd 2.4.41 ((Ubuntu))"
+    final portPattern = RegExp(r'^(\d+)/(tcp|udp)\s+(open|filtered|closed)\s+(\S+)\s*(.*)$');
+    // OS detection pattern
+    final osPattern = RegExp(r'OS details?:\s*(.+)', caseSensitive: false);
+    // MAC address pattern
+    final macPattern = RegExp(r'MAC Address:\s*([0-9A-Fa-f:]+)\s*\(([^)]*)\)?');
+    // Script output pattern: "|  script-id: output" or "|_ script-id: output"
+    final scriptPattern = RegExp(r'^\|\s*(\S+):\s*(.*)$');
+
+    int? lastPort;
+
+    for (final line in lines) {
+      // Parse port lines
+      final portMatch = portPattern.firstMatch(line.trim());
+      if (portMatch != null) {
+        final port = int.tryParse(portMatch.group(1)!) ?? 0;
+        lastPort = port;
+        final protocol = portMatch.group(2)!;
+        final state = portMatch.group(3)!;
+        final service = portMatch.group(4)!;
+        final rest = portMatch.group(5)?.trim() ?? '';
+
+        // Try to split rest into product + version
+        String product = '';
+        String version = '';
+        String extraInfo = '';
+        final versionMatch = RegExp(r'^(.+?)\s+([\d.]+\S*)\s*(.*)$').firstMatch(rest);
+        if (versionMatch != null) {
+          product = versionMatch.group(1)!.trim();
+          version = versionMatch.group(2)!.trim();
+          extraInfo = versionMatch.group(3)?.trim() ?? '';
+        } else if (rest.isNotEmpty) {
+          product = rest;
+        }
+
+        ports.add({
+          'port': port,
+          'protocol': protocol,
+          'state': state,
+          'service': service,
+          if (product.isNotEmpty) 'product': product,
+          if (version.isNotEmpty) 'version': version,
+          if (extraInfo.isNotEmpty) 'extra_info': extraInfo,
+        });
+        continue;
+      }
+
+      // Parse script output
+      final scriptMatch = scriptPattern.firstMatch(line);
+      if (scriptMatch != null && lastPort != null) {
+        scripts.add({
+          'port': lastPort,
+          'script_id': scriptMatch.group(1)!,
+          'output': scriptMatch.group(2)!.trim(),
+        });
+        continue;
+      }
+
+      // Parse OS detection
+      final osMatch = osPattern.firstMatch(line);
+      if (osMatch != null) {
+        device['os'] = osMatch.group(1)!.trim();
+      }
+
+      // Parse MAC address
+      final macMatch = macPattern.firstMatch(line);
+      if (macMatch != null) {
+        device['mac'] = macMatch.group(1)!;
+      }
+    }
+
+    if (ports.isEmpty && device.isEmpty) return null;
+
+    final result = <String, dynamic>{};
+    if (ports.isNotEmpty) result['open_ports'] = ports;
+    if (scripts.isNotEmpty) result['nmap_scripts'] = scripts;
+    if (device.isNotEmpty) result['device'] = device;
+    return result;
   }
 
   Future<String?> _evaluateAndSave(

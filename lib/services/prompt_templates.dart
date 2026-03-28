@@ -18,51 +18,14 @@ class PromptTemplates {
   /// Attacker objective: gain unauthorized access via injection, authentication bypass, or access control flaws.
   static String webAppCorePrompt(String deviceJson, {TargetScope scope = TargetScope.internal, bool hasSsrfParams = false}) {
     final isExternal = scope == TargetScope.external;
-    final extraScope = isExternal ? '''
-
-## EXTERNAL TARGET CONTEXT:
-- WAF/CDN may be present — note any WAF-related headers (cf-ray, x-sucuri, x-cache)
-- If a WAF/CDN (Cloudflare, Akamai, etc.) is detected:
-  • Application-layer attacks (XSS, CSRF, SQLi, auth bypass, IDOR, logic flaws) are fully testable
-    through the CDN — Cloudflare proxies HTTP/HTTPS traffic to the origin. Generate these findings
-    whenever evidence for the attack surface exists, exactly as you would without a WAF.
-  • ALSO generate ONE additional finding: "WAF/CDN Origin IP Not Yet Discovered" — noting that
-    direct server-level exploitation (CVE RCE, buffer overflows against specific server software)
-    requires the real origin IP, and describing origin IP discovery methods.
-  • If the origin IP IS known, additionally generate server-software CVE findings against that IP.
-- Do NOT generate SMB/RDP/internal-network findings for this target
-- Do NOT generate DoS findings against third-party infrastructure (CDNs, cloud providers, email
-  gateways) that the target organization does not own or control — these are not actionable''' : '';
+    final extraScope = isExternal ? _externalTargetScopeFull() : '';
     return '''
 You are an expert web-application penetration tester. Analyze the device data below and identify EXPLOITABLE web-application vulnerabilities — focus on injection, authentication, access control, and CMS-specific attack surfaces.
 
 ## DEVICE DATA:
 $deviceJson$extraScope
 
-## MANDATORY: TECHNOLOGY FINGERPRINTING (do this first)
-Before analyzing attack surface, identify the CMS, hosting platform, and technology stack from ALL available signals:
-
-### CMS/Platform identification — check in this order:
-1. CNAME records in dns_findings or domain_information:
-   - Contains "wpenginepowered.com" or "wpengine.com" → WordPress on WPEngine
-   - Contains "wordpress.com" → WordPress.com
-   - Contains "sites.google.com" → Google Sites
-   - Contains "myshopify.com" → Shopify
-   - Contains "squarespace.com" → Squarespace
-   - Contains "netlify.app" or "netlify.com" → Netlify-hosted site
-   - Contains "github.io" → GitHub Pages
-2. HTTP response headers: X-Powered-By, Server, X-Generator, X-Drupal-Cache, X-WordPress-*
-3. Cookie names: wordpress_*, PHPSESSID+wp-*, laravel_session, XSRF-TOKEN (Laravel)
-4. "technologies" array in device data — use every entry listed
-5. HTTP response body signatures visible in recon: wp-content, wp-admin, Joomla!, Drupal
-
-### Once CMS/platform is identified:
-- Scope findings to that CMS's known attack surface (auth endpoints, plugin/theme vulnerabilities,
-  REST APIs, XML-RPC for WordPress, admin paths, backup file locations)
-- If a CMS is detected but cannot be 100% confirmed, still generate findings at LOW confidence for
-  the most common attack paths — a missed finding is worse than a low-confidence finding
-- WordPress on WPEngine: generate findings for /wp-login.php brute force, /wp-json/wp/v2/ REST API
-  enumeration, XML-RPC (xmlrpc.php) credential attack, and plugin/theme CVE categories
+${_techFingerprintingFull()}
 
 ## SCOPE — core web attack classes:
 - SQL Injection (login forms, search fields, URL params)
@@ -83,120 +46,46 @@ ${isExternal ? "- CMS-specific CVEs (WordPress plugins, Drupal modules, Joomla e
 - Directory and path enumeration: discover endpoints not visible from the main page, focusing on
   administrative interfaces and common paths for the identified technology stack
 
-## SSRF CLOUD METADATA ESCALATION CHAIN (Phase 14.6)
-When the target appears to be hosted on a cloud provider (evidenced by CNAME records pointing to cloud domains, cloud provider HTTP response headers, SPF records with cloud provider IP ranges, or IP addresses in known cloud ranges), SSRF vulnerabilities have a uniquely critical escalation path:
+## SSRF ESCALATION CHAIN
+SSRF-capable parameters: url=, image=, webhook=, import=, fetch=, src=, proxy=, callback=, redirect=, host=, avatar=, icon=, feed=, endpoint=. Also: document conversion, PDF generation, file import, RSS fetching, image resizing.
 
-**Cloud-hosted SSRF escalation:**
-Cloud instance metadata services expose a privileged HTTP endpoint accessible only from the instance itself — it returns the IAM role name and temporary credentials assigned to the instance.
-- Any SSRF vulnerability that allows reaching internal IP addresses (169.254.169.254, 100.100.100.200 for Alibaba, fd00:ec2::254 for AWS IPv6) can query this endpoint
-- Successful retrieval of cloud credentials allows the attacker to authenticate to the cloud provider's API with the instance role's permissions
-- Potential impact: access to all S3 buckets, RDS databases, Secrets Manager secrets, ability to create or modify cloud resources, lateral movement to other cloud services — entire cloud account may be compromised from a single SSRF finding
+**Cloud metadata (CRITICAL when cloud-hosted):**
+Cloud IMDS endpoints (169.254.169.254, 100.100.100.200/Alibaba, fd00:ec2::254/AWS IPv6) return IAM credentials → full cloud account compromise (S3, RDS, Secrets Manager, lateral movement).
+Cloud evidence: CNAME containing cloudfront/azureedge/amazonaws/azurefd/fastly/pages.dev; X-Amz-*/X-Azure-*/X-Google-* headers; SPF with cloud IP ranges.
+- CRITICAL: SSRF-capable param + any cloud indicator → "SSRF to Cloud Metadata Credential Extraction"
+- HIGH: SSRF-capable param without cloud indicators → internal network recon + service access
 
-**Evidence to look for for cloud-hosted SSRF:**
-- CNAME records containing cloudfront, azureedge, amazonaws, azurefd, fastly, pages.dev
-- Server response headers identifying cloud infrastructure (X-Amz-*, X-Azure-*, X-Google-*)
-- SPF records with cloud provider IP ranges
-- Any URL parameter that fetches remote content (url=, image=, webhook=, import=, fetch=, src=, proxy=)
-- File import features, image URL fetching, webhook configuration, document conversion services
+**Internal service access (non-cloud or secondary):**
+SSRF probes localhost/internal services not exposed externally:
+- Admin interfaces (ports 8080, 8161, 9000, 9090) — often unauthenticated internally
+- Secret/config systems (ports 8200, 8500) — infrastructure credentials
+- Internal APIs — may lack auth since only the app was expected to call them
+- DB admin interfaces (Elasticsearch 9200, CouchDB 5984, InfluxDB 8086)
 
-**Generate a CRITICAL SSRF finding when:** Any SSRF-capable parameter is identified AND the target shows any cloud hosting indicator. Label the finding "SSRF to Cloud Metadata Credential Extraction" with severity CRITICAL.
-**Generate a standard HIGH SSRF finding when:** SSRF-capable parameter identified but no cloud hosting indicators — SSRF still enables internal network reconnaissance and service access.
+**Protocol handler escalation:** file:// (read configs/SSH keys, CRITICAL), dict:// (port scan, MEDIUM), gopher:// (Redis/Memcached/SMTP interaction, HIGH)
 
-## SSRF INTERNAL SERVICE EXPLOITATION (non-cloud targets and secondary escalation)
-Even without cloud metadata access, SSRF enables internal network reconnaissance and access to services not exposed externally:
+**DNS rebinding:** Attacker domain resolves to public IP for validation, internal IP for fetch. Evidence: hostname-based SSRF filter; "blocked: internal IP" errors. Severity: HIGH.
 
-**Internal service discovery via SSRF:**
-When any SSRF-capable parameter is identified, the attacker can use it to probe services on localhost and internal network addresses that are not reachable from the internet. Common high-value internal services accessible via SSRF:
-- Administrative interfaces for application servers running on localhost (commonly port 8080, 8161, 9000, 9090) — these often lack authentication because they were never intended to be internet-accessible
-- Secret management and configuration systems running internally (commonly port 8200, 8500) — may contain credentials for the entire infrastructure
-- Internal API endpoints that back the application's own functionality — these may lack authentication because only the application itself was expected to call them
-- Database administration interfaces that accept HTTP connections (Elasticsearch on port 9200, CouchDB on port 5984, InfluxDB on port 8086) — often have no authentication when running internally
-Evidence: any URL parameter that makes outbound HTTP requests (url=, image=, webhook=, import=, fetch=, src=, proxy=, callback=, redirect=); file import or document conversion features.
-
-**Protocol handler abuse for SSRF escalation:**
-Some SSRF vulnerabilities accept non-HTTP URL schemes, enabling interaction with non-HTTP protocols from the server context:
-- `file://` scheme: reads local filesystem files — can access configuration files, SSH keys, and application secrets
-- `dict://` scheme: probes service banners on arbitrary ports — enables port scanning and service fingerprinting via SSRF
-- `gopher://` scheme: sends arbitrary TCP payloads — enables interaction with protocols such as Redis, Memcached, and SMTP that speak cleartext line-oriented protocols
-Evidence: SSRF parameter that does not restrict URL schemes; any server-side URL fetching that processes the scheme component.
-Severity: CRITICAL when file:// reads sensitive files; HIGH for internal service access; MEDIUM for port scanning capability.
-
-**DNS rebinding via SSRF:**
-If the application validates the URL hostname before fetching (resolves DNS and checks the IP is not internal) but then resolves the hostname again when making the actual request, an attacker controlling DNS can make the validation resolve to a public IP (passing the check) while the actual request resolves to an internal IP (bypassing the restriction). This requires attacker control over DNS resolution timing.
-Evidence: SSRF protection that appears DNS-hostname-based rather than IP-address-based; any "blocked: internal IP" type error message (suggests an IP-based check that may be bypassable via DNS rebinding). Severity: HIGH.
-
-## BLIND SSRF — OUT-OF-BAND DETECTION
-Attacker objective: detect SSRF vulnerabilities where the server makes an outbound request but returns no response body to the attacker — requiring out-of-band (OOB) DNS or HTTP callback detection.
-
-**Why blind SSRF requires different testing:**
-Direct SSRF is confirmed when internal service responses appear in the HTTP reply. Blind SSRF occurs when the application makes the outbound request but:
-- Discards the response (fire-and-forget webhook processing, async import jobs)
-- Returns a generic success/error without response content
-- Sanitizes or discards the returned body before including it in the reply
-The attack surface is identical to direct SSRF but OOB detection is required for confirmation.
-
-**Out-of-band interaction platforms for testing:**
-- Burp Collaborator (Burp Suite Pro): generates unique subdomains that log DNS/HTTP interactions
-- interactsh (`interactsh-client` CLI, or public instances at oast.pro/oast.me): open-source OOB platform
-- canarytokens.org: generates unique URLs that notify on access
-- requestbin.com / pipedream.com: HTTP request logging
-- DNSlog.cn / dnslog.io: DNS-only OOB logging
-
-**Testing methodology:**
-1. Identify all parameters that may trigger server-side HTTP requests: `url=`, `image=`, `webhook=`, `import=`, `fetch=`, `src=`, `proxy=`, `callback=`, `redirect=`, `host=`, `avatar=`, `icon=`, `feed=`, `endpoint=`
-2. Also test document conversion, PDF generation, file import, RSS/Atom feed fetching, image resizing — these consistently make server-side HTTP requests
-3. Set the parameter to a unique OOB URL: `http://UNIQUE-ID.oast.pro/path`
-4. Submit the request and check the OOB platform for an incoming DNS lookup or HTTP request
-5. DNS callback received: blind SSRF confirmed (server resolved attacker-controlled domain)
-6. HTTP callback received: full SSRF confirmed — escalate to cloud metadata / internal service access
-
-**Severity for blind SSRF:**
-- DNS-only callback confirmed: MEDIUM — SSRF capability confirmed, data extraction requires further chaining
-- HTTP callback confirmed: HIGH — full SSRF confirmed, pursue internal service and cloud metadata escalation
-- Blind SSRF on cloud-hosted target with any cloud indicators: CRITICAL — async request paths may reach IMDS even without synchronous response; IAM credential theft via follow-up payloads
-
-**Generate blind SSRF findings when:**
-- Any URL-accepting parameter is observed AND the target is cloud-hosted (CRITICAL priority — cloud metadata is the escalation path)
-- File import, document conversion, webhook configuration, or image URL fetching is observed (highest-probability blind SSRF vectors)
-- Avatar URL, RSS feed, or external resource fetching functionality is present
+**Blind SSRF (OOB detection):**
+When SSRF response is discarded (webhooks, async imports), use OOB platforms (Burp Collaborator, interactsh, canarytokens) to detect callbacks.
+- DNS callback: MEDIUM (confirmed SSRF, chaining needed for data)
+- HTTP callback: HIGH (full SSRF, escalate to IMDS/internal services)
+- Blind SSRF + cloud-hosted: CRITICAL (async paths may reach IMDS)
 
 ${hasSsrfParams ? _ssrfBypassBlock() : '<!-- SSRF filter bypass techniques omitted: no SSRF-capable parameters observed in recon data -->'}
 
-## HTTP REQUEST SMUGGLING (Phase 28)
-Attacker objective: desynchronise the connection state between a front-end proxy and back-end server to poison other users' requests, bypass WAF controls, or access internal endpoints.
-Generate ONLY when a reverse proxy or CDN is evidenced (CDN headers, load balancer indicators, or multiple server technologies observed).
+## HTTP REQUEST SMUGGLING
+Generate ONLY when reverse proxy/CDN is evidenced (CDN headers, load balancer indicators, multiple server technologies).
+- **CL.TE desync:** Front-end uses Content-Length, back-end uses Transfer-Encoding: chunked. Conflicting headers leave extra bytes prepended to next user's request → WAF bypass, request poisoning, internal endpoint access. Severity: HIGH.
+- **TE.CL desync:** Reverse — front-end parses chunked, back-end uses CL. Same evidence/severity.
+- **H2 downgrade (H2.CL, H2.TE):** HTTP/2 front-end downgrades to HTTP/1.1 for back-end — CL/TE headers may survive conversion. Severity: HIGH.
 
-### Content-Length / Transfer-Encoding Desync (CL.TE)
-The front-end proxy uses the Content-Length header to determine request boundaries; the back-end uses Transfer-Encoding: chunked. An attacker sends a request where the two headers describe different body lengths — the "extra" bytes are left in the connection buffer and prepended to the next legitimate user's request. This enables injecting arbitrary HTTP headers and prefix content into another user's request.
-Attacker objective: craft a request with conflicting CL and TE headers → observe timing differences (backend holds connection waiting for chunk terminator that front-end already discarded) → confirm desync → smuggle a request prefix targeting an internal endpoint or bypassing WAF rules.
-Evidence: reverse proxy or CDN in front of the application; HTTP/1.1 supported; TE header not stripped by the front-end.
-Severity: HIGH — WAF bypass, access to other users' requests, internal endpoint access.
-
-### Transfer-Encoding / Content-Length Desync (TE.CL)
-The reverse condition — front-end parses chunked encoding while back-end uses Content-Length. The attacker sends a chunked body whose terminating zero-size chunk is positioned to leave a payload prefix queued in the back-end connection.
-Evidence: same as CL.TE — proxy architecture, HTTP/1.1.
-Severity: HIGH.
-
-### HTTP/2 Downgrade Smuggling (H2.CL, H2.TE)
-When the front-end accepts HTTP/2 but downgrades to HTTP/1.1 for the back-end, the conversion process may allow attacker-controlled Content-Length or Transfer-Encoding headers to survive — enabling smuggling in contexts where H1 smuggling is blocked. Evidence: HTTP/2 supported on the public endpoint; proxy architecture present. Severity: HIGH.
-
-## FILE UPLOAD BYPASS (Phase 31)
-Attacker objective: upload and execute server-side code by bypassing file type restrictions.
-Generate when any file upload functionality is observed in recon data.
-
-### Extension and MIME Type Restriction Bypass
-Client-side validation, blacklist-based extension checking, and MIME type header inspection are all bypassable independently:
-- Extension manipulation: double extension (name.php.jpg), case variation (name.PHP), platform-specific alternate extensions for interpreted languages (e.g. phtml, phar for PHP-family; alternate JSP extensions for Java), null byte insertion before extension on older runtimes
-- MIME type spoofing: the Content-Type header in a multipart upload body is client-supplied and not a reliable content indicator
-- Polyglot files: a single file that is simultaneously valid in two formats — passes content-type checking based on file header magic bytes while executing as the target server-side language when interpreted
-Attacker objective: upload a file that executes server-side code → achieve arbitrary command execution in the web server process context.
-Evidence: any file upload form; any API endpoint that accepts multipart/form-data or binary content; avatar upload, document import, image processing features.
-Severity: CRITICAL when executable file upload reaches a web-accessible path; HIGH when upload succeeds but execution path is indirect.
-
-### Path Traversal in Upload Destination
-If the server derives any part of the storage path from client-supplied input (filename field, custom path parameter), path traversal sequences in the filename may place the uploaded file outside the intended directory — potentially into a web-accessible path not originally intended for user files.
-Evidence: any file upload with a client-supplied filename component; observable storage path in responses.
-Severity: CRITICAL when an uploaded file lands in a web-executable directory.
+## FILE UPLOAD BYPASS
+Generate when any file upload functionality is observed.
+- **Extension/MIME bypass:** Double extension (name.php.jpg), case variation (.PHP), alternate extensions (phtml, phar), null byte insertion, MIME spoofing (Content-Type is client-supplied), polyglot files (valid image header + executable code)
+- **Path traversal in upload destination:** Filename-derived storage path may allow writing outside intended directory
+Evidence: file upload form, multipart/form-data endpoint, avatar/document/image upload.
+Severity: CRITICAL when file reaches web-executable path; HIGH when execution is indirect.
 
 ## SERVER-SIDE TEMPLATE INJECTION (SSTI) (Phase 31)
 Attacker objective: inject template engine directives into user-controlled input that is rendered server-side, achieving arbitrary code execution.
@@ -241,7 +130,6 @@ Severity: CRITICAL when code execution is achievable.
 Testing methodology: the attack surface exists wherever user input is stored in one request and later retrieved and processed in a different context. Common locations: username/display name fields used in admin panels, file metadata processed by server scripts, log entries fed into analysis pipelines.
 
 ## RULES:
-- CONFIDENCE FLOOR: A finding without observed evidence in the provided data must be rated LOW confidence regardless of how likely the vulnerability is. MEDIUM confidence requires that the attack surface was directly observed. HIGH confidence requires that both the attack surface and a vulnerability indicator were observed.
 - Only include findings for HTTP/HTTPS ports
 - ONLY generate a finding if the recon data contains direct evidence that the attack surface exists:
   • Authentication attacks: only if a login form, admin panel, or auth prompt was observed
@@ -256,10 +144,74 @@ Testing methodology: the attack surface exists wherever user input is stored in 
 - Description MUST include: URL path, HTTP method, parameter name, and the attacker's goal
 - Assign LOW confidence to any finding where evidence is indirect or inferred
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
   }
+
+  // ---------------------------------------------------------------------------
+  // Shared prompt blocks — extracted to eliminate duplication across web prompts
+  // ---------------------------------------------------------------------------
+
+  /// Full technology fingerprinting block for the primary web prompt.
+  static String _techFingerprintingFull() => '''
+## MANDATORY: TECHNOLOGY FINGERPRINTING (do this first)
+Before analyzing attack surface, identify the CMS, hosting platform, and technology stack from ALL available signals:
+
+### CMS/Platform identification — check in this order:
+1. CNAME records in dns_findings or domain_information:
+   - Contains "wpenginepowered.com" or "wpengine.com" → WordPress on WPEngine
+   - Contains "wordpress.com" → WordPress.com
+   - Contains "sites.google.com" → Google Sites
+   - Contains "myshopify.com" → Shopify
+   - Contains "squarespace.com" → Squarespace
+   - Contains "netlify.app" or "netlify.com" → Netlify-hosted site
+   - Contains "github.io" → GitHub Pages
+2. HTTP response headers: X-Powered-By, Server, X-Generator, X-Drupal-Cache, X-WordPress-*
+3. Cookie names: wordpress_*, PHPSESSID+wp-*, laravel_session, XSRF-TOKEN (Laravel)
+4. "technologies" array in device data — use every entry listed
+5. HTTP response body signatures visible in recon: wp-content, wp-admin, Joomla!, Drupal
+
+### Once CMS/platform is identified:
+- Scope findings to that CMS's known attack surface (auth endpoints, plugin/theme vulnerabilities,
+  REST APIs, XML-RPC for WordPress, admin paths, backup file locations)
+- If a CMS is detected but cannot be 100% confirmed, still generate findings at LOW confidence for
+  the most common attack paths — a missed finding is worse than a low-confidence finding
+- WordPress on WPEngine: generate findings for /wp-login.php brute force, /wp-json/wp/v2/ REST API
+  enumeration, XML-RPC (xmlrpc.php) credential attack, and plugin/theme CVE categories''';
+
+  /// Compact fingerprinting block for secondary web prompts (API, logic/headers).
+  static String _techFingerprintingCompact() => '''
+## MANDATORY: TECHNOLOGY FINGERPRINTING (do this first)
+Identify the platform and technology stack from ALL available signals before analyzing attack surface:
+1. CNAME records: wpenginepowered.com → WordPress/WPEngine; myshopify.com → Shopify; squarespace.com → Squarespace; netlify.app → Netlify; github.io → GitHub Pages
+2. HTTP response headers: X-Powered-By, Server, X-Generator, X-Drupal-Cache, X-WordPress-*
+3. Cookie names: wordpress_*, laravel_session, XSRF-TOKEN (Laravel)
+4. "technologies" array in device data — use every entry listed
+5. HTTP response body signatures: wp-content, wp-admin, Joomla!, Drupal''';
+
+  /// Full external target context for the primary web prompt.
+  static String _externalTargetScopeFull() => '''
+
+## EXTERNAL TARGET CONTEXT:
+- WAF/CDN may be present — note any WAF-related headers (cf-ray, x-sucuri, x-cache)
+- If a WAF/CDN (Cloudflare, Akamai, etc.) is detected:
+  • Application-layer attacks (XSS, CSRF, SQLi, auth bypass, IDOR, logic flaws) are fully testable
+    through the CDN — Cloudflare proxies HTTP/HTTPS traffic to the origin. Generate these findings
+    whenever evidence for the attack surface exists, exactly as you would without a WAF.
+  • ALSO generate ONE additional finding: "WAF/CDN Origin IP Not Yet Discovered" — noting that
+    direct server-level exploitation (CVE RCE, buffer overflows against specific server software)
+    requires the real origin IP, and describing origin IP discovery methods.
+  • If the origin IP IS known, additionally generate server-software CVE findings against that IP.
+- Do NOT generate SMB/RDP/internal-network findings for this target
+- Do NOT generate DoS findings against third-party infrastructure (CDNs, cloud providers, email
+  gateways) that the target organization does not own or control — these are not actionable''';
+
+  /// Compact external target context for secondary web prompts.
+  static String _externalTargetScopeCompact() => '''
+
+## EXTERNAL TARGET CONTEXT:
+- WAF/CDN may be present — note any WAF-related headers (cf-ray, x-sucuri, x-cache)
+- If a WAF/CDN is detected: application-layer attacks are fully testable through the CDN — generate findings whenever evidence exists
+- Do NOT generate DoS findings against third-party infrastructure the client does not control''';
 
   /// SSRF filter bypass techniques block — conditionally injected into
   /// [webAppCorePrompt] when SSRF-capable parameters are detected in recon.
@@ -302,28 +254,15 @@ If the server follows redirects, point the initial URL to an attacker-controlled
   /// Fire when HTTP/HTTPS ports are present (same condition as webAppCorePrompt).
   static String webAppApiAuthPrompt(String deviceJson, {TargetScope scope = TargetScope.internal, bool hasGraphql = false, bool hasSsrfParams = false}) {
     final isExternal = scope == TargetScope.external;
-    final extraScope = isExternal ? '''
-
-## EXTERNAL TARGET CONTEXT:
-- WAF/CDN may be present — note any WAF-related headers (cf-ray, x-sucuri, x-cache)
-- If a WAF/CDN is detected: application-layer attacks are fully testable through the CDN — generate findings whenever evidence exists
-- Do NOT generate DoS findings against third-party infrastructure the client does not control''' : '';
+    final extraScope = isExternal ? _externalTargetScopeCompact() : '';
     final graphqlContext = hasGraphql ? '''
 
 ## GRAPHQL CONFIRMED:
 GraphQL endpoint indicators were detected in the recon data. Treat GraphQL findings as MEDIUM confidence minimum — the attack surface is confirmed present. Prioritize: schema enumeration via introspection and field suggestions, alias-based batching on authentication mutations, and field-level authorization testing.''' : '';
     final apiSsrfBypassBlock = hasSsrfParams ? '''
 
-### SSRF via API Endpoints — Filter Bypass Techniques (Phase 12)
-API endpoints that make server-side HTTP requests (webhook URLs, import URLs, callback URLs, proxy parameters) are common SSRF vectors. When SSRF-capable parameters are identified but the server appears to filter internal IPs, use these bypass techniques:
-- Decimal IP notation: 2130706433 = 127.0.0.1; 3232235777 = 192.168.1.1
-- Hex notation: 0x7f000001 = 127.0.0.1; octal: 0177.0.0.1
-- IPv6 representations: ::1, [::ffff:127.0.0.1], ::ffff:7f00:1
-- Redirect chain: point to attacker server that returns 301 to http://169.254.169.254/ — redirect destination may bypass IP filter
-- DNS rebinding: attacker-controlled domain resolves to public IP for validation, internal IP for fetch
-- URL encoding: http://169%2e254%2e169%2e254/
-- Credential embedding: http://attacker@169.254.169.254/ — some parsers use host after @
-Evidence: any API parameter that accepts URLs (webhook_url, callback, import, fetch, proxy, redirect); OAuth redirect_uri parameters
+### SSRF via API Endpoints — Filter Bypass Techniques
+Apply the same SSRF bypass techniques (IP notation alternatives, DNS rebinding, redirect chains, URL encoding, credential embedding) to API parameters: webhook_url, callback, import, fetch, proxy, redirect, OAuth redirect_uri.
 Severity: CRITICAL when cloud metadata is reachable; HIGH for internal service access''' : '';
     return '''
 You are an expert web-application penetration tester. Analyze the device data below and identify EXPLOITABLE vulnerabilities in API surfaces and authentication protocols.
@@ -331,13 +270,7 @@ You are an expert web-application penetration tester. Analyze the device data be
 ## DEVICE DATA:
 $deviceJson$extraScope$graphqlContext
 
-## MANDATORY: TECHNOLOGY FINGERPRINTING (do this first)
-Identify the platform and technology stack from ALL available signals before analyzing attack surface:
-1. CNAME records: wpenginepowered.com → WordPress/WPEngine; myshopify.com → Shopify; squarespace.com → Squarespace; netlify.app → Netlify; github.io → GitHub Pages
-2. HTTP response headers: X-Powered-By, Server, X-Generator, X-Drupal-Cache, X-WordPress-*
-3. Cookie names: wordpress_*, laravel_session, XSRF-TOKEN (Laravel)
-4. "technologies" array in device data — use every entry listed
-5. HTTP response body signatures: wp-content, wp-admin, Joomla!, Drupal
+${_techFingerprintingCompact()}
 
 ## SCOPE — API and authentication protocol attack classes:
 
@@ -471,7 +404,6 @@ Severity: CRITICAL for financial double-spend or authentication bypass; HIGH for
 $apiSsrfBypassBlock
 
 ## RULES:
-- CONFIDENCE FLOOR: A finding without observed evidence in the provided data must be rated LOW confidence. MEDIUM requires direct observation of the attack surface. HIGH requires both the attack surface and a vulnerability indicator observed.
 - Only include findings for HTTP/HTTPS ports
 - API attacks: only if an API path, JSON content type, or API-related header was found during recon
 - CORS: only if CORS response headers were captured, or an authenticated API is present
@@ -483,9 +415,7 @@ $apiSsrfBypassBlock
 - Each vulnerability class is a SEPARATE entry
 - Description MUST include: URL path, HTTP method, parameter name, and the attacker's goal
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
   }
 
   /// Business logic, state, and HTTP-level attack analysis.
@@ -504,24 +434,14 @@ OAuth/OpenID Connect indicators are present. Prioritize and expand coverage of:
 - Implicit flow misuse, token substitution attacks, and cross-client token reuse
 - SSRF via redirect_uri or token endpoint abuse
 ''' : '';
-    final extraScope = isExternal ? '''
-
-## EXTERNAL TARGET CONTEXT:
-- WAF/CDN may be present — note any WAF-related headers (cf-ray, x-sucuri, x-cache)
-- If a WAF/CDN is detected: application-layer attacks are fully testable through the CDN — generate findings whenever evidence exists
-- Do NOT generate DoS findings against third-party infrastructure the client does not control''' : '';
+    final extraScope = isExternal ? _externalTargetScopeCompact() : '';
     return '''
 You are an expert web-application penetration tester. Analyze the device data below and identify EXPLOITABLE vulnerabilities in business logic, application state, and HTTP-level attack surfaces.
 
 ## DEVICE DATA:
 $deviceJson$extraScope$oauthBoost
 
-## MANDATORY: TECHNOLOGY FINGERPRINTING (do this first)
-Identify the platform and technology stack from ALL available signals before analyzing attack surface:
-1. CNAME records: wpenginepowered.com → WordPress/WPEngine; myshopify.com → Shopify; squarespace.com → Squarespace
-2. HTTP response headers: X-Powered-By, Server, X-Generator, X-Drupal-Cache, X-WordPress-*, Via, X-Cache, CF-Ray
-3. "technologies" array in device data — use every entry listed
-4. HTTP response body signatures: wp-content, wp-admin, Joomla!, Drupal
+${_techFingerprintingCompact()}
 
 ## SCOPE — business logic, state, and HTTP-level attack classes:
 
@@ -594,7 +514,6 @@ Generate ONLY when Set-Cookie headers were captured in recon data — do NOT gen
 Evidence: Set-Cookie headers in captured HTTP responses. Each distinct misconfigured cookie is a separate finding.
 
 ## RULES:
-- CONFIDENCE FLOOR: A finding without observed evidence in the provided data must be rated LOW confidence. MEDIUM requires direct observation of the attack surface. HIGH requires both the attack surface and a vulnerability indicator observed.
 - Only include findings for HTTP/HTTPS ports
 - Business logic: infer from application purpose — e-commerce and financial applications always warrant race condition and price manipulation findings
 - HTTP Request Smuggling: only if proxy chain headers (Via, CF-Ray, X-Cache) were observed
@@ -605,9 +524,7 @@ Evidence: Set-Cookie headers in captured HTTP responses. Each distinct misconfig
 - Each vulnerability class is a SEPARATE entry
 - Description MUST include: URL path, HTTP method, parameter name, and the attacker's goal
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
   }
 
   /// Network-service focused analysis prompt.
@@ -699,15 +616,12 @@ Severity: CRITICAL for writable exports without root squashing; HIGH for read-on
 Generate these findings at LOW confidence when the relevant protocol is present — second-order injection in network protocols requires knowledge of the backend processing pipeline.
 
 ## RULES:
-- CONFIDENCE FLOOR: A finding without observed evidence in the provided data must be rated LOW confidence regardless of how likely the vulnerability is. MEDIUM confidence requires that the attack surface was directly observed. HIGH confidence requires that both the attack surface and a vulnerability indicator were observed.
 - Only include findings for non-web ports
 - EXACT product name from banner must match CVE affected product
 - Router/IoT embedded Samba is NOT exploitable with server exploits
 - Each CVE from vulners/vulscan output is a SEPARATE entry
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   /// External-target network service analysis prompt.
   /// Fire condition: external target AND non-web, non-CDN service ports are directly accessible.
@@ -740,16 +654,13 @@ These service categories are high-value when exposed externally:
 - Note the service, version, and what an attacker could do with access
 
 ## RULES:
-- CONFIDENCE FLOOR: A finding without observed evidence in the provided data must be rated LOW confidence regardless of how likely the vulnerability is. MEDIUM confidence requires that the attack surface was directly observed. HIGH confidence requires that both the attack surface and a vulnerability indicator were observed.
 - EXACT product name from banner must match CVE affected product
 - Each exposed service port gets at minimum: an "Externally Exposed Service" finding noting it should not be internet-accessible, plus any applicable CVE or default credential findings
 - Severity for externally exposed databases/RDP/VNC: CRITICAL regardless of authentication state
 - Do NOT generate web application findings (SQLi, XSS, etc.) — those are handled by the web app prompt
 - Do NOT generate findings for ports 80, 443, 8080, 8443 (web ports)
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   /// CVE / version-matching analysis prompt. Fires for all scans.
   ///
@@ -815,15 +726,12 @@ Only generate speculative findings if:
 - MEDIUM or HIGH confidence requires actual observed evidence, not theoretical reasoning
 
 ## RULES:
-- CONFIDENCE FLOOR: A finding without observed evidence in the provided data must be rated LOW confidence regardless of how likely the vulnerability is. MEDIUM confidence requires that the attack surface was directly observed. HIGH confidence requires that both the attack surface and a vulnerability indicator were observed.
 - Never assume product from port number alone
 - Unknown/generic banners: LOW confidence on CVEs, MEDIUM on generic attack classes
 - Each CVE is a separate entry
 - Do NOT generate DoS findings against third-party infrastructure the client does not control
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
   }
 
   /// SSL/TLS focused analysis prompt — only fired for external targets with web ports.
@@ -859,14 +767,11 @@ $deviceJson
 - Only flag if the key size is STRICTLY LESS THAN the thresholds above
 
 ## RULES:
-- CONFIDENCE FLOOR: A finding without observed evidence in the provided data must be rated LOW confidence regardless of how likely the vulnerability is. MEDIUM confidence requires that the attack surface was directly observed. HIGH confidence requires that both the attack surface and a vulnerability indicator were observed.
 - Only include findings backed by evidence in the device data (cipher lists, version strings, script output)
 - Each issue is a SEPARATE entry
 - Description MUST include the specific cipher/protocol/key size observed
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   /// DNS & OSINT intelligence analysis prompt (Phase 3.1).
   /// Fire condition: external target AND dns_findings / domain_information present.
@@ -925,7 +830,6 @@ Identify SaaS platforms from TXT verification records:
 - Single NS provider → note as single point of failure for DNS hijacking
 
 ## RULES:
-- CONFIDENCE FLOOR: A finding without observed evidence in the provided data must be rated LOW confidence regardless of how likely the vulnerability is. MEDIUM confidence requires that the attack surface was directly observed. HIGH confidence requires that both the attack surface and a vulnerability indicator were observed.
 - Only generate findings backed by data present in dns_findings, domain_information, or other_findings
 - Do NOT generate findings about services not mentioned in the DNS data
 - CMS identification from CNAME is HIGH value — always generate this finding if CNAME evidence exists
@@ -933,9 +837,7 @@ Identify SaaS platforms from TXT verification records:
 - Informational/context findings (CMS identification, SaaS exposure, email record summary) use vulnerabilityType: "Info Disclosure"
 - Subdomain takeover and origin IP findings use vulnerabilityType: "Config Weakness"
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   /// Email security posture prompt (Phase 3.2).
   /// Fire condition: external target AND MX records present.
@@ -986,15 +888,12 @@ Given the organization's visible infrastructure, identify the highest-value phis
 - SMTP servers directly accessible → MEDIUM (depends on what relay/enumeration reveals)
 
 ## RULES:
-- CONFIDENCE FLOOR: A finding without observed evidence in the provided data must be rated LOW confidence regardless of how likely the vulnerability is. MEDIUM confidence requires that the attack surface was directly observed. HIGH confidence requires that both the attack surface and a vulnerability indicator were observed.
 - Only generate findings where MX or email-related DNS data is present
 - Each distinct email security issue is a SEPARATE finding
 - vulnerabilityType for spoofing findings: "Config Weakness"
 - vulnerabilityType for gateway findings: "Info Disclosure"
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   /// Web Cache Poisoning prompt.
   /// Fire condition: web ports present AND cache layer indicators detected
@@ -1103,9 +1002,7 @@ Severity: MEDIUM — can serve content intended for one path at another path's c
 - Do NOT generate DoS findings against CDN infrastructure the client does not control
 - Severity escalates to CRITICAL when a cached XSS payload would affect all users visiting the poisoned URL
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   /// DOM / JavaScript client-side attack surface analysis prompt.
   /// Fire condition: web ports present AND SPA framework or JS-heavy application
@@ -1218,10 +1115,7 @@ Evidence: SPA framework; URL parameters merged into application configuration ob
 - Do NOT generate for traditional server-rendered pages with no JavaScript framework indicators
 - Each vulnerability class is a SEPARATE finding
 - Credentials: only generate CRITICAL findings when a real secret key pattern or format is plausible given the technology stack — do NOT generate speculatively for all apps
-
-\${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   /// Cloud & hosting infrastructure prompt (Phase 3.3).
   /// Fire condition: external target AND cloud/managed hosting detected from CNAME or HTTP headers.
@@ -1294,7 +1188,6 @@ When function-as-a-service platform indicators are present (function URL pattern
 Evidence to look for: serverless platform domains in CNAME or response headers, function URL patterns, API Gateway indicators (execute-api.amazonaws.com, gateway.azure.com), serverless framework response headers.
 
 ## RULES:
-- CONFIDENCE FLOOR: A finding without observed evidence in the provided data must be rated LOW confidence regardless of how likely the vulnerability is. MEDIUM confidence requires that the attack surface was directly observed. HIGH confidence requires that both the attack surface and a vulnerability indicator were observed.
 - Only generate findings relevant to the detected hosting platform
 - Do NOT generate generic web app findings (covered by the web app prompt)
 - vulnerabilityType for origin bypass: "Info Disclosure" or "Config Weakness"
@@ -1302,254 +1195,116 @@ Evidence to look for: serverless platform domains in CNAME or response headers, 
 - Severity for confirmed dangling CNAME (takeover possible): HIGH
 - Severity for origin IP exposure: MEDIUM
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
   }
 
   // ---------------------------------------------------------------------------
-  // Phase 13.2 — adAnalysisPrompt() split into three focused prompts
+  // AD analysis — merged comprehensive prompt (was three separate prompts)
   // ---------------------------------------------------------------------------
 
-  /// AD Split A — Initial access and credential material collection.
-  /// Covers: LDAP null bind, password spraying, AS-REP Roasting, Kerberoasting, GPP.
-  /// Fire condition: same as the original adAnalysisPrompt() — internal AD indicators detected.
-  static String adReconCredentialPrompt(String deviceJson, {TargetScope scope = TargetScope.internal}) {
+  /// Comprehensive AD analysis — credential collection, privilege escalation, and lateral movement.
+  /// Fire condition: AD indicators detected (ports 88, 389, 636, 445 with domain context).
+  static String adComprehensivePrompt(String deviceJson, {TargetScope scope = TargetScope.internal, bool hasCrossForest = false}) {
     final isExternal = scope == TargetScope.external;
     final externalNote = isExternal ? '''
 
-## INTERNET-EXPOSED ACTIVE DIRECTORY — SEVERITY ESCALATION:
-Active Directory services are accessible from the public internet. This is an abnormal and critical exposure. Escalate ALL findings by one severity level compared to equivalent internal findings:
-- Password spraying against internet-facing LDAP/Kerberos: CRITICAL (no network access required for the attacker)
-- AS-REP Roasting against internet-facing KDC: CRITICAL
-- Kerberoasting over internet-facing Kerberos: CRITICAL
+## INTERNET-EXPOSED AD — SEVERITY ESCALATION:
+AD services on public internet. Escalate ALL findings by one severity level:
+- Password spraying/AS-REP Roasting/Kerberoasting over internet-facing Kerberos: CRITICAL
 - LDAP null bind on internet-facing DC: HIGH to CRITICAL''' : '';
+    final crossForestBlock = hasCrossForest ? '''
+
+### Cross-Forest Trust Abuse
+Attacker objective: move from compromised forest into trusted forest.
+- **SID History Injection:** If SID filtering disabled on trust, forge cross-realm TGT with privileged SID from target forest in sIDHistory. Evidence: inter-forest trust, SID filtering status. Severity: CRITICAL.
+- **Trust Ticket Forging:** With both forests' trust keys (via DCSync), forge inter-realm TGT for persistent cross-forest access. Severity: CRITICAL.
+- **Cross-forest constrained delegation:** msDS-AllowedToDelegateTo targeting services in trusted forest enables impersonation across boundary. Severity: HIGH.
+- **Foreign Security Principals (FSPs):** Accounts from trusted forest in privileged groups (CN=ForeignSecurityPrincipals) — compromise source account to gain target forest privileges. Severity: HIGH.
+- **Selective Authentication Bypass:** Misconfigured computer objects granting "Allowed to Authenticate" to Domain Users effectively disables selective auth. Severity: HIGH.
+''' : '';
     return '''
-You are an expert Active Directory penetration tester. Analyze the device data below and identify initial access and credential collection attack paths — the first phase of any Active Directory compromise.
+You are an expert Active Directory penetration tester. Analyze the device data below and identify the full AD attack chain: initial access, credential collection, privilege escalation to Domain Admin, and lateral movement.
 
 ## DEVICE DATA:
 $deviceJson$externalNote
 
-## MANDATORY FIRST STEP: PASSWORD POLICY PRE-ASSESSMENT
-Before generating any credential testing findings, assess the domain password policy. Skipping this step in a real engagement can result in locking out every domain user — document the policy as a standalone finding and use it to constrain all spray guidance.
+---
+## PHASE A: INITIAL ACCESS & CREDENTIAL COLLECTION
 
-### Domain Password Policy Enumeration (MANDATORY)
-Attacker objective: determine the lockout threshold, observation window, and lockout duration before attempting any credential testing — this is a prerequisite for safe credential attacks, not optional.
-Evidence to look for: LDAP port accessible (policy is often readable without authentication via the domain's Default Naming Context attributes); any policy data visible in recon output; SMB port accessible (net accounts equivalent data).
-Generate this finding ALWAYS when a domain environment is confirmed:
-- **No lockout policy:** Unlimited brute force is viable against any domain account — CRITICAL finding on its own. Severity: CRITICAL.
-- **Lockout threshold ≥ 10:** Password spraying is low-risk; multiple passwords can be tested per observation window. Severity: HIGH (the permissive policy enables attacks).
-- **Lockout threshold 5–9:** Standard spray cadence applies — one password per observation window with a safety margin. Severity: HIGH.
-- **Lockout threshold ≤ 4:** Spray cadence must be very conservative — one attempt per account per observation window, spaced across days. Severity: HIGH (low threshold does not eliminate the attack, only slows it).
-- **Fine-grained password policies (PSO):** Service accounts and privileged accounts may have stricter per-group policies applied via Password Settings Objects — these override the default domain policy for those accounts. PSO-protected accounts may have different thresholds than standard users.
-Safe spray cadence rule: test one password per account per observation window, then wait the full window duration before the next attempt. Never test more passwords per account than (lockout_threshold - 1) within any observation window.
-Severity for the policy finding: CRITICAL if no lockout; HIGH if lockout ≥ 5 (policy is permissive enough for spraying); MEDIUM if lockout ≤ 4 (policy reduces but does not eliminate risk).
+### Password Policy Enumeration (MANDATORY FIRST)
+Determine lockout threshold, observation window, and duration before any credential testing.
+- No lockout: CRITICAL (unlimited brute force). Threshold ≥ 10: HIGH. Threshold 5–9: HIGH. Threshold ≤ 4: HIGH (conservative cadence).
+- Note Fine-grained PSOs that may override default policy for service/privileged accounts.
+- Safe spray rule: one password per account per observation window, never more than (threshold - 1) attempts per window.
 
-## ANALYSIS AREAS:
+### LDAP Null Bind
+Enumerate domain objects without credentials via LDAP (389) / LDAPS (636). Default on many DCs. Severity: HIGH.
 
-### LDAP Null Bind and Unauthenticated Enumeration
-Attacker objective: enumerate domain objects — usernames, groups, password policy, organizational structure — without any credentials.
-Evidence to look for: LDAP (389) or LDAPS (636) port accessible; any indication of null bind success or BaseDN disclosure in recon output; any LDAP response data.
-Generate this finding when: LDAP port is present — null bind access is the default on many domain controllers and is always worth testing.
-Impact: Usernames, group memberships, and password policy recovered without credentials directly enable password spraying and targeted phishing.
-Severity: HIGH.
-
-### Password Spraying Viability
-Attacker objective: obtain a valid domain credential pair by trying one password across all accounts without triggering lockout — informed by the password policy assessment above.
-Evidence to look for: password policy data (lockout threshold, observation window) from the pre-assessment step; enumerated usernames; account naming convention indicators. Always note the policy-constrained safe cadence in this finding.
-Common enterprise password patterns to include in spray wordlist rationale: seasonal patterns (Spring2024!, Winter2024!), company name variants (Company123!, CompanyPass1), keyboard walks (Qwerty123!), product/project names with year and symbol.
-Generate this finding when: domain environment confirmed — password spraying viability should always be assessed, with the safe cadence explicitly documented.
-Severity: MEDIUM for the attack path — success yields initial domain access and enables all subsequent privilege escalation. Escalate to HIGH if no lockout policy exists.
+### Password Spraying
+One password across all accounts without triggering lockout. Common patterns: seasonal (Spring2024!), company name variants, keyboard walks. Severity: MEDIUM; HIGH if no lockout.
 
 ### AS-REP Roasting
-Attacker objective: obtain offline-crackable Kerberos hashes for accounts that do not require pre-authentication — without any credentials.
-Evidence to look for: any indication of accounts with pre-authentication disabled (userAccountControl DONT_REQ_PREAUTH flag); LDAP accessible (null bind may reveal account attributes); recon output referencing pre-auth status.
-Generate this finding when: LDAP is accessible or any account attributes are visible in recon — accounts with pre-auth disabled are common in legacy environments.
-Severity: HIGH — offline crackable without any credentials.
+Offline-crackable hashes for accounts without pre-authentication — no credentials needed. Severity: HIGH.
 
 ### Kerberoasting
-Attacker objective: obtain offline-crackable service ticket hashes using any valid domain account.
-Evidence to look for: any Service Principal Names (SPNs) visible in recon data (e.g., "MSSQLSvc/host:port", "HTTP/webserver"); LDAP accessible (SPNs are readable by any authenticated user); service account names with application-specific patterns.
-Generate this finding when: any SPN values are visible in recon, or LDAP is accessible — SPNs are present in virtually every AD environment.
-Severity: MEDIUM to HIGH depending on service account password complexity.
+Offline-crackable service ticket hashes using any valid domain account. Evidence: SPNs visible or LDAP accessible. Severity: MEDIUM-HIGH.
 
-### Group Policy Preferences Credential Exposure (GPP)
-Attacker objective: recover cleartext credentials from Group Policy Preference XML files in SYSVOL — readable by every domain user.
-Evidence to look for: domain environment confirmed; any SYSVOL access or reference to Group Policy files in recon; cpassword attributes in XML data. SYSVOL is readable by all authenticated users by design.
-Generate this finding when: domain environment is confirmed — GPP credential exposure is a reliable finding in any domain and always warrants explicit testing.
-Severity: CRITICAL if passwords are recovered; HIGH as a testing recommendation in any confirmed domain environment.
+### GPP Credential Exposure
+Cleartext credentials in Group Policy Preference XML files in SYSVOL — readable by all domain users. Severity: CRITICAL if recovered; HIGH as testing recommendation.
 
-## RULES:
-- CONFIDENCE FLOOR: A finding without observed evidence must be rated LOW confidence. MEDIUM requires that the AD port or service was directly observed. HIGH requires a specific attribute or enumeration result.
-- Generate SEPARATE findings for each attack path with supporting evidence
-- attackVector: ADJACENT for internal targets; NETWORK for internet-facing DC (adjust based on scope context above)
-- Do NOT generate web, CVE, or non-AD network service findings here
+---
+## PHASE B: PRIVILEGE ESCALATION (initial access → Domain Admin)
 
-${_outputFormatBlock()}
+### ADCS Certificate Misconfigurations (ESC1–ESC8)
+Exploit misconfigured certificate templates or CA settings for Domain Admin authentication via PKINIT.
+- ESC1: enrollee specifies SAN → DA certificate. EDITF_ATTRIBUTESUBJECTALTNAME2 flag: equivalent for all templates.
+- Web enrollment with NTLM auth (/certsrv): relay to CA yields certificate for any account.
+- Overly permissive enrollment: Authenticated Users / Domain Users can enroll for high-privilege certs.
+Severity: CRITICAL. Generate for any confirmed CA presence.
 
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
-  }
+### ACL / DACL Abuse
+Excessive permissions on AD objects: GenericAll (reset password), GenericWrite (add SPNs/modify logon script), WriteDACL (grant GenericAll), ForceChangePassword, GenericAll on computer (configure RBCD). Severity: MEDIUM-CRITICAL.
 
-  /// AD Split B — Privilege escalation once initial access exists.
-  /// Covers: ADCS misconfigs (ESC1–ESC8), ACL/DACL abuse, Kerberos delegation, Shadow Credentials, LAPS, DCSync.
-  /// Fire condition: same as the original adAnalysisPrompt().
-  static String adPrivilegeEscalationPrompt(String deviceJson) => '''
-You are an expert Active Directory penetration tester. Analyze the device data below and identify privilege escalation attack paths — how an attacker with initial domain access reaches Domain Admin.
+### Kerberos Delegation
+- Unconstrained (TrustedForDelegation): authenticating users leave TGT. Severity: CRITICAL.
+- Constrained with protocol transition: impersonate any user to specified services. Severity: HIGH-CRITICAL.
+- RBCD: write access to computer object → configure impersonation. Severity: HIGH.
 
-## DEVICE DATA:
-$deviceJson
-
-## ANALYSIS AREAS:
-
-### ADCS Certificate Template Misconfigurations (ESC1–ESC8)
-Attacker objective: obtain a certificate usable for Domain Admin authentication by exploiting misconfigured certificate templates or CA-level settings.
-Evidence to look for: Certificate Authority present (web enrollment path at /certsrv, IIS with Certificate Services, certsrv indicators, AD CS role); any certificate template that allows low-privilege enrollment with high-privilege certificate use.
-Generate findings for:
-- ESC1: enrollee can specify SAN — any authenticated user can obtain a Domain Admin certificate
-- CA flag EDITF_ATTRIBUTESUBJECTALTNAME2: all templates accept user-specified SANs at CA level — equivalent to ESC1 for every template
-- Web enrollment accepting NTLM authentication (/certsrv with Windows Auth): NTLM relay to CA enrollment yields a certificate for any account
-- Overly permissive enrollment rights: Authenticated Users or Domain Users can enroll for high-privilege certificates
-Severity: CRITICAL — ADCS misconfigurations are a direct path to Domain Admin via PKINIT. Generate for any confirmed CA presence.
-
-### ACL / DACL Privilege Escalation Paths
-Attacker objective: exploit excessive permissions on AD objects to reset passwords, add SPNs, configure delegation, or take ownership of high-value accounts.
-Evidence to look for: any LDAP ACL data; BloodHound-style output; references to GenericAll, GenericWrite, WriteDACL, ForceChangePassword, WriteOwner on user or computer objects; service accounts in privileged groups (Backup Operators, Account Operators, Server Operators).
-High-value permission impacts:
-- GenericAll on user: reset password without knowing current one
-- GenericWrite on user: add SPNs (enables Kerberoasting) or modify logon script
-- WriteDACL on any object: grant yourself GenericAll (two-step escalation)
-- ForceChangePassword: remotely change a user's password
-- GenericAll on computer: configure RBCD impersonation
-Severity: MEDIUM to CRITICAL depending on the target object.
-Generate when: LDAP enumeration data, ACL output, or BloodHound data is present.
-
-### Kerberos Delegation Attacks
-Attacker objective: impersonate any domain user — including Domain Admins — to any service, without their password.
-Evidence to look for: any LDAP data referencing TrustedForDelegation, msDS-AllowedToDelegateTo, or msDS-AllowedToActOnBehalfOfOtherIdentity attributes; service accounts with delegation configured.
-Three delegation attack variants — generate separate findings for each when evidence supports:
-- Unconstrained delegation (TrustedForDelegation flag): any user who authenticates to this host/service leaves their TGT — compromise yields impersonation of all users including Domain Admins
-- Constrained delegation with protocol transition (TrustedToAuthForDelegation + msDS-AllowedToDelegateTo): impersonate any user to specified services without their interaction
-- RBCD (msDS-AllowedToActOnBehalfOfOtherIdentity writable): write access to a computer object's attribute allows configuring impersonation — achievable with only GenericWrite on the computer
-Severity: HIGH to CRITICAL depending on which accounts and services are delegatable.
-
-### Shadow Credentials (Key Credential Link Abuse)
-Attacker objective: authenticate as any user or computer by adding an attacker-controlled RSA key to their msDS-KeyCredentialLink attribute, then using PKINIT Kerberos to obtain their TGT — without knowing their password.
-Evidence to look for: Windows Server 2016+ environment; Azure AD Connect synchronization; any account with write access to user or computer objects (see ACL abuse); msDS-KeyCredentialLink references in LDAP data.
-Severity: HIGH — yields full authentication as target account without credential knowledge or user interaction.
-Generate when: modern AD environment confirmed and write access to object attributes is indicated.
+### Shadow Credentials
+Add attacker RSA key to msDS-KeyCredentialLink → PKINIT auth as target without password. Requires Server 2016+. Severity: HIGH.
 
 ### LAPS Credential Exposure
-Attacker objective: read unique local administrator passwords stored in AD computer object attributes.
-Evidence to look for: ms-Mcs-AdmPwd or ms-Mcs-AdmPwdExpirationTime attributes in LDAP output; LAPS deployment indicators; computer objects with LAPS attributes visible.
-Severity: CRITICAL if passwords are readable (direct local admin access to every LAPS-managed computer); INFORMATIONAL if deployed and protected (LAPS limits Pass-the-Hash lateral movement scope — note this positive finding).
-Generate when: LAPS attributes are visible in any recon output, or LAPS deployment is indicated.
+Read local admin passwords from ms-Mcs-AdmPwd attribute. Severity: CRITICAL if readable.
 
-### DCSync Attack Path
-Attacker objective: simulate a Domain Controller replication request and extract all domain password hashes — including the krbtgt hash, enabling Golden Ticket attacks for indefinite domain persistence.
-Evidence to look for: any account other than Domain Controllers with Replicating Directory Changes + Replicating Directory Changes All permissions; BloodHound output mentioning replication rights; any privilege escalation path that could yield these permissions.
-Severity: CRITICAL — full domain hash extraction and permanent persistence.
-Generate when: Domain Controller is identified; note DCSync as the end-goal of all privilege escalation paths.
+### DCSync
+Simulate DC replication to extract all domain hashes including krbtgt (Golden Ticket). Evidence: non-DC accounts with Replicating Directory Changes + All permissions. Severity: CRITICAL.
 
-## RULES:
-- CONFIDENCE FLOOR: A finding without observed evidence must be rated LOW confidence. MEDIUM requires an AD port or service observed. HIGH requires a specific attribute or permission indicator.
-- Generate SEPARATE findings for each attack path
-- ADCS findings should be generated at HIGH confidence whenever a CA is present — misconfigured templates are the norm, not the exception
-- attackVector: ADJACENT (requires LAN access)
-- Do NOT generate findings for external targets
-- Do NOT generate web, CVE, or credential-collection findings here (covered by adReconCredentialPrompt)
+---
+## PHASE C: LATERAL MOVEMENT & NETWORK ATTACKS
 
-${_outputFormatBlock()}
+### SMB Relay / LLMNR-NBNS Poisoning
+Poison name resolution → capture NTLM auth → relay to hosts without SMB signing → code execution. Severity: CRITICAL if SMB signing disabled.
 
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+### Pass-the-Hash / Pass-the-Ticket
+Use captured NTLM hashes or Kerberos tickets directly for authentication. Severity: HIGH; CRITICAL for DA hashes.
 
-  /// AD Split C — Network-level attacks and lateral movement.
-  /// Covers: SMB relay/LLMNR poisoning, Pass-the-Hash/Pass-the-Ticket, Netlogon bypass, Print Spooler, WinRM lateral movement.
-  /// Fire condition: same as the original adAnalysisPrompt().
-  static String adLateralMovementPrompt(String deviceJson, {bool hasCrossForest = false}) {
-    final crossForestBlock = hasCrossForest ? '''
+### Netlogon Authentication Bypass
+Cryptographic flaw in Netlogon handshake → unauthenticated domain takeover. Evidence: DC identified, SMB/RPC accessible. Severity: CRITICAL.
 
-### Cross-Forest Trust Abuse
-Attacker objective: leverage inter-forest trust relationships to move from a compromised forest into a trusted forest, obtaining privileges in the target forest without knowing any credentials there.
+### Print Spooler Exploitation
+Escalate to SYSTEM on any Windows host; on DC → domain takeover via forced auth coercion. Severity: HIGH on members; CRITICAL on DCs.
 
-**SID History Injection:**
-When a user migrates between domains or forests, their old SID can be stored in the `sIDHistory` attribute of their new account. If SID filtering (also called SID quarantining) is disabled on the trust, a Kerberos ticket that includes a privileged SID from a trusted forest in the sIDHistory field is accepted by the trusting forest's Domain Controllers — granting the attacker the privileges of the included SID.
-Attack path: obtain Domain Admin in Forest A → extract trust keys (DCSync or from NTDS.dit) → forge a cross-realm TGT including a high-privilege SID from Forest B in sIDHistory → access Forest B resources with those privileges.
-Evidence: inter-forest trust present in domain enumeration output; trust object attributes showing SID filtering status (`netdom trust /domain: /queryinfo` output or LDAP trust objects); keywords: `trust`, `forest`, `enterprise admins`, `cross-forest`.
-Severity: CRITICAL — yields full access to the trusted forest if SID filtering is disabled.
-
-**Trust Ticket Forging (Golden Ticket equivalent across forest trust):**
-When both forest root Domain Controllers' trust keys are known, an attacker can forge an inter-realm TGT (the ticket exchanged when authenticating across a forest trust). This provides persistent access to the trusted forest independent of any user account.
-Evidence: Domain Controller compromise in either forest; trust account credentials or trust keys extracted via DCSync.
-Severity: CRITICAL — persistent forest-wide access.
-
-**msDS-AllowedToDelegateTo Across Forest Trusts:**
-Service accounts with constrained delegation configured to services in a trusted forest receive Kerberos service tickets for users who authenticate to them — these tickets include the TGT if unconstrained delegation is configured. If a trusted forest service is in the delegation list, the attacker can impersonate any user against that cross-forest service.
-Evidence: `msDS-AllowedToDelegateTo` attribute set on any service account; cross-forest trust present; delegation targets in a different forest.
-Severity: HIGH — enables impersonation of privileged users across forest boundary.
-
-**Foreign Security Principals (FSPs) in Privileged Groups:**
-When accounts from a trusted forest are members of privileged groups in the current forest, they are represented as Foreign Security Principal objects (`CN=ForeignSecurityPrincipals`). Compromising the account in the source forest yields the privileges of the FSP group membership in the target forest.
-Attack path: enumerate FSP container → identify FSPs with privileged group memberships (Domain Admins, Enterprise Admins, Tier 0 groups) → compromise the corresponding account in the source forest.
-Evidence: populated `CN=ForeignSecurityPrincipals` container in AD enumeration output; cross-forest trust configured.
-Severity: HIGH — privileges in one forest transfer to the other.
-
-**Selective Authentication Bypass:**
-Forest trusts can be configured with selective authentication, meaning only users explicitly granted the "Allowed to Authenticate" right on specific computer objects can authenticate across the trust. Misconfigured computer objects — particularly those where "Authenticated Users" or "Domain Users" has the right — effectively disable the restriction for those hosts.
-Evidence: selective authentication flag on forest trust object; cross-forest trust present; `msDS-AllowedToAuthenticateTo` or `Allowed to Authenticate` object rights visible.
-Severity: HIGH when privileged hosts have overly broad authentication permissions.
-''' : '';
-    return '''
-You are an expert Active Directory penetration tester. Analyze the device data below and identify network-level attack paths and lateral movement techniques — how an attacker moves from any position on the network to domain compromise.
-
-## DEVICE DATA:
-$deviceJson
-
-## ANALYSIS AREAS:
-
-### SMB Relay and LLMNR/NBNS Poisoning
-Attacker objective: capture NTLM authentication attempts by poisoning name resolution and relay them to SMB hosts — yielding code execution without any prior credentials.
-Evidence to look for: SMB signing disabled or not required (critical condition — check smb2-security-mode nmap output); Windows hosts present on the network; LLMNR/NBNS likely active (Windows default configuration).
-Attack chain: attacker poisons a name resolution request → Windows host sends NTLM authentication attempt → attacker relays to any host where SMB signing is not required → code execution as the authenticating account.
-Severity: CRITICAL if SMB signing is disabled on domain-joined hosts — this is a direct lateral movement path requiring zero credentials.
-Generate when: SMB port present and Windows hosts confirmed; SMB signing disabled state compounds to CRITICAL.
-
-### Pass-the-Hash and Pass-the-Ticket
-Attacker objective: use captured NTLM hashes or Kerberos tickets directly for authentication without cracking — lateral movement to any host where the same account is valid.
-Evidence to look for: any NTLM hash obtained or obtainable (from Responder, LDAP extraction, or local SAM); Windows hosts on the network; common local admin password usage across hosts; Kerberos ticket cache accessible.
-Severity: HIGH — hash reuse is a primary lateral movement method; CRITICAL if the hash belongs to a domain admin account.
-Generate when: Windows hosts are present and NTLM authentication is in use (standard Windows default).
-
-### Netlogon Authentication Bypass Class
-Attacker objective: bypass domain controller authentication entirely via a cryptographic flaw in the Netlogon handshake — yielding unauthenticated domain-level access.
-Evidence to look for: Domain Controller identified (Kerberos port 88 accessible, hostname pattern indicating DC role such as "dc", "dc01", "pdc", OS indicating Windows Server); Netlogon service reachable via SMB port 445 or RPC port 135; absence of patch indicators.
-Severity: CRITICAL — unauthenticated domain takeover. Generate as a testing recommendation for any confirmed DC.
-Generate when: Domain controller is identified and SMB/RPC ports are accessible.
-
-### Windows Print Spooler Privilege Escalation Class
-Attacker objective: exploit the Print Spooler service to escalate to SYSTEM on any Windows host or achieve domain-level code execution when targeting a Domain Controller.
-Evidence to look for: Windows hosts present (port 445, Windows OS indicators); domain environment confirmed; Print Spooler service not explicitly disabled (runs by default on virtually all Windows versions).
-Severity: HIGH on workstations and member servers (local SYSTEM escalation); CRITICAL on Domain Controllers (domain takeover via forced authentication coercion or direct execution).
-Generate when: Windows domain environment confirmed.
-
-### WinRM and WMI Lateral Movement
-Attacker objective: use obtained credentials to execute commands on other Windows hosts via WinRM (PowerShell Remoting) or WMI — native Windows management capabilities that are difficult to detect.
-Evidence to look for: WinRM ports (5985 HTTP, 5986 HTTPS) open on any Windows host; port 135 (RPC) on Windows hosts with domain environment; any credential obtained or discoverable.
-WinRM: with any valid credential (domain account or local admin), yields an interactive PowerShell session equivalent to direct console access.
-WMI over DCOM: with port 135 and a valid credential, allows command execution — a method natively trusted by Windows security tooling.
-Generate when: WinRM ports detected alongside Windows/domain indicators; note WinRM as a priority lateral movement target when credentials are discovered.
-Severity: HIGH; CRITICAL if accessible from external network.
+### WinRM / WMI Lateral Movement
+WinRM (5985/5986): interactive PowerShell with valid credential. WMI over DCOM (135): command execution trusted by security tooling. Severity: HIGH; CRITICAL if externally accessible.
 $crossForestBlock
 ## RULES:
-- CONFIDENCE FLOOR: A finding without observed evidence must be rated LOW confidence. MEDIUM requires that the relevant port or service was directly observed. HIGH requires the port plus a specific indicator (SMB signing status, DC role, etc.).
-- Generate SEPARATE findings for each attack path with supporting evidence
-- SMB relay/LLMNR findings should be CRITICAL when SMB signing is disabled — this is the most impactful network-level finding in an AD environment
-- attackVector: ADJACENT (requires LAN segment access)
-- Do NOT generate findings for external targets
-- Do NOT generate credential-collection or privilege-escalation findings here (covered by other AD prompts)
+- CONFIDENCE FLOOR: LOW without observed evidence; MEDIUM requires AD port/service observed; HIGH requires specific attribute/indicator
+- Generate SEPARATE findings for each attack path
+- ADCS findings: HIGH confidence when CA is present
+- attackVector: ADJACENT for internal; NETWORK for internet-facing DC
+- Do NOT generate web, CVE, or non-AD findings
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
   }
 
   /// Phase 26: BloodHound-style AD attack path reasoning prompt.
@@ -1596,9 +1351,7 @@ For each chain, note whether the steps generate observable Event Log entries (47
 - Generate one entry per distinct attack chain
 - If no viable chain can be constructed from the observed findings, return an empty array []
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
   }
 
   /// Container, Kubernetes, and CI/CD DevOps infrastructure analysis prompt.
@@ -1643,16 +1396,13 @@ $deviceJson
 **Severity:** HIGH — unauthenticated registry access exposes proprietary images and potentially embedded credentials.
 
 ## RULES:
-- CONFIDENCE FLOOR: A finding without observed evidence in the provided data must be rated LOW confidence regardless of how likely the vulnerability is. MEDIUM confidence requires that the attack surface was directly observed. HIGH confidence requires that both the attack surface and a vulnerability indicator were observed.
 - Only generate findings for ports and services present in the device data
 - Severity CRITICAL for: unauthenticated container API, unauthenticated K8s API, etcd without auth
 - Severity HIGH for: CI/CD with default credentials, unauthenticated service mesh, exposed registry
 - attackVector for all findings: NETWORK (these are remotely accessible management interfaces)
 - Include specific test commands in descriptions — what would confirm the misconfiguration
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   /// IoT and embedded device security analysis prompt.
   /// Fires when IoT device indicators are detected in device data.
@@ -1696,7 +1446,6 @@ $deviceJson
 **Severity:** Depends on identified vulnerabilities — report as HIGH if critical unpatched vulnerabilities are known for the identified version.
 
 ## RULES:
-- CONFIDENCE FLOOR: A finding without observed evidence in the provided data must be rated LOW confidence regardless of how likely the vulnerability is. MEDIUM confidence requires that the attack surface was directly observed. HIGH confidence requires that both the attack surface and a vulnerability indicator were observed.
 - Focus on the device family and what attack patterns apply to it — embedded devices have well-known vulnerability patterns specific to their category
 - Default credentials are almost always worth generating a finding for — the question is whether the device is identifiable
 - Severity CRITICAL for: command execution, unauthenticated full device management access
@@ -1704,9 +1453,7 @@ $deviceJson
 - attackVector for all findings: NETWORK for remotely accessible ports; ADJACENT for protocols that require LAN access
 - Do NOT generate findings for attack surfaces that have no evidence in the recon data
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   /// OT/SCADA/ICS protocol detection and exposure reporting prompt.
   /// Fires when industrial control system protocol ports are detected.
@@ -1783,7 +1530,6 @@ For every detected OT protocol, operations are classified as either safe-to-obse
 **Severity:** INFORMATIONAL — this is a scope and safety notice, not an exploitable finding.
 
 ## RULES:
-- CONFIDENCE FLOOR: A finding without observed evidence in the provided data must be rated LOW confidence regardless of how likely the vulnerability is. MEDIUM confidence requires that the attack surface was directly observed. HIGH confidence requires that both the attack surface and a vulnerability indicator were observed.
 - The primary purpose is to IDENTIFY and DOCUMENT exposure — the exposure of OT protocol ports to network-accessible segments is the finding, regardless of whether exploitation occurred
 - ALWAYS include the safety advisory finding when any OT protocol is detected
 - Do NOT recommend write, control, or command operations for control system protocols — only passive read operations are acceptable without explicit ICS authorization
@@ -1791,9 +1537,7 @@ For every detected OT protocol, operations are classified as either safe-to-obse
 - attackVector for OT protocol findings: NETWORK (if reachable from the scanned network segment) or ADJACENT (if local network access required)
 - Severity: CRITICAL for protocols that directly control physical processes (Modbus, DNP3, S7, EtherNet/IP, IEC 104); HIGH for management and monitoring protocols (BACnet, OPC-UA)
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
   }
 
   /// Returns only the relevant section of [exploitKnowledgeBase] for the given
@@ -1934,6 +1678,22 @@ ${_toolUsageSection()}''';
     sections.add(_toolUsageSection());
     return sections.join('\n\n');
   }
+
+  // ---------------------------------------------------------------------------
+  // Shared system prompt for all analysis calls (Phase 1.1 token optimization)
+  // ---------------------------------------------------------------------------
+
+  /// Combined system prompt containing output format, evidence rules, and
+  /// confidence/CVE/dedup rules. Sent once as the system message for all
+  /// analysis prompts, eliminating ~4.7KB of duplication per prompt (×55).
+  static String analysisSystemPrompt() => '''You are an elite penetration tester and cybersecurity expert with deep expertise in vulnerability assessment, exploitation techniques, CVE analysis, network/web/infrastructure security, and MITRE ATT&CK.
+
+${_outputFormatBlock()}
+
+## CONFIDENCE FLOOR:
+A finding without observed evidence in the provided data must be rated LOW confidence regardless of how likely the vulnerability is. MEDIUM confidence requires that the attack surface was directly observed. HIGH confidence requires that both the attack surface and a vulnerability indicator were observed.
+
+Respond ONLY with a valid JSON array. No markdown, no explanations.''';
 
   // ---------------------------------------------------------------------------
   // Private helpers
@@ -2206,9 +1966,7 @@ Severity: CRITICAL — router-level access yields full network visibility and la
 - Do NOT generate management protocol findings for web applications or services that happen to listen on numbered ports — only generate when the protocol itself is the management interface
 - Do NOT generate RADIUS findings unless port 1812, 1813, or a radius service name is explicitly present — RADIUS is not inferable from other web or network service indicators
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   // ---------------------------------------------------------------------------
   // Phase 14.7 — External Subdomain Enumeration Analysis
@@ -2271,9 +2029,7 @@ Severity: INFORMATIONAL — enumerate as attack surface context.
 - Do NOT generate internal network or AD findings here
 - Each finding category is a SEPARATE entry
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   // ---------------------------------------------------------------------------
   // Phase 14.4 — Secrets and Credential Exposure Analysis
@@ -2350,9 +2106,7 @@ Severity: HIGH for credential-containing artifacts; MEDIUM for path/structure di
 - privilegesRequired: NONE (these are unauthenticated access paths)
 - Do NOT duplicate SSRF findings from the web core prompt — this prompt covers direct file/path disclosure only
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   // ---------------------------------------------------------------------------
   // Phase 14.1 — Privilege Escalation Analysis
@@ -2453,9 +2207,7 @@ Severity: HIGH — stored credentials provide lateral movement and privilege esc
 - Do NOT generate escalation findings for network appliances, IoT devices, or OT/ICS targets — the attack surface is device-specific and covered by separate prompts
 - Focus on findings that are reliably testable once shell access is obtained
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   /// Comprehensive knowledge base for exploitation techniques.
   /// Included in the main testing prompt to guide the LLM.
@@ -2959,9 +2711,7 @@ If `/wp-signup.php`, `/wp-activate.php`, or network admin paths are present:
 - Do not duplicate findings that belong to the generic web prompts (SQLi, CORS, JWT, etc.)
 - Each finding is a separate JSON entry
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   /// Jenkins and CI/CD platform attack surface analysis.
   /// Fire when _hasJenkinsIndicators() returns true.
@@ -3023,9 +2773,7 @@ Identify the Jenkins version from response headers, the login page (`/login` HTM
 - Confidence: HIGH requires observed Jenkins header/path + accessible endpoint; MEDIUM requires Jenkins confirmed but endpoint not probed; LOW for inferred surface
 - Severity escalates one level when Jenkins is internet-accessible (external scope)
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   /// Atlassian Confluence and Jira attack surface analysis.
   /// Fire when _hasAtlassianIndicators() returns true.
@@ -3091,9 +2839,7 @@ Both Confluence and Jira have had authentication filter bypass vulnerability cla
 - Severity escalates one level when the instance is internet-accessible (external scope)
 - Generate separate entries for Confluence and Jira findings when both are present
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   /// Microsoft Exchange / OWA attack surface analysis.
   /// Fire when _hasExchangeIndicators() returns true.
@@ -3162,9 +2908,7 @@ Authenticated Exchange administrators can execute PowerShell cmdlets via the Exc
 - All severity levels escalate one level when Exchange is directly internet-accessible
 - Do not duplicate generic web findings (XSS, SQLi) — focus on Exchange-specific classes
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   /// Elasticsearch / Kibana attack surface analysis.
   /// Fire when _hasElasticsearchIndicators() returns true.
@@ -3229,9 +2973,7 @@ When X-Pack is present but appears misconfigured:
 - Confidence: HIGH when `/_cat/indices` or `/_cluster/health` responds without authentication; MEDIUM when port is confirmed but endpoint not yet probed
 - Document specific index names observed in recon data as evidence where present
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   /// VMware vCenter / ESXi attack surface analysis.
   /// Fire when _hasVmwareIndicators() returns true.
@@ -3300,9 +3042,7 @@ Authenticated vCenter access allows:
 - All findings escalate one severity level when management interfaces are internet-accessible
 - Generate separate findings for vCenter and ESXi when both are present
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   /// GitLab attack surface analysis.
   /// Fire when _hasGitLabIndicators() returns true.
@@ -3371,9 +3111,7 @@ Repository content itself is a high-value target for credential harvesting:
 - Severity escalates one level when GitLab is internet-accessible
 - Keep CI/CD secret and repository secret findings as separate entries
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   /// Citrix ADC / NetScaler attack surface analysis.
   /// Fire when _hasCitrixIndicators() returns true.
@@ -3440,9 +3178,7 @@ Once authenticated to the Citrix Gateway:
 - Path traversal class: MEDIUM confidence if version is unconfirmed; HIGH if version falls in a known-vulnerable era
 - Severity escalates one level for internet-accessible instances (external scope)
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   /// Drupal attack surface analysis.
   /// Fire when _hasDrupalIndicators() returns true.
@@ -3515,9 +3251,7 @@ Identify installed modules from path enumeration (module CSS/JS paths like `/mod
 - Drupalgeddon class: MEDIUM confidence if version is unconfirmed; HIGH if version is in a known-vulnerable era and endpoint is accessible
 - Do not duplicate generic web findings (XSS, CORS, JWT) — focus on Drupal-specific surfaces
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   /// Apache Tomcat attack surface analysis.
   /// Fire when _hasApacheTomcatIndicators() returns true.
@@ -3579,9 +3313,7 @@ Tomcat's HTTP and AJP connectors process serialized Java objects in session data
 - Manager/AJP findings at MEDIUM confidence when endpoint existence is unconfirmed; HIGH when endpoint responds (even with 401/403/error)
 - Do not duplicate generic web application findings (SQLi, XSS, etc.) — those are covered by the web prompts
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   // ---------------------------------------------------------------------------
   // Report narrative prompts (Phase 23)
@@ -3860,9 +3592,7 @@ Severity: HIGH — persistence mechanism that survives standard incident respons
 - Do NOT duplicate generic AD findings — focus exclusively on certificate infrastructure attack paths
 - CONFIDENCE: HIGH if CA paths or ADCS service directly observed; MEDIUM if AD indicators present but ADCS not explicitly confirmed; LOW if purely inferred
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   /// LLMNR/NBT-NS/IPv6 poisoning and NTLM relay attack surface analysis.
   /// Fire condition: internal target AND hasAd.
@@ -3928,9 +3658,7 @@ Severity: HIGH — provides reliable coercion trigger; combined with LDAP relay 
 - Do NOT duplicate generic AD credential or privilege escalation findings — focus on the network protocol layer
 - CONFIDENCE: MEDIUM is appropriate for poisoning findings when a Windows domain environment is confirmed but specific protocol data is absent from recon (these attacks succeed in virtually all unpatched Windows environments); HIGH if specific protocol indicators are present
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   /// WPAD poisoning attack surface.
   /// Fire condition: internal target AND AD indicators present.
@@ -3960,9 +3688,7 @@ $deviceJson
 - CONFIDENCE: MEDIUM when Windows domain environment is confirmed but WPAD DNS record absence is not verified; HIGH if DNS query confirms no WPAD record exists
 - Do NOT duplicate LLMNR/NBT-NS poisoning findings already covered in the coercion prompt
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   /// AD-Integrated DNS (ADIDNS) poisoning attack surface.
   /// Fire condition: internal target AND AD indicators (DNS port 53 + LDAP port 389).
@@ -3993,9 +3719,7 @@ $deviceJson
 - CONFIDENCE: MEDIUM when domain environment is confirmed but LDAP write access to DNS zone has not been verified; HIGH if LDAP is accessible and domain user credentials are in hand
 - Do NOT duplicate generic LDAP attack findings from the AD recon/credential prompt
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   /// MSSQL server attack chain analysis.
   /// Fire condition: internal target AND port 1433/1434 or SQL Server in technologies/service name.
@@ -4057,9 +3781,7 @@ Severity: HIGH — credential material for other services.
 - CONFIDENCE: HIGH if SQL Server port and version confirmed; MEDIUM if SQL Server identified by service name or technology without port confirmation
 - Severity of OS execution findings depends on the service account context — assess based on any service account information visible in recon data
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   /// WAF/CDN bypass analysis for externally-protected targets.
   /// Fire condition: external target AND CDN/WAF indicators detected.
@@ -4132,9 +3854,7 @@ Evidence: CDN-fronted target; any DNS, SPF, or certificate data in recon. Severi
 - CONFIDENCE: HIGH if WAF product identified and bypass technique is known effective against that product; MEDIUM for generic bypass techniques applicable to all WAFs
 - The origin IP discovery finding is always CRITICAL if origin IP is evidenced — direct bypass
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   /// DNS zone transfer and certificate transparency OSINT for external targets.
   /// Expands the existing DNS OSINT coverage with AXFR/IXFR zone transfer testing
@@ -4181,9 +3901,7 @@ Severity: CRITICAL when the dangling endpoint is a cloud provider resource that 
 - Subdomain takeover: generate CRITICAL finding for each confirmed dangling CNAME where the target resource is claimable
 - CONFIDENCE: HIGH for confirmed zone transfer response; MEDIUM for confirmed dangling CNAME; LOW for CT log subdomains that require further validation
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   /// Phase 36.3: Generic exploit chain reasoning prompt.
   /// Fires after all vulnerability testing loops complete when ≥2 findings are confirmed.
@@ -4227,9 +3945,7 @@ What can an attacker achieve by combining these findings that they could not ach
 - evidence_quote: an exact substring from one of the component findings' statusReason or evidence
 - Generate one entry per distinct chain; if no viable chain exists, return []
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
   }
 
   // ---------------------------------------------------------------------------
@@ -4286,9 +4002,7 @@ For each finding, set:
 - severity: CRITICAL for credential/hash access, HIGH for config/key access, MEDIUM for recon data
 - evidence: describe specifically what should be found and why it is accessible at the current privilege level
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array of findings. No markdown, no explanations.''';
+''';
 
   /// Fires after shell access is confirmed on a Windows target.
   static String postExploitWindowsPillagingPrompt(String deviceJson, String shellEvidence) => '''
@@ -4335,9 +4049,7 @@ $deviceJson
 
 For each finding, set vulnerabilityType to one of the Post-Exploitation sub-types and appropriate severity.
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   /// Fires when cloud credentials/metadata access is confirmed.
   static String postExploitCloudPillagingPrompt(String deviceJson, String accessEvidence) => '''
@@ -4379,9 +4091,7 @@ $deviceJson
 
 For each finding, set vulnerabilityType to one of the Post-Exploitation sub-types and appropriate severity.
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   /// Fires when database access is confirmed (any DB type).
   static String postExploitDatabasePillagingPrompt(String deviceJson, String dbType, String accessEvidence) => '''
@@ -4422,9 +4132,7 @@ $deviceJson
 
 For each finding, set vulnerabilityType to one of the Post-Exploitation sub-types and appropriate severity.
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   /// Generates a short, reproducible numbered list of steps to reproduce a confirmed finding.
   static String reproductionStepsPrompt(String vulnProblem, String vulnDescription, String confirmingCommand, String commandOutput) => '''
@@ -4980,9 +4688,7 @@ Severity: HIGH
 - CONFIDENCE FLOOR: findings without direct registry/manifest evidence must be LOW confidence
 - attackVector: NETWORK for registry access; LOCAL for dependency confusion (affects developer machines)
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   // ---------------------------------------------------------------------------
   // Phase 9 — Thick Client and Binary Protocol Prompt
@@ -5040,9 +4746,7 @@ Severity: CRITICAL — AMF deserialization has a long history of critical vulner
 - attackVector: NETWORK for all findings
 - Each attack class is a SEPARATE finding
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   // ---------------------------------------------------------------------------
   // Phase 8 — Wireless Assessment Prompt
@@ -5099,9 +4803,7 @@ Severity: HIGH — full AP configuration access; enables rogue SSID creation, tr
 - Include OPSEC notes for attacks that are noisy or require proximity
 - attackVector: ADJACENT for all wireless findings (requires physical proximity)
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   // ---------------------------------------------------------------------------
   // Phase 7 — Network Infrastructure Attack Prompt
@@ -5151,9 +4853,7 @@ Severity: CRITICAL — network-wide traffic redirection
 - attackVector: ADJACENT for all findings (requires LAN access)
 - Each attack class is a SEPARATE finding
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   // ---------------------------------------------------------------------------
   // Phase 5 — Post-Exploitation: Lateral Movement, Persistence, Domain Dominance
@@ -5204,9 +4904,7 @@ $deviceJson
 - attackVector: ADJACENT (requires network access from the compromised host)
 - privilegesRequired: LOW (assumes initial shell access)
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   static String persistencePrompt(String deviceJson, String accessType) => '''
 You are an expert penetration tester documenting persistence mechanisms. Based on the confirmed access type, identify where persistence COULD be established — document as findings showing persistence capability without implementing backdoors.
@@ -5250,9 +4948,7 @@ OPSEC notes: GPO changes logged in DC event log; AdminSDHolder changes detectabl
 - attackVector: LOCAL (requires existing shell access)
 - Include OPSEC notes in the description for each technique
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   static String domainDominancePrompt(String deviceJson) => '''
 You are an expert Active Directory penetration tester. Domain Admin access has been confirmed. Identify post-Domain-Admin actions that demonstrate the full scope of compromise and establish persistence.
@@ -5304,9 +5000,7 @@ Severity: CRITICAL for all DC persistence mechanisms
 - attackVector: NETWORK (domain admin can execute these remotely)
 - privilegesRequired: HIGH (requires Domain Admin)
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   // ---------------------------------------------------------------------------
   // Phase 3 — Cloud Scope Distinction Prompts
@@ -5353,9 +5047,7 @@ Severity: HIGH
 - CONFIDENCE FLOOR: findings without direct cloud evidence must be LOW confidence
 - attackVector: NETWORK for all findings
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   static String cloudInfrastructureMisconfigPrompt(String deviceJson) => '''
 You are an expert cloud infrastructure security assessor. Analyze the device data below and identify cloud infrastructure misconfigurations beyond storage — serverless functions, Kubernetes RBAC, security groups, and metadata endpoint exposure.
@@ -5403,9 +5095,7 @@ Severity: HIGH to CRITICAL depending on role permissions
 - CONFIDENCE FLOOR: findings without direct cloud evidence must be LOW confidence
 - attackVector: NETWORK for all findings
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 
   // ---------------------------------------------------------------------------
   // Phase 2 — Business Logic Deep-Dive Prompt
@@ -5477,7 +5167,5 @@ Most business logic findings will be MEDIUM confidence from recon — the attack
 - Each attack class is a SEPARATE entry
 - Do NOT generate findings for features that have no evidence in the recon data
 
-${_outputFormatBlock()}
-
-Respond ONLY with a valid JSON array. No markdown, no explanations.''';
+''';
 }

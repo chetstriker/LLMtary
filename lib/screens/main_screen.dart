@@ -383,33 +383,82 @@ class _MainScreenState extends State<MainScreen> {
       }
 
       int analyzed = 0;
-      for (final target in targetsToAnalyze) {
-        appState.addDebugLog('Starting vulnerability analysis for ${target.address}...');
-        appState.setExecutionStatus('Analyzing ${target.address}...');
-        setState(() => _analyzingAddresses.add(target.address));
-        try {
-          final deviceJson = await File(target.jsonFilePath).readAsString();
+      // Phase A.1: Run up to 3 targets in parallel; process in batches.
+      // Phase 6.1: Accumulate network context across batches for cross-target knowledge.
+      // Context from completed batches feeds into subsequent batches (sequential order
+      // within a batch uses the context available at batch start).
+      const int analysisParallelism = 3;
+      String sharedNetworkContext = '';
 
-          final analyzer = VulnerabilityAnalyzer(
-            onPromptResponse: (prompt, response) {
-              appState.addPromptLog(prompt, response);
-            },
-            onTokensUsed: (sent, received) {
-              appState.recordTokenUsage('analyze', sent, received, targetId: target.id ?? 0);
-            },
-          );
-          final vulns = await analyzer.analyzeDevice(
-            deviceJson,
-            appState.llmSettings,
-            confirmedFindingsContext: appState.confirmedFindingsPromptBlock(target.address),
-            onPhaseChange: (phase) => appState.setExecutionStatus(phase),
-            scopeList: appState.currentProject?.scopeList ?? [],
-            exclusionList: appState.currentProject?.exclusionList ?? [],
-          );
+      for (int batchStart = 0; batchStart < targetsToAnalyze.length; batchStart += analysisParallelism) {
+        final batch = targetsToAnalyze.skip(batchStart).take(analysisParallelism).toList();
 
-          appState.addDebugLog('Found ${vulns.length} vulnerabilities for ${target.address}');
+        // A.2: Mark all batch targets as analyzing before firing futures
+        for (final t in batch) {
+          if (mounted) setState(() => _analyzingAddresses.add(t.address));
+        }
+
+        // Snapshot context at batch start — all targets in this batch share it.
+        // Updated context from this batch feeds into the next batch.
+        final batchNetworkContext = sharedNetworkContext;
+
+        // Run all targets in this batch concurrently
+        final batchResults = await Future.wait(
+          batch.map((target) async {
+            // A.2: Prefix status messages with target address for clarity in parallel runs
+            appState.addDebugLog('[${target.address}] Starting vulnerability analysis...');
+            appState.setExecutionStatus('[${target.address}] Analyzing...');
+            try {
+              final deviceJson = await File(target.jsonFilePath).readAsString();
+
+              final analyzer = VulnerabilityAnalyzer(
+                onPromptResponse: (prompt, response) {
+                  appState.addPromptLog(prompt, response);
+                },
+                onTokensUsed: (sent, received) {
+                  appState.recordTokenUsage('analyze', sent, received, targetId: target.id ?? 0);
+                },
+              );
+              final vulns = await analyzer.analyzeDevice(
+                deviceJson,
+                appState.llmSettings,
+                confirmedFindingsContext: appState.confirmedFindingsPromptBlock(target.address),
+                networkContext: batchNetworkContext.isNotEmpty ? batchNetworkContext : null,
+                onPhaseChange: (phase) => appState.setExecutionStatus('[${target.address}] $phase'),
+                scopeList: appState.currentProject?.scopeList ?? [],
+                exclusionList: appState.currentProject?.exclusionList ?? [],
+              );
+
+              appState.addDebugLog('[${target.address}] Found ${vulns.length} vulnerabilities');
+              return (target: target, vulns: vulns, error: null as Object?);
+            } on ScopeViolationException catch (e) {
+              appState.addDebugLog('[${target.address}] Scope violation: $e — skipping');
+              return (target: target, vulns: <Vulnerability>[], error: e as Object?);
+            } catch (e) {
+              appState.addDebugLog('[${target.address}] Analysis error (skipping): $e');
+              return (target: target, vulns: <Vulnerability>[], error: e as Object?);
+            }
+          }),
+        );
+
+        // Process results sequentially (DB writes, state updates) after all futures complete
+        for (final result in batchResults) {
+          final target = result.target;
+          final vulns = result.vulns;
+          final error = result.error;
+
+          if (mounted) setState(() => _analyzingAddresses.remove(target.address));
+
+          if (error != null) {
+            final msg = error is ScopeViolationException
+                ? '[${target.address}] Out of scope: $error'
+                : '[${target.address}] Analysis error (skipped): $error';
+            if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+            continue;
+          }
+
           if (vulns.isEmpty) {
-            appState.addDebugLog('Analysis complete for ${target.address}: 0 findings generated');
+            appState.addDebugLog('[${target.address}] Analysis complete: 0 findings');
             target.noFindings = true;
           } else {
             target.noFindings = false;
@@ -419,34 +468,27 @@ class _MainScreenState extends State<MainScreen> {
             v.targetId = target.id;
             v.projectId = appState.currentProject?.id;
             await DatabaseHelper.insertVulnerability(v);
-            appState.addDebugLog('Added: ${v.problem}');
           }
 
-          // Mark this target's analysis as complete
           target.analysisComplete = true;
           await DatabaseHelper.updateTarget(target);
-
-          appState.loadVulnerabilities();
-          if (mounted) setState(() { _analyzingAddresses.remove(target.address); });
           analyzed++;
-        } on ScopeViolationException catch (e) {
-          setState(() => _analyzingAddresses.remove(target.address));
-          appState.addDebugLog('[${target.address}] Scope violation: $e — skipping');
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('[${target.address}] Out of scope: $e')),
-            );
-          }
-        } catch (e) {
-          setState(() => _analyzingAddresses.remove(target.address));
-          // Log and continue to next target — one failure must not stop the rest
-          appState.addDebugLog('[${target.address}] Analysis error (skipping): $e');
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('[${target.address}] Analysis error (skipped): $e')),
-            );
+
+          // Phase 6.1: Accumulate network context from this target's findings
+          final targetDeviceJson = await File(target.jsonFilePath).readAsString();
+          final targetNetContext = VulnerabilityAnalyzer.extractNetworkContext(vulns, targetDeviceJson);
+          if (targetNetContext.isNotEmpty) {
+            sharedNetworkContext = sharedNetworkContext.isEmpty
+                ? targetNetContext
+                : '$sharedNetworkContext\n$targetNetContext';
+            if (sharedNetworkContext.length > 3000) {
+              sharedNetworkContext = sharedNetworkContext.substring(0, 3000);
+            }
           }
         }
+
+        appState.loadVulnerabilities();
+        if (mounted) setState(() {});
       }
 
       appState.setAnalysisComplete(true);
@@ -520,173 +562,221 @@ class _MainScreenState extends State<MainScreen> {
       appState.addDebugLog('Banner grab preflight error: $e');
     }
 
-    for (var i = 0; i < pendingVulns.length; i++) {
-      final vuln = pendingVulns[i];
-      final vulnIdx = appState.vulnerabilities.indexWhere((v) => v.id == vuln.id);
-      if (vulnIdx == -1) {
-        appState.addDebugLog('ERROR - Could not find vulnerability with id=${vuln.id}');
-        continue;
+    // Phase B.1: Group pending vulnerabilities by target address.
+    // Each target's vulns will be run sequentially (to avoid port/auth contention
+    // on the same host). Different targets run in parallel (up to 3 at a time).
+    final vulnsByTarget = <String, List<Vulnerability>>{};
+    for (final vuln in pendingVulns) {
+      vulnsByTarget.putIfAbsent(vuln.targetAddress, () => []).add(vuln);
+    }
+    final targetAddresses = vulnsByTarget.keys.toList();
+
+    // Phase B.2: Process batches of up to 3 targets in parallel.
+    const int executionParallelism = 3;
+
+    for (int batchStart = 0; batchStart < targetAddresses.length; batchStart += executionParallelism) {
+      final batchAddrs = targetAddresses.skip(batchStart).take(executionParallelism).toList();
+
+      // B.3: Mark all batch targets as executing before starting futures
+      for (final addr in batchAddrs) {
+        if (mounted) setState(() => _executingAddresses.add(addr));
       }
-      appState.addDebugLog('Processing vulnerability id=${vuln.id} at index=$vulnIdx');
-      setState(() => _executingAddresses.add(vuln.targetAddress));
 
-      try {
+      // B.4: Show which targets are being tested in parallel
+      final batchSummary = batchAddrs.map((a) {
+        final count = vulnsByTarget[a]!.length;
+        return '$a ($count vuln${count == 1 ? '' : 's'})';
+      }).join(', ');
+      appState.setExecutionStatus('Testing ${batchAddrs.length} target(s): $batchSummary');
+      appState.addDebugLog('Phase B: Starting parallel execution — $batchSummary');
 
-      final targetForVulnLookup = appState.targets.firstWhere(
-        (t) => t.address == vuln.targetAddress,
-        orElse: () => appState.selectedTarget ?? appState.targets.first,
-      );
-      final deviceJson = targetForVulnLookup.jsonFilePath.isNotEmpty &&
-              await File(targetForVulnLookup.jsonFilePath).exists()
-          ? await File(targetForVulnLookup.jsonFilePath).readAsString()
-          : '{}';
+      // Run all targets in this batch concurrently; within each target, vulns are sequential
+      await Future.wait(
+        batchAddrs.map((targetAddr) async {
+          final targetVulns = vulnsByTarget[targetAddr]!;
 
-      final vulnOutputDir = StorageService.toShellPath(
-        await StorageService.getTargetPath(
-          appState.currentProjectName, targetForVulnLookup.address));
+          for (final vuln in targetVulns) {
+            // Lookup index each time (stable within the batch — loadVulnerabilities
+            // is only called after the batch completes)
+            final vulnIdx = appState.vulnerabilities.indexWhere((v) => v.id == vuln.id);
+            if (vulnIdx == -1) {
+              appState.addDebugLog('[${vuln.targetAddress}] Cannot find vuln id=${vuln.id} — skipping');
+              continue;
+            }
+            appState.addDebugLog('[${vuln.targetAddress}] Testing: ${vuln.problem}');
 
-      final executor = ExploitExecutor(
-        deviceData: deviceJson,
-        vulnerabilityIndex: vulnIdx,
-        outputDir: vulnOutputDir,
-        onProgress: (msg) => appState.addDebugLog(msg),
-        onCommandExecuted: (cmd, output, idx) async {
-          appState.addDebugLog('Command executed: $cmd');
-          await appState.loadCommandLogs();
-          if (mounted) setState(() {});
-        },
-        onPromptResponse: (prompt, response) {
-          appState.addPromptLog(prompt, response);
-        },
-        onTokensUsed: (sent, received) {
-          final tid = appState.targets
-              .firstWhere((t) => t.address == vuln.targetAddress, orElse: () => appState.selectedTarget ?? appState.targets.first)
-              .id ?? 0;
-          appState.recordTokenUsage('execute', sent, received, targetId: tid);
-        },
-        adminPassword: appState.adminPassword,
-        onApprovalNeeded: (command) async {
-          if (!appState.requireApproval) return 'once';
-          _approvalCompleter = Completer<String?>();
-          appState.setPendingCommand(command);
-          return await _approvalCompleter!.future;
-        },
-        onPasswordNeeded: _onInstallPasswordNeeded,
-        credentialBankContext: appState.credentialBankPromptBlock(vuln.targetAddress),
-        confirmedFindingsContext: appState.confirmedFindingsPromptBlock(vuln.targetAddress),
-        onCredentialsFound: (credMaps) {
-          for (final m in credMaps) {
-            final srcName = m['credentialSource'] ?? 'inferred';
-            final src = CredentialSource.values.firstWhere(
-              (e) => e.name == srcName,
-              orElse: () => CredentialSource.inferred,
-            );
-            appState.addCredential(DiscoveredCredential(
-              service: m['service'] ?? '',
-              host: m['host'] ?? vuln.targetAddress,
-              username: m['username'] ?? '',
-              secret: m['secret'] ?? '',
-              secretType: m['secretType'] ?? 'password',
-              sourceVuln: vuln.problem,
-              discoveredAt: DateTime.now(),
-              credentialSource: src,
-            ));
-          }
-        },
-        onPhaseUpdate: (iter, max, phase) {
-          final title = vuln.problem.length > 30 ? '${vuln.problem.substring(0, 30)}…' : vuln.problem;
-          appState.setExecutionStatus('$title: Iter $iter/$max — $phase');
-        },
-      );
+            try {
+              final targetForVulnLookup = appState.targets.firstWhere(
+                (t) => t.address == vuln.targetAddress,
+                orElse: () => appState.selectedTarget ?? appState.targets.first,
+              );
+              final deviceJson = targetForVulnLookup.jsonFilePath.isNotEmpty &&
+                      await File(targetForVulnLookup.jsonFilePath).exists()
+                  ? await File(targetForVulnLookup.jsonFilePath).readAsString()
+                  : '{}';
 
-      final targetId = appState.targets
-          .firstWhere((t) => t.address == vuln.targetAddress, orElse: () => appState.selectedTarget ?? appState.targets.first)
-          .id ?? 0;
-      final status = await executor.testVulnerability(
-        vuln, appState.llmSettings, appState.requireApproval,
-        projectId: appState.currentProject?.id ?? 0,
-        targetId: targetId,
-      );
-      vuln.status = status;
-      // 2.4: Feed confirmed artifacts into the chain for subsequent vuln tests
-      if (status == VulnerabilityStatus.confirmed) {
-        appState.addConfirmedArtifact(vuln);
-        // 2.7: Post-exploitation enumeration — queue a follow-on pseudo-vuln for RCE/auth bypass
-        final vtype = vuln.vulnerabilityType.toLowerCase();
-        final vproblem = vuln.problem.toLowerCase();
-        final isHighValueAccess = vtype.contains('rce') ||
-            vtype.contains('remote code') ||
-            vtype.contains('auth bypass') ||
-            vtype.contains('default credentials') ||
-            vtype.contains('command injection') ||
-            vproblem.contains('rce') ||
-            vproblem.contains('remote code execution') ||
-            vproblem.contains('command injection') ||
-            vproblem.contains('authentication bypass') ||
-            vproblem.contains('default credential');
-        final postExploitAlreadyQueued = appState.vulnerabilities.any((v) =>
-            v.targetAddress == vuln.targetAddress &&
-            v.problem.startsWith('Post-Exploitation Enumeration'));
-        if (isHighValueAccess && !postExploitAlreadyQueued) {
-          final postExploit = Vulnerability(
-            problem: 'Post-Exploitation Enumeration (via ${vuln.problem})',
-            description:
-                'A confirmed ${vuln.vulnerabilityType} was obtained against this target. '
-                'This pseudo-vulnerability drives post-exploitation enumeration to demonstrate '
-                'the full impact of the access achieved.\n\n'
-                'Objectives:\n'
-                '- Enumerate local users, groups, and privilege context\n'
-                '- Identify network interfaces, routes, and adjacent hosts\n'
-                '- Discover running services and listening ports\n'
-                '- Find readable files containing credentials, keys, or configuration\n'
-                '- Identify paths to privilege escalation if not already at highest privilege\n'
-                '- Document what an attacker could achieve from this foothold',
-            severity: 'CRITICAL',
-            confidence: 'HIGH',
-            evidence: 'Confirmed access via: ${vuln.problem}',
-            recommendation:
-                'Patch the confirmed vulnerability that granted access. Apply principle of least '
-                'privilege to limit what an attacker can enumerate post-compromise.',
-            vulnerabilityType: 'Privilege Escalation',
-            attackVector: vuln.attackVector,
-            attackComplexity: 'LOW',
-            privilegesRequired: 'LOW',
-            userInteraction: 'NONE',
-            scope: 'CHANGED',
-            confidentialityImpact: 'HIGH',
-            integrityImpact: 'HIGH',
-            availabilityImpact: 'HIGH',
-            targetAddress: vuln.targetAddress,
-            targetId: vuln.targetId,
-            projectId: vuln.projectId,
-            status: VulnerabilityStatus.pending,
-            selected: true,
-          );
-          await DatabaseHelper.insertVulnerability(postExploit);
-        }
+              final vulnOutputDir = StorageService.toShellPath(
+                await StorageService.getTargetPath(
+                  appState.currentProjectName, targetForVulnLookup.address));
+
+              final executor = ExploitExecutor(
+                deviceData: deviceJson,
+                vulnerabilityIndex: vulnIdx,
+                outputDir: vulnOutputDir,
+                onProgress: (msg) => appState.addDebugLog(msg),
+                onCommandExecuted: (cmd, output, idx) async {
+                  appState.addDebugLog('[${vuln.targetAddress}] Command: $cmd');
+                  await appState.loadCommandLogs();
+                  if (mounted) setState(() {});
+                },
+                onPromptResponse: (prompt, response) {
+                  appState.addPromptLog(prompt, response);
+                },
+                onTokensUsed: (sent, received) {
+                  final tid = appState.targets
+                      .firstWhere((t) => t.address == vuln.targetAddress,
+                          orElse: () => appState.selectedTarget ?? appState.targets.first)
+                      .id ?? 0;
+                  appState.recordTokenUsage('execute', sent, received, targetId: tid);
+                },
+                adminPassword: appState.adminPassword,
+                onApprovalNeeded: (command) async {
+                  if (!appState.requireApproval) return 'once';
+                  _approvalCompleter = Completer<String?>();
+                  appState.setPendingCommand(command);
+                  return await _approvalCompleter!.future;
+                },
+                onPasswordNeeded: _onInstallPasswordNeeded,
+                credentialBankContext: appState.credentialBankPromptBlock(vuln.targetAddress),
+                confirmedFindingsContext: appState.confirmedFindingsPromptBlock(vuln.targetAddress),
+                onCredentialsFound: (credMaps) {
+                  // B.3: Credentials found on one target are immediately visible
+                  // to subsequent vulns on that target (sequential within target)
+                  for (final m in credMaps) {
+                    final srcName = m['credentialSource'] ?? 'inferred';
+                    final src = CredentialSource.values.firstWhere(
+                      (e) => e.name == srcName,
+                      orElse: () => CredentialSource.inferred,
+                    );
+                    appState.addCredential(DiscoveredCredential(
+                      service: m['service'] ?? '',
+                      host: m['host'] ?? vuln.targetAddress,
+                      username: m['username'] ?? '',
+                      secret: m['secret'] ?? '',
+                      secretType: m['secretType'] ?? 'password',
+                      sourceVuln: vuln.problem,
+                      discoveredAt: DateTime.now(),
+                      credentialSource: src,
+                    ));
+                  }
+                },
+                onPhaseUpdate: (iter, max, phase) {
+                  // B.4: Include target address so parallel progress is distinguishable
+                  final title = vuln.problem.length > 30
+                      ? '${vuln.problem.substring(0, 30)}…'
+                      : vuln.problem;
+                  appState.setExecutionStatus(
+                      '[${vuln.targetAddress}] $title: Iter $iter/$max — $phase');
+                },
+              );
+
+              final targetId = appState.targets
+                  .firstWhere((t) => t.address == vuln.targetAddress,
+                      orElse: () => appState.selectedTarget ?? appState.targets.first)
+                  .id ?? 0;
+              final status = await executor.testVulnerability(
+                vuln, appState.llmSettings, appState.requireApproval,
+                projectId: appState.currentProject?.id ?? 0,
+                targetId: targetId,
+              );
+              vuln.status = status;
+
+              // B.4: Update overall completion count immediately as each vuln finishes
+              appState.addDebugLog(
+                  '[${vuln.targetAddress}] ${vuln.problem}: $status');
+
+              // 2.4: Feed confirmed artifacts into subsequent tests for this target
+              if (status == VulnerabilityStatus.confirmed) {
+                appState.addConfirmedArtifact(vuln);
+                // 2.7: Post-exploitation enumeration for high-value access
+                final vtype = vuln.vulnerabilityType.toLowerCase();
+                final vproblem = vuln.problem.toLowerCase();
+                final isHighValueAccess = vtype.contains('rce') ||
+                    vtype.contains('remote code') ||
+                    vtype.contains('auth bypass') ||
+                    vtype.contains('default credentials') ||
+                    vtype.contains('command injection') ||
+                    vproblem.contains('rce') ||
+                    vproblem.contains('remote code execution') ||
+                    vproblem.contains('command injection') ||
+                    vproblem.contains('authentication bypass') ||
+                    vproblem.contains('default credential');
+                final postExploitAlreadyQueued = appState.vulnerabilities.any((v) =>
+                    v.targetAddress == vuln.targetAddress &&
+                    v.problem.startsWith('Post-Exploitation Enumeration'));
+                if (isHighValueAccess && !postExploitAlreadyQueued) {
+                  final postExploit = Vulnerability(
+                    problem: 'Post-Exploitation Enumeration (via ${vuln.problem})',
+                    description:
+                        'A confirmed ${vuln.vulnerabilityType} was obtained against this target. '
+                        'This pseudo-vulnerability drives post-exploitation enumeration to demonstrate '
+                        'the full impact of the access achieved.\n\n'
+                        'Objectives:\n'
+                        '- Enumerate local users, groups, and privilege context\n'
+                        '- Identify network interfaces, routes, and adjacent hosts\n'
+                        '- Discover running services and listening ports\n'
+                        '- Find readable files containing credentials, keys, or configuration\n'
+                        '- Identify paths to privilege escalation if not already at highest privilege\n'
+                        '- Document what an attacker could achieve from this foothold',
+                    severity: 'CRITICAL',
+                    confidence: 'HIGH',
+                    evidence: 'Confirmed access via: ${vuln.problem}',
+                    recommendation:
+                        'Patch the confirmed vulnerability that granted access. Apply principle of least '
+                        'privilege to limit what an attacker can enumerate post-compromise.',
+                    vulnerabilityType: 'Privilege Escalation',
+                    attackVector: vuln.attackVector,
+                    attackComplexity: 'LOW',
+                    privilegesRequired: 'LOW',
+                    userInteraction: 'NONE',
+                    scope: 'CHANGED',
+                    confidentialityImpact: 'HIGH',
+                    integrityImpact: 'HIGH',
+                    availabilityImpact: 'HIGH',
+                    targetAddress: vuln.targetAddress,
+                    targetId: vuln.targetId,
+                    projectId: vuln.projectId,
+                    status: VulnerabilityStatus.pending,
+                    selected: true,
+                  );
+                  await DatabaseHelper.insertVulnerability(postExploit);
+                }
+              }
+              await DatabaseHelper.updateVulnerability(vuln);
+            } catch (e) {
+              appState.addDebugLog('[${vuln.problem}] Execution error (skipping): $e');
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('[${vuln.targetAddress}] Execution error (skipped): $e')),
+                );
+              }
+            }
+          } // end sequential per-target loop
+        }), // end per-target future
+      ); // end Future.wait batch
+
+      // After the batch completes: reload state, update UI, remove from executing set
+      for (final addr in batchAddrs) {
+        if (mounted) setState(() => _executingAddresses.remove(addr));
       }
-      await DatabaseHelper.updateVulnerability(vuln);
-
       final selectedStates = {for (var v in appState.vulnerabilities) v.id: v.selected};
       await appState.loadVulnerabilities();
       for (var v in appState.vulnerabilities) {
         v.selected = selectedStates[v.id] ?? false;
       }
-
       await appState.loadCommandLogs();
       if (mounted) setState(() {});
-
-      } catch (e) {
-        setState(() => _executingAddresses.remove(vuln.targetAddress));
-        // Log and continue — one failed exploit test must not stop the rest
-        appState.addDebugLog('[${vuln.problem}] Execution error (skipping): $e');
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('[${vuln.targetAddress}] Execution error (skipped): $e')),
-          );
-        }
-      }
-    }
+    } // end batch loop
 
     // Phase 36.3: Post-execution exploit chain reasoning pass
     final confirmedVulns = appState.vulnerabilities
