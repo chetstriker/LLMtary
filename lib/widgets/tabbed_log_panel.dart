@@ -42,7 +42,7 @@ class _TabbedLogPanelState extends State<TabbedLogPanel> with SingleTickerProvid
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: 280,
+      constraints: const BoxConstraints(minWidth: 220, maxWidth: 420),
       color: _card,
       child: Column(
         children: [
@@ -93,7 +93,7 @@ class _CommandLogTabState extends State<_CommandLogTab> {
   Widget build(BuildContext context) {
     return Consumer<AppState>(
       builder: (context, state, _) {
-        final logs = state.commandLogs.reversed.take(50).toList();
+        final logs = state.commandLogs.reversed.take(10).toList();
         return Column(
           children: [
             _exportBar('Export', () => widget.onExport?.call()),
@@ -150,7 +150,7 @@ class _DebugLogTab extends StatelessWidget {
   Widget build(BuildContext context) {
     return Consumer<AppState>(
       builder: (context, state, _) {
-        final logs = state.debugLogs.reversed.take(50).toList();
+        final logs = state.debugLogs.reversed.take(30).toList();
         return Column(
           children: [
             _exportBar('Export', () => onExport?.call(state)),
@@ -184,7 +184,7 @@ class _PromptLogTab extends StatelessWidget {
   Widget build(BuildContext context) {
     return Consumer<AppState>(
       builder: (context, state, _) {
-        final logs = state.promptLogs.reversed.take(50).toList();
+        final logs = state.promptLogs.reversed.take(10).toList();
         return Column(
           children: [
             _exportBar('Export', () => onExport?.call(state)),
@@ -210,13 +210,13 @@ class _PromptLogTab extends StatelessWidget {
                               style: const TextStyle(color: Color(0xFF00F5FF), fontFamily: 'monospace', fontSize: 9, fontWeight: FontWeight.bold),
                             ),
                             const SizedBox(height: 2),
-                            Text(
-                              logs[i].prompt.length > 200 ? '${logs[i].prompt.substring(0, 200)}...' : logs[i].prompt,
+                            SelectableText(
+                              logs[i].prompt,
                               style: const TextStyle(color: Color(0xFF00F5FF), fontFamily: 'monospace', fontSize: 9),
                             ),
                             const Divider(color: Colors.white12, height: 8),
-                            Text(
-                              logs[i].response.length > 200 ? '${logs[i].response.substring(0, 200)}...' : logs[i].response,
+                            SelectableText(
+                              logs[i].response,
                               style: const TextStyle(color: Colors.white54, fontFamily: 'monospace', fontSize: 9),
                             ),
                           ],

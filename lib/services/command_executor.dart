@@ -1120,8 +1120,8 @@ Respond ONLY with valid JSON.''';
       }
     }
 
-    // Check if approval is required
-    if (requireApproval && onApprovalNeeded != null) {
+    // Check approval via callback (callback decides live whether approval is needed)
+    if (onApprovalNeeded != null) {
       final isWhitelisted = await DatabaseHelper.isCommandWhitelisted(command);
       if (!isWhitelisted) {
         final approval = await onApprovalNeeded(command);
@@ -1225,7 +1225,8 @@ Respond ONLY with valid JSON.''';
   static Future<CommandResult> _executeInWsl(String command) async {
     Process? process;
     try {
-      process = await Process.start('wsl', ['bash', '-c', command])
+      process = await Process.start('wsl', ['bash', '-c', command],
+          workingDirectory: Directory.systemTemp.path)
           .timeout(_commandTimeout);
 
       final stdoutBuffer = StringBuffer();
@@ -1263,7 +1264,7 @@ Respond ONLY with valid JSON.''';
           _killProcessTree(process!);
           return;
         }
-        print('[STDOUT] $sanitized');
+        print('${_timestamp()} [STDOUT] $sanitized');
         stdoutBuffer.write(sanitized);
       });
 
@@ -1277,7 +1278,7 @@ Respond ONLY with valid JSON.''';
           _killProcessTree(process!);
           return;
         }
-        print('[STDERR] $sanitized');
+        print('${_timestamp()} [STDERR] $sanitized');
         stderrBuffer.write(sanitized);
       });
 
@@ -1335,7 +1336,7 @@ Respond ONLY with valid JSON.''';
           _killProcessTree(process!);
           return;
         }
-        print('[STDOUT] $sanitized');
+        print('${_timestamp()} [STDOUT] $sanitized');
         stdoutBuffer.write(sanitized);
       });
 
@@ -1349,7 +1350,7 @@ Respond ONLY with valid JSON.''';
           _killProcessTree(process!);
           return;
         }
-        print('[STDERR] $sanitized');
+        print('${_timestamp()} [STDERR] $sanitized');
         stderrBuffer.write(sanitized);
       });
 
@@ -1373,7 +1374,8 @@ Respond ONLY with valid JSON.''';
   static Future<CommandResult> _executeInShell(String command) async {
     Process? process;
     try {
-      process = await Process.start('/bin/bash', ['-c', command]);
+      process = await Process.start('/bin/bash', ['-c', command],
+          workingDirectory: Directory.systemTemp.path);
 
       final stdoutBuffer = StringBuffer();
       final stderrBuffer = StringBuffer();
@@ -1409,7 +1411,7 @@ Respond ONLY with valid JSON.''';
           _killProcessTree(process!);
           return;
         }
-        print('[STDOUT] $sanitized');
+        print('${_timestamp()} [STDOUT] $sanitized');
         stdoutBuffer.write(sanitized);
       });
 
@@ -1423,7 +1425,7 @@ Respond ONLY with valid JSON.''';
           _killProcessTree(process!);
           return;
         }
-        print('[STDERR] $sanitized');
+        print('${_timestamp()} [STDERR] $sanitized');
         stderrBuffer.write(sanitized);
       });
 

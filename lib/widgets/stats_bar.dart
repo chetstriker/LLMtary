@@ -5,7 +5,10 @@ import '../widgets/app_state.dart';
 
 /// Horizontal row of stat cards shown at the top of each tab.
 class StatsBar extends StatelessWidget {
-  const StatsBar({super.key});
+  /// Optional extra card shown as the 4th stat (tab-specific context).
+  final Widget? extraCard;
+
+  const StatsBar({super.key, this.extraCard});
 
   @override
   Widget build(BuildContext context) {
@@ -17,11 +20,15 @@ class StatsBar extends StatelessWidget {
           color: const Color(0xFF0A0C16),
           child: Row(
             children: [
-              Expanded(child: _StatCard(label: 'ACTIVE TARGETS', value: activeTargets, color: const Color(0xFF7C5CFC), icon: Icons.radar)),
+              Expanded(child: StatCard(label: 'ACTIVE TARGETS', value: activeTargets, color: const Color(0xFF7C5CFC), icon: Icons.radar)),
               const SizedBox(width: 12),
-              Expanded(child: _StatCard(label: 'TOKENS SENT', value: state.tokensSentTotal, color: const Color(0xFF5B8DEF), icon: Icons.upload_rounded)),
+              if (extraCard != null) ...[
+                Expanded(child: extraCard!),
+                const SizedBox(width: 12),
+              ],
+              Expanded(child: StatCard(label: 'TOKENS SENT', value: state.tokensSentTotal, color: const Color(0xFF5B8DEF), icon: Icons.upload_rounded)),
               const SizedBox(width: 12),
-              Expanded(child: _StatCard(label: 'TOKENS RECEIVED', value: state.tokensReceivedTotal, color: const Color(0xFF3DFFA0), icon: Icons.download_rounded)),
+              Expanded(child: StatCard(label: 'TOKENS RECEIVED', value: state.tokensReceivedTotal, color: const Color(0xFF3DFFA0), icon: Icons.download_rounded)),
             ],
           ),
         );
@@ -30,13 +37,13 @@ class StatsBar extends StatelessWidget {
   }
 }
 
-class _StatCard extends StatelessWidget {
+class StatCard extends StatelessWidget {
   final String label;
   final int value;
   final Color color;
   final IconData icon;
 
-  const _StatCard({required this.label, required this.value, required this.color, required this.icon});
+  const StatCard({required this.label, required this.value, required this.color, required this.icon});
 
   @override
   Widget build(BuildContext context) {

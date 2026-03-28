@@ -2277,7 +2277,7 @@ Respond ONLY with valid JSON.''';
   static List<String> buildWebProbeCommands(String target, int port, bool isTls, String outDir) {
     final scheme = isTls ? 'https' : 'http';
     final base = '$scheme://$target:$port';
-    final nullDevice = Platform.isWindows ? 'NUL' : '/dev/null';
+    final nullDevice = '/dev/null'; // commands always run in bash (native or WSL)
     return [
       'curl -s -I -L --max-time 10 $base | tee "$outDir/headers_$port.txt"',
       for (final path in [

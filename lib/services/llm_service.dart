@@ -9,6 +9,23 @@ class LLMService {
   bool enableDebugLogging;
 
   LLMService({this.onPromptResponse, this.enableDebugLogging = false});
+
+  /// Returns a `[HH:MM:SS.mmm]` timestamp string for console output.
+  static String _ts() => '[${DateTime.now().toIso8601String().substring(11, 23)}]';
+
+  /// Prints [text] in chunks so Flutter's debug console doesn't truncate it.
+  static void _printLong(String label, String text) {
+    const chunkSize = 800;
+    final ts = _ts();
+    if (text.length <= chunkSize) {
+      print('$ts $label: $text');
+      return;
+    }
+    print('$ts $label (${text.length} chars):');
+    for (var i = 0; i < text.length; i += chunkSize) {
+      print(text.substring(i, i + chunkSize > text.length ? text.length : i + chunkSize));
+    }
+  }
   // System prompt establishing expertise and enabling web search behavior
   static const String _securityExpertSystemPrompt = '''You are an elite penetration tester and cybersecurity expert with deep expertise in:
 - Vulnerability assessment and exploitation techniques
@@ -38,10 +55,10 @@ class LLMService {
     final timeout = Duration(seconds: settings.timeoutSeconds);
     final systemPrompt = useSystemPrompt ? _securityExpertSystemPrompt : null;
 
-    print('\n=== LLM REQUEST ===');
-    print('Provider: ${settings.provider.displayName}');
-    print('Model: ${settings.modelName}');
-    print('Prompt: ${message.substring(0, message.length > 200 ? 200 : message.length)}...');
+    print('${_ts()}\n=== LLM REQUEST ===');
+    print('${_ts()} Provider: ${settings.provider.displayName}');
+    print('${_ts()} Model: ${settings.modelName}');
+    _printLong('Prompt', message);
 
     String response;
     switch (settings.provider) {
@@ -67,9 +84,9 @@ class LLMService {
         throw const ConfigurationException('No AI provider selected');
     }
 
-    print('\n=== LLM RESPONSE ===');
-    print('Response: ${response.substring(0, response.length > 500 ? 500 : response.length)}...');
-    print('==================\n');
+    print('${_ts()}\n=== LLM RESPONSE ===');
+    _printLong('Response', response);
+    print('${_ts()} ==================\n');
 
     onPromptResponse?.call(message, response);
     return response;
@@ -86,10 +103,10 @@ class LLMService {
     String providerName,
   ) async {
     if (enableDebugLogging) {
-      print('DEBUG [$providerName]: POST $url');
-      print('DEBUG [$providerName]: Model: ${body['model'] ?? 'N/A'}');
+      print('${_ts()} DEBUG [$providerName]: POST $url');
+      print('${_ts()} DEBUG [$providerName]: Model: ${body['model'] ?? 'N/A'}');
       if (headers.length > 1) {
-        print('DEBUG [$providerName]: Headers: ${headers.keys.join(", ")}');
+        print('${_ts()} DEBUG [$providerName]: Headers: ${headers.keys.join(", ")}');
       }
     }
 
@@ -100,9 +117,9 @@ class LLMService {
     ).timeout(timeout);
 
     if (enableDebugLogging) {
-      print('DEBUG [$providerName]: Response status: ${response.statusCode}');
+      print('${_ts()} DEBUG [$providerName]: Response status: ${response.statusCode}');
       if (response.statusCode != 200) {
-        print('DEBUG [$providerName]: Response body: ${response.body}');
+        print('${_ts()} DEBUG [$providerName]: Response body: ${response.body}');
       }
     }
 
@@ -387,29 +404,29 @@ class LLMService {
     List<String> Function(Map<String, dynamic> data) extractModels,
   ) async {
     if (enableDebugLogging) {
-      print('DEBUG [$providerName Models]: GET $url');
+      print('${_ts()} DEBUG [$providerName Models]: GET $url');
     }
 
     final response = await http.get(Uri.parse(url), headers: headers);
 
     if (enableDebugLogging) {
-      print('DEBUG [$providerName Models]: Response status: ${response.statusCode}');
+      print('${_ts()} DEBUG [$providerName Models]: Response status: ${response.statusCode}');
     }
 
     if (response.statusCode == 200) {
       final data = json.decode(response.body);
       final models = extractModels(data);
-      print('DEBUG: $providerName returned ${models.length} models');
+      print('${_ts()} DEBUG: $providerName returned ${models.length} models');
       return models;
     }
 
-    print('DEBUG: $providerName API failed');
+    print('${_ts()} DEBUG: $providerName API failed');
     return [];
   }
 
   Future<List<String>> fetchAvailableModels(LLMSettings settings) async {
     try {
-      print('DEBUG: fetchAvailableModels called for ${settings.provider}');
+      print('${_ts()} DEBUG: fetchAvailableModels called for ${settings.provider}');
       switch (settings.provider) {
         case LLMProvider.ollama:
           return _fetchModelList(
@@ -463,7 +480,7 @@ class LLMService {
           return [];
       }
     } catch (e) {
-      print('DEBUG: fetchAvailableModels error: $e');
+      print('${_ts()} DEBUG: fetchAvailableModels error: $e');
       return [];
     }
   }

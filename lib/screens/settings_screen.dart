@@ -627,6 +627,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                   ],
                 ),
+                const SizedBox(height: 20),
+                const Text('CREATE DEBUG LOG', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 12)),
+                const SizedBox(height: 4),
+                const Text('Write all debug output to debug.log in the storage directory. Session only — resets to off on restart.', style: TextStyle(color: Color(0xFF8892B0), fontSize: 11)),
+                const SizedBox(height: 8),
+                Consumer<AppState>(
+                  builder: (context, appState, _) => Row(
+                    children: [
+                      Switch(
+                        value: appState.createDebugLog,
+                        onChanged: (v) => appState.setCreateDebugLog(v),
+                        activeColor: const Color(0xFF00F5FF),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        appState.createDebugLog ? 'Enabled — writing to debug.log' : 'Disabled',
+                        style: TextStyle(
+                          color: appState.createDebugLog ? const Color(0xFF00F5FF) : Colors.white38,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ],
             ),
           ),

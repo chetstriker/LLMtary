@@ -179,6 +179,8 @@ class TargetInputPanelState extends State<TargetInputPanel> {
           _liveTargets.removeWhere((t) => t.address == addr);
           widget.onProgress('[$addr] Pre-sweep: host is down — skipping');
         }
+        // Push pruned list back so the UI removes the dead PENDING entries
+        await widget.onTargetsDiscovered(List.from(_liveTargets));
         if (aliveHosts.isEmpty) {
           setState(() {
             _statusMessage = 'No hosts responded — all ${toScan.length} target(s) appear down';

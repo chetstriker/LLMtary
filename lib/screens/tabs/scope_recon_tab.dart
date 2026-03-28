@@ -125,8 +125,8 @@ class _ScopeReconTabState extends State<ScopeReconTab> {
         return Row(
           children: [
             // Left panel: project name + scope fields (+ GO button when scanning)
-            SizedBox(
-              width: 300,
+            Flexible(
+              flex: 2,
               child: Column(
                 children: [
                   Expanded(
@@ -192,10 +192,25 @@ class _ScopeReconTabState extends State<ScopeReconTab> {
               ),
             ),
             // Center: StatsBar + ReconCenterPanel
-            Expanded(
+            Flexible(
+              flex: 5,
               child: Column(
                 children: [
-                  const StatsBar(),
+                  StatsBar(
+                    extraCard: Consumer<AppState>(
+                      builder: (context, state, _) {
+                        final reconComplete = state.targets
+                            .where((t) => t.status == TargetStatus.complete)
+                            .length;
+                        return StatCard(
+                          label: 'RECON COMPLETE',
+                          value: reconComplete,
+                          color: const Color(0xFF3DFFA0),
+                          icon: Icons.check_circle_outline,
+                        );
+                      },
+                    ),
+                  ),
                   Expanded(
                     child: _ReconCenterPanel(
                       targets: appState.targets,
@@ -210,10 +225,13 @@ class _ScopeReconTabState extends State<ScopeReconTab> {
               ),
             ),
             // Right panel: TabbedLogPanel
-            TabbedLogPanel(
-              onExportLogs: widget.onExportLogs,
-              onExportDebug: widget.onExportDebug,
-              onExportPrompts: widget.onExportPrompts,
+            Flexible(
+              flex: 2,
+              child: TabbedLogPanel(
+                onExportLogs: widget.onExportLogs,
+                onExportDebug: widget.onExportDebug,
+                onExportPrompts: widget.onExportPrompts,
+              ),
             ),
           ],
         );
@@ -491,92 +509,119 @@ class _ReconCenterPanel extends StatelessWidget {
             : null;
 
         return _DottedBackground(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              // Target cards — constrained width, centered
-              Center(
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 560),
-                  child: ListView.builder(
-                    shrinkWrap: true,
-                    physics: const NeverScrollableScrollPhysics(),
-                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-                    itemCount: targets.length,
-                    itemBuilder: (context, i) => _TargetRow(
-                      target: targets[i],
-                      isActive: activeAddresses.contains(targets[i].address),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+            child: Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 1100),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    // Live feed — shown ABOVE the host list
+                    if (lastCommand != null || lastDebug != null)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            if (lastDebug != null) ...[
+                              Text(
+                                _extractPhase(lastDebug),
+                                style: const TextStyle(
+                                    color: _purple,
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.bold,
+                                    letterSpacing: 1.2),
+                              ),
+                              const SizedBox(height: 12),
+                            ],
+                            if (lastCommand != null) ...[
+                              Text('CMD',
+                                  style: TextStyle(
+                                      color: _purple.withValues(alpha: 0.7),
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.bold,
+                                      letterSpacing: 1.2)),
+                              const SizedBox(height: 4),
+                              Text(
+                                lastCommand,
+                                style: const TextStyle(
+                                    color: Colors.white,
+                                    fontFamily: 'monospace',
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600),
+                                maxLines: 3,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
+                            if (lastCommand != null && lastDebug != null)
+                              const SizedBox(height: 12),
+                            if (lastDebug != null) ...[
+                              Text('STATUS',
+                                  style: TextStyle(
+                                      color: _purple.withValues(alpha: 0.7),
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.bold,
+                                      letterSpacing: 1.2)),
+                              const SizedBox(height: 4),
+                              Text(
+                                lastDebug,
+                                style: const TextStyle(
+                                    color: Colors.white70,
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w500),
+                                maxLines: 3,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                    // Target cards — multi-column wrap based on available width
+                    LayoutBuilder(
+                      builder: (context, constraints) {
+                        final availableWidth = constraints.maxWidth;
+                        // Use 2+ columns when there's enough space
+                        final columnCount = availableWidth > 900 ? 3
+                            : availableWidth > 560 ? 2
+                            : 1;
+                        if (columnCount == 1) {
+                          return Column(
+                            children: targets.map((t) => _TargetRow(
+                              target: t,
+                              isActive: activeAddresses.contains(t.address),
+                            )).toList(),
+                          );
+                        }
+                        // Multi-column: distribute targets across columns
+                        final colWidth = (availableWidth - (columnCount - 1) * 12) / columnCount;
+                        final cols = List.generate(columnCount, (_) => <Target>[]);
+                        for (var i = 0; i < targets.length; i++) {
+                          cols[i % columnCount].add(targets[i]);
+                        }
+                        return Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            for (var c = 0; c < columnCount; c++) ...[
+                              if (c > 0) const SizedBox(width: 12),
+                              SizedBox(
+                                width: colWidth,
+                                child: Column(
+                                  children: cols[c].map((t) => _TargetRow(
+                                    target: t,
+                                    isActive: activeAddresses.contains(t.address),
+                                  )).toList(),
+                                ),
+                              ),
+                            ],
+                          ],
+                        );
+                      },
                     ),
-                  ),
+                  ],
                 ),
               ),
-              // Live feed — show whenever logs are available
-              if (lastCommand != null || lastDebug != null)
-                Center(
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 560),
-                    child: Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          if (lastDebug != null) ...[
-                            Text(
-                              _extractPhase(lastDebug),
-                              style: const TextStyle(
-                                  color: _purple,
-                                  fontSize: 15,
-                                  fontWeight: FontWeight.bold,
-                                  letterSpacing: 1.2),
-                            ),
-                            const SizedBox(height: 12),
-                          ],
-                          if (lastCommand != null) ...[
-                            Text('CMD',
-                                style: TextStyle(
-                                    color: _purple.withValues(alpha: 0.7),
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.bold,
-                                    letterSpacing: 1.2)),
-                            const SizedBox(height: 4),
-                            Text(
-                              lastCommand,
-                              style: const TextStyle(
-                                  color: Colors.white,
-                                  fontFamily: 'monospace',
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w600),
-                              maxLines: 3,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ],
-                          if (lastCommand != null && lastDebug != null)
-                            const SizedBox(height: 12),
-                          if (lastDebug != null) ...[
-                            Text('STATUS',
-                                style: TextStyle(
-                                    color: _purple.withValues(alpha: 0.7),
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.bold,
-                                    letterSpacing: 1.2)),
-                            const SizedBox(height: 4),
-                            Text(
-                              lastDebug,
-                              style: const TextStyle(
-                                  color: Colors.white70,
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w500),
-                              maxLines: 3,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ],
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-            ],
+            ),
           ),
         );
       },

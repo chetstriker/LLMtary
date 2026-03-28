@@ -42,18 +42,33 @@ class VulnHuntTab extends StatelessWidget {
         return Row(
           children: [
             // Left: TargetProgressList
-            SizedBox(
-              width: 280,
+            Flexible(
+              flex: 2,
               child: TargetProgressList(
                 targets: activeTargets,
                 activeAddresses: analyzingAddresses,
               ),
             ),
             // Center: StatsBar + VulnerabilityTable with PulsatingButton on ANALYZE
-            Expanded(
+            Flexible(
+              flex: 5,
               child: Column(
                 children: [
-                  const StatsBar(),
+                  StatsBar(
+                    extraCard: Consumer<AppState>(
+                      builder: (context, state, _) {
+                        final vulnComplete = state.targets
+                            .where((t) => t.analysisComplete)
+                            .length;
+                        return StatCard(
+                          label: 'VULN COMP',
+                          value: vulnComplete,
+                          color: const Color(0xFFFFBB33),
+                          icon: Icons.bug_report_outlined,
+                        );
+                      },
+                    ),
+                  ),
                   Expanded(
                     child: _AnalyzeTableWrapper(
                       isAnalyzing: isAnalyzing,
@@ -68,10 +83,13 @@ class VulnHuntTab extends StatelessWidget {
               ),
             ),
             // Right: TabbedLogPanel
-            TabbedLogPanel(
-              onExportLogs: onExportLogs,
-              onExportDebug: onExportDebug,
-              onExportPrompts: onExportPrompts,
+            Flexible(
+              flex: 2,
+              child: TabbedLogPanel(
+                onExportLogs: onExportLogs,
+                onExportDebug: onExportDebug,
+                onExportPrompts: onExportPrompts,
+              ),
             ),
           ],
         );

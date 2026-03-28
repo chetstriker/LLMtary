@@ -41,6 +41,8 @@ class AppState extends ChangeNotifier {
   String? _adminPassword;
   String? _pendingCommand;
   bool _requireApproval = true;
+  bool _createDebugLog = false;
+  IOSink? _debugLogSink;
   bool _hasResults = false;
   List<Target> _targets = [];
   Target? _selectedTarget;
@@ -73,6 +75,7 @@ class AppState extends ChangeNotifier {
   String? get adminPassword => _adminPassword;
   String? get pendingCommand => _pendingCommand;
   bool get requireApproval => _requireApproval;
+  bool get createDebugLog => _createDebugLog;
   bool get hasResults => _hasResults;
   List<Target> get targets => _targets;
   Target? get selectedTarget => _selectedTarget;
@@ -258,6 +261,8 @@ Raise confidence to HIGH for any finding where these credentials directly enable
 
   Future<void> setCurrentProject(Project? project) async {
     await BackgroundProcessManager().stopAll();
+    await _closeDebugLogFile();
+    _createDebugLog = false;
     _currentProject = project;
     _adminPassword = null;
     _targets = [];
@@ -497,6 +502,37 @@ Raise confidence to HIGH for any finding where these credentials directly enable
     notifyListeners();
   }
 
+  Future<void> setCreateDebugLog(bool value) async {
+    _createDebugLog = value;
+    if (value) {
+      await _openDebugLogFile();
+    } else {
+      await _closeDebugLogFile();
+    }
+    notifyListeners();
+  }
+
+  Future<void> _openDebugLogFile() async {
+    await _closeDebugLogFile();
+    try {
+      final basePath = await StorageService.getBasePath();
+      final logFile = File('$basePath/debug.log');
+      _debugLogSink = logFile.openWrite(mode: FileMode.writeOnly);
+      _debugLogSink!.writeln('[${DateTime.now().toIso8601String()}] Debug log started');
+    } catch (e) {
+      print('Failed to open debug log file: $e');
+      _debugLogSink = null;
+    }
+  }
+
+  Future<void> _closeDebugLogFile() async {
+    try {
+      await _debugLogSink?.flush();
+      await _debugLogSink?.close();
+    } catch (_) {}
+    _debugLogSink = null;
+  }
+
   Future<void> initialize() async {
     await loadLLMSettings();
     final approvalSetting = await DatabaseHelper.getSetting(SettingsKeys.requireApproval);
@@ -562,10 +598,14 @@ Raise confidence to HIGH for any finding where these credentials directly enable
   }
 
   void addDebugLog(String message) {
-    print('DEBUG: $message');
+    final ts = '[${DateTime.now().toIso8601String().substring(11, 23)}]';
+    print('$ts DEBUG: $message');
     _debugLogs.add(DebugLog(message, DateTime.now()));
     if (_projectId > 0) {
       DatabaseHelper.insertDebugLog(_projectId, _activeTargetId, message);
+    }
+    if (_createDebugLog && _debugLogSink != null) {
+      try { _debugLogSink!.writeln('$ts $message'); } catch (_) {}
     }
     notifyListeners();
   }
