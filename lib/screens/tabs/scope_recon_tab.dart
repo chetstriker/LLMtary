@@ -156,13 +156,12 @@ class _ScopeReconTabState extends State<ScopeReconTab> {
                     adminPassword: appState.adminPassword,
                     onPasswordNeeded: widget.onEnsurePassword,
                     onInstallPasswordNeeded: widget.onInstallPasswordNeeded,
-                    onApprovalNeeded: appState.requireApproval
-                        ? (command) async {
-                            final completer = widget.onApprovalNeeded();
-                            appState.setPendingCommand(command);
-                            return await completer.future;
-                          }
-                        : null,
+                    onApprovalNeeded: (command) async {
+                        if (!appState.requireApproval) return 'once';
+                        final completer = widget.onApprovalNeeded();
+                        appState.setPendingCommand(command);
+                        return await completer.future;
+                      },
                     onProgress: (msg) {
                       appState.addDebugLog(msg);
                       final match = RegExp(r'^\[([^\]]+)\]').firstMatch(msg);

@@ -93,7 +93,7 @@ class _CommandLogTabState extends State<_CommandLogTab> {
   Widget build(BuildContext context) {
     return Consumer<AppState>(
       builder: (context, state, _) {
-        final logs = state.commandLogs.reversed.take(10).toList();
+        final logs = state.commandLogs.take(10).toList();
         return Column(
           children: [
             _exportBar('Export', () => widget.onExport?.call()),

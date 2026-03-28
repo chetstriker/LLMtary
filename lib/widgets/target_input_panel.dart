@@ -176,10 +176,15 @@ class TargetInputPanelState extends State<TargetInputPanel> {
         }
         final deadHosts = toScan.where((a) => !aliveHosts.contains(a)).toList();
         for (final addr in deadHosts) {
+          final dead = _liveTargets.firstWhere(
+            (t) => t.address == addr,
+            orElse: () => Target(address: addr),
+          );
           _liveTargets.removeWhere((t) => t.address == addr);
+          await widget.onTargetDeleted?.call(dead);
           widget.onProgress('[$addr] Pre-sweep: host is down — skipping');
         }
-        // Push pruned list back so the UI removes the dead PENDING entries
+        // Push pruned list back to sync any remaining state changes
         await widget.onTargetsDiscovered(List.from(_liveTargets));
         if (aliveHosts.isEmpty) {
           setState(() {
