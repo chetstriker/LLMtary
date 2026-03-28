@@ -594,6 +594,16 @@ Raise confidence to HIGH for any finding where these credentials directly enable
     if (_projectId > 0) {
       DatabaseHelper.insertPromptLog(_projectId, _activeTargetId, prompt, response);
     }
+    if (_createDebugLog && _debugLogSink != null) {
+      final ts = '[${DateTime.now().toIso8601String().substring(11, 23)}]';
+      try {
+        _debugLogSink!.writeln('$ts --- PROMPT ---');
+        _debugLogSink!.writeln(prompt);
+        _debugLogSink!.writeln('$ts --- RESPONSE ---');
+        _debugLogSink!.writeln(response);
+        _debugLogSink!.writeln('$ts --- END ---');
+      } catch (_) {}
+    }
     notifyListeners();
   }
 
