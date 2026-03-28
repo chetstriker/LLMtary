@@ -31,7 +31,10 @@ class LLMService {
 - Do NOT suggest curling Google, MITRE, or NVD websites — they return CAPTCHAs or block automated requests
 - Use your training knowledge for CVE details and exploit techniques''';
 
-  Future<String> sendMessage(LLMSettings settings, String message, {bool useSystemPrompt = true}) async {
+  Future<String> sendMessage(LLMSettings settings, String message, {
+    bool useSystemPrompt = true,
+    void Function(int sent, int received)? onTokensUsed,
+  }) async {
     final timeout = Duration(seconds: settings.timeoutSeconds);
     final systemPrompt = useSystemPrompt ? _securityExpertSystemPrompt : null;
 
@@ -43,22 +46,22 @@ class LLMService {
     String response;
     switch (settings.provider) {
       case LLMProvider.ollama:
-        response = await _sendOllama(settings, message, timeout, systemPrompt);
+        response = await _sendOllama(settings, message, timeout, systemPrompt, onTokensUsed: onTokensUsed);
         break;
       case LLMProvider.lmStudio:
-        response = await _sendLMStudio(settings, message, timeout, systemPrompt);
+        response = await _sendLMStudio(settings, message, timeout, systemPrompt, onTokensUsed: onTokensUsed);
         break;
       case LLMProvider.claude:
-        response = await _sendClaude(settings, message, timeout, systemPrompt);
+        response = await _sendClaude(settings, message, timeout, systemPrompt, onTokensUsed: onTokensUsed);
         break;
       case LLMProvider.chatGPT:
-        response = await _sendChatGPT(settings, message, timeout, systemPrompt);
+        response = await _sendChatGPT(settings, message, timeout, systemPrompt, onTokensUsed: onTokensUsed);
         break;
       case LLMProvider.gemini:
-        response = await _sendGemini(settings, message, timeout, systemPrompt);
+        response = await _sendGemini(settings, message, timeout, systemPrompt, onTokensUsed: onTokensUsed);
         break;
       case LLMProvider.openRouter:
-        response = await _sendOpenRouter(settings, message, timeout, systemPrompt);
+        response = await _sendOpenRouter(settings, message, timeout, systemPrompt, onTokensUsed: onTokensUsed);
         break;
       default:
         throw const ConfigurationException('No AI provider selected');
@@ -127,7 +130,7 @@ class LLMService {
 
   // --- Provider implementations ---
 
-  Future<String> _sendOllama(LLMSettings settings, String message, Duration timeout, String? systemPrompt) async {
+  Future<String> _sendOllama(LLMSettings settings, String message, Duration timeout, String? systemPrompt, {void Function(int, int)? onTokensUsed}) async {
     final body = <String, dynamic>{
       'model': settings.modelName,
       'prompt': message,
@@ -149,12 +152,19 @@ class LLMService {
     );
 
     if (response.statusCode == 200) {
-      return json.decode(response.body)['response'] as String? ?? 'No response';
+      final body = json.decode(response.body);
+      final text = body['response'] as String? ?? 'No response';
+      if (onTokensUsed != null) {
+        final sent = body['prompt_eval_count'] as int? ?? message.length ~/ 4;
+        final received = body['eval_count'] as int? ?? text.length ~/ 4;
+        onTokensUsed(sent, received);
+      }
+      return text;
     }
     throw LLMApiException('Ollama', response.statusCode, response.body);
   }
 
-  Future<String> _sendLMStudio(LLMSettings settings, String message, Duration timeout, String? systemPrompt) async {
+  Future<String> _sendLMStudio(LLMSettings settings, String message, Duration timeout, String? systemPrompt, {void Function(int, int)? onTokensUsed}) async {
     final body = <String, dynamic>{
       'model': settings.modelName,
       'messages': _buildChatMessages(message, systemPrompt),
@@ -170,10 +180,20 @@ class LLMService {
     final baseUrl = settings.baseUrl?.replaceAll(RegExp(r'/v1/?$'), '') ?? '';
     final url = '$baseUrl/v1/chat/completions';
     final response = await _sendHttpPost(url, headers, body, timeout, 'LM Studio');
+    if (response.statusCode == 200) {
+      final decoded = json.decode(response.body);
+      final usage = decoded['usage'] as Map<String, dynamic>?;
+      if (onTokensUsed != null && usage != null) {
+        onTokensUsed(
+          usage['prompt_tokens'] as int? ?? message.length ~/ 4,
+          usage['completion_tokens'] as int? ?? 0,
+        );
+      }
+    }
     return _extractChatResponse(response, 'LM Studio');
   }
 
-  Future<String> _sendClaude(LLMSettings settings, String message, Duration timeout, String? systemPrompt) async {
+  Future<String> _sendClaude(LLMSettings settings, String message, Duration timeout, String? systemPrompt, {void Function(int, int)? onTokensUsed}) async {
     final body = <String, dynamic>{
       'model': settings.modelName,
       'max_tokens': settings.maxTokens,
@@ -205,7 +225,15 @@ class LLMService {
     );
 
     if (response.statusCode == 200) {
-      final content = json.decode(response.body)['content'] as List?;
+      final decoded = json.decode(response.body);
+      final usage = decoded['usage'] as Map<String, dynamic>?;
+      if (onTokensUsed != null && usage != null) {
+        onTokensUsed(
+          usage['input_tokens'] as int? ?? message.length ~/ 4,
+          usage['output_tokens'] as int? ?? 0,
+        );
+      }
+      final content = decoded['content'] as List?;
       // Find the text block (skip thinking blocks)
       for (var block in content ?? []) {
         if (block['type'] == 'text') {
@@ -217,7 +245,7 @@ class LLMService {
     throw LLMApiException('Claude', response.statusCode, response.body);
   }
 
-  Future<String> _sendChatGPT(LLMSettings settings, String message, Duration timeout, String? systemPrompt) async {
+  Future<String> _sendChatGPT(LLMSettings settings, String message, Duration timeout, String? systemPrompt, {void Function(int, int)? onTokensUsed}) async {
     final body = <String, dynamic>{
       'model': settings.modelName,
       'messages': _buildChatMessages(message, systemPrompt),
@@ -241,10 +269,20 @@ class LLMService {
       timeout,
       'ChatGPT',
     );
+    if (response.statusCode == 200) {
+      final decoded = json.decode(response.body);
+      final usage = decoded['usage'] as Map<String, dynamic>?;
+      if (onTokensUsed != null && usage != null) {
+        onTokensUsed(
+          usage['prompt_tokens'] as int? ?? message.length ~/ 4,
+          usage['completion_tokens'] as int? ?? 0,
+        );
+      }
+    }
     return _extractChatResponse(response, 'ChatGPT');
   }
 
-  Future<String> _sendGemini(LLMSettings settings, String message, Duration timeout, String? systemPrompt) async {
+  Future<String> _sendGemini(LLMSettings settings, String message, Duration timeout, String? systemPrompt, {void Function(int, int)? onTokensUsed}) async {
     final body = <String, dynamic>{
       'contents': [
         {
@@ -284,6 +322,13 @@ class LLMService {
 
     if (response.statusCode == 200) {
       final responseBody = json.decode(response.body);
+      final meta = responseBody['usageMetadata'] as Map<String, dynamic>?;
+      if (onTokensUsed != null && meta != null) {
+        onTokensUsed(
+          meta['promptTokenCount'] as int? ?? message.length ~/ 4,
+          meta['candidatesTokenCount'] as int? ?? 0,
+        );
+      }
       final candidates = responseBody['candidates'] as List?;
       final parts = candidates?[0]['content']['parts'] as List?;
       return parts?[0]['text'] as String? ?? 'No response';
@@ -291,7 +336,7 @@ class LLMService {
     throw LLMApiException('Gemini', response.statusCode, response.body);
   }
 
-  Future<String> _sendOpenRouter(LLMSettings settings, String message, Duration timeout, String? systemPrompt) async {
+  Future<String> _sendOpenRouter(LLMSettings settings, String message, Duration timeout, String? systemPrompt, {void Function(int, int)? onTokensUsed}) async {
     final body = <String, dynamic>{
       'model': settings.modelName,
       'messages': _buildChatMessages(message, systemPrompt),
@@ -316,7 +361,15 @@ class LLMService {
     );
 
     if (response.statusCode == 200) {
-      final choices = json.decode(response.body)['choices'] as List?;
+      final decoded = json.decode(response.body);
+      final usage = decoded['usage'] as Map<String, dynamic>?;
+      if (onTokensUsed != null && usage != null) {
+        onTokensUsed(
+          usage['prompt_tokens'] as int? ?? message.length ~/ 4,
+          usage['completion_tokens'] as int? ?? 0,
+        );
+      }
+      final choices = decoded['choices'] as List?;
       final content = choices?[0]['message']['content'] as String? ?? '';
       if (content.isEmpty || content == 'No response') {
         throw const LLMApiException('OpenRouter', 200, 'Model returned empty response');

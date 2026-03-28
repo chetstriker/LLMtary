@@ -33,6 +33,7 @@ class CommandLogPanel extends StatefulWidget {
 
 class _CommandLogPanelState extends State<CommandLogPanel> {
   final _focusNode = FocusNode();
+  bool _autoScroll = true;
 
   @override
   void dispose() {
@@ -62,19 +63,27 @@ class _CommandLogPanelState extends State<CommandLogPanel> {
                   borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
                 ),
                 child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    const Row(
-                      children: [
-                        Icon(Icons.terminal, color: Color(0xFF00F5FF), size: 16),
-                        SizedBox(width: 8),
-                        Text('COMMAND LOG', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 12)),
-                      ],
+                    const Icon(Icons.terminal, color: Color(0xFF00F5FF), size: 16),
+                    const SizedBox(width: 8),
+                    const Text('COMMAND LOG', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 12)),
+                    const Spacer(),
+                    Transform.scale(
+                      scale: 0.7,
+                      child: Checkbox(
+                        value: _autoScroll,
+                        onChanged: (v) => setState(() => _autoScroll = v ?? true),
+                        activeColor: const Color(0xFF00F5FF),
+                      ),
                     ),
+                    const Text('Auto-scroll', style: TextStyle(color: Colors.white70, fontSize: 10)),
+                    const SizedBox(width: 8),
                     IconButton(
                       icon: const Icon(Icons.download, color: Color(0xFF00F5FF), size: 18),
                       onPressed: widget.onExport,
                       tooltip: 'Export Logs',
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(),
                     ),
                   ],
                 ),
@@ -92,7 +101,15 @@ class _CommandLogPanelState extends State<CommandLogPanel> {
                           padding: const EdgeInsets.all(8),
                           itemCount: state.commandLogs.length,
                           itemBuilder: (context, i) {
-                            final log = state.commandLogs[i];
+                            if (_autoScroll && i == 0) {
+                              WidgetsBinding.instance.addPostFrameCallback((_) {
+                                if (widget.scrollController.hasClients) {
+                                  widget.scrollController.jumpTo(0);
+                                }
+                              });
+                            }
+                            final reversedIndex = state.commandLogs.length - 1 - i;
+                            final log = state.commandLogs[reversedIndex];
                             final vulnIdx = log.vulnerabilityIndex ?? -1;
                             final vuln = vulnIdx >= 0 && vulnIdx < state.vulnerabilities.length ? state.vulnerabilities[vulnIdx] : null;
                             final isProof = vuln != null &&
@@ -152,6 +169,11 @@ class _CommandLogPanelState extends State<CommandLogPanel> {
                                           ],
                                         ],
                                         const Icon(Icons.terminal, color: Color(0xFF00F5FF), size: 12),
+                                        const SizedBox(width: 6),
+                                        Text(
+                                          '[${log.timestamp.toString().substring(11, 19)}]',
+                                          style: const TextStyle(color: Color(0xFF00F5FF), fontFamily: 'monospace', fontSize: 9),
+                                        ),
                                         const SizedBox(width: 6),
                                         Expanded(
                                           child: Text(

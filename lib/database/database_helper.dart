@@ -27,7 +27,7 @@ class DatabaseHelper {
 
     final db = await openDatabase(
       path,
-      version: 17,
+      version: 18,
       singleInstance: true,
       onConfigure: (db) async {
         await db.execute('PRAGMA busy_timeout=5000');
@@ -200,6 +200,19 @@ class DatabaseHelper {
             timeoutSeconds INTEGER
           )
         ''');
+
+        await db.execute('''
+          CREATE TABLE IF NOT EXISTS token_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            target_id INTEGER NOT NULL DEFAULT 0,
+            phase TEXT NOT NULL,
+            tokens_sent INTEGER NOT NULL DEFAULT 0,
+            tokens_received INTEGER NOT NULL DEFAULT 0,
+            recorded_at TEXT NOT NULL,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+          )
+        ''');
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         debugPrint('[DB] onUpgrade: $oldVersion → $newVersion');
@@ -354,6 +367,20 @@ class DatabaseHelper {
         }
         if (oldVersion < 17) {
           try { await db.execute("ALTER TABLE vulnerabilities ADD COLUMN remediationClass TEXT NOT NULL DEFAULT 'unclassified'"); } catch (_) {}
+        }
+        if (oldVersion < 18) {
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS token_usage (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              project_id INTEGER NOT NULL,
+              target_id INTEGER NOT NULL DEFAULT 0,
+              phase TEXT NOT NULL,
+              tokens_sent INTEGER NOT NULL DEFAULT 0,
+              tokens_received INTEGER NOT NULL DEFAULT 0,
+              recorded_at TEXT NOT NULL,
+              FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+            )
+          ''');
         }
       },
     );
@@ -762,5 +789,79 @@ class DatabaseHelper {
       where: 'projectId = ? AND targetId = ?',
       whereArgs: [projectId, targetId],
     );
+  }
+
+  // --- Token usage ---
+
+  static Future<void> insertTokenUsage(
+    int projectId,
+    int targetId,
+    String phase,
+    int sent,
+    int received,
+  ) async {
+    final db = await database;
+    await db.insert('token_usage', {
+      'project_id': projectId,
+      'target_id': targetId,
+      'phase': phase,
+      'tokens_sent': sent,
+      'tokens_received': received,
+      'recorded_at': DateTime.now().toIso8601String(),
+    });
+  }
+
+  static Future<List<Map<String, dynamic>>> getTokenUsage(int projectId) async {
+    final db = await database;
+    return db.query('token_usage',
+        where: 'project_id = ?', whereArgs: [projectId], orderBy: 'recorded_at ASC');
+  }
+
+  static Future<Map<String, int>> getTokenTotals(int projectId) async {
+    final db = await database;
+    final rows = await db.query('token_usage',
+        where: 'project_id = ?', whereArgs: [projectId]);
+    int totalSent = 0, totalReceived = 0;
+    int reconSent = 0, reconReceived = 0;
+    int analyzeSent = 0, analyzeReceived = 0;
+    int executeSent = 0, executeReceived = 0;
+    int reportSent = 0, reportReceived = 0;
+    for (final r in rows) {
+      final s = r['tokens_sent'] as int? ?? 0;
+      final rv = r['tokens_received'] as int? ?? 0;
+      totalSent += s;
+      totalReceived += rv;
+      switch (r['phase'] as String? ?? '') {
+        case 'recon':   reconSent += s;   reconReceived += rv;
+        case 'analyze': analyzeSent += s; analyzeReceived += rv;
+        case 'execute': executeSent += s; executeReceived += rv;
+        case 'report':  reportSent += s;  reportReceived += rv;
+      }
+    }
+    return {
+      'totalSent': totalSent, 'totalReceived': totalReceived,
+      'reconSent': reconSent, 'reconReceived': reconReceived,
+      'analyzeSent': analyzeSent, 'analyzeReceived': analyzeReceived,
+      'executeSent': executeSent, 'executeReceived': executeReceived,
+      'reportSent': reportSent, 'reportReceived': reportReceived,
+    };
+  }
+
+  static Future<Map<String, ({int sent, int received})>> getTokenTotalsByTarget(
+      int projectId) async {
+    final db = await database;
+    final rows = await db.query('token_usage',
+        where: 'project_id = ?', whereArgs: [projectId]);
+    final result = <String, ({int sent, int received})>{};
+    for (final r in rows) {
+      final tid = (r['target_id'] as int? ?? 0).toString();
+      final s = r['tokens_sent'] as int? ?? 0;
+      final rv = r['tokens_received'] as int? ?? 0;
+      final existing = result[tid];
+      result[tid] = existing == null
+          ? (sent: s, received: rv)
+          : (sent: existing.sent + s, received: existing.received + rv);
+    }
+    return result;
   }
 }

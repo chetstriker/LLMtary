@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../utils/device_utils.dart';
@@ -9,7 +8,6 @@ import '../models/target.dart';
 import '../services/recon_service.dart';
 import '../models/llm_settings.dart';
 import 'app_state.dart';
-import 'scope_config_dialog.dart';
 
 class TargetInputPanel extends StatefulWidget {
   final LLMSettings llmSettings;
@@ -56,28 +54,15 @@ class TargetInputPanel extends StatefulWidget {
   });
 
   @override
-  State<TargetInputPanel> createState() => _TargetInputPanelState();
+  State<TargetInputPanel> createState() => TargetInputPanelState();
 }
 
-class _TargetInputPanelState extends State<TargetInputPanel>
-    with SingleTickerProviderStateMixin {
-  final _inputController = TextEditingController();
+class TargetInputPanelState extends State<TargetInputPanel> {
   bool _isScanning = false;
   String _statusMessage = '';
-  AppState? _appStateListener; // cached ref for safe removal in dispose()
-
-  late final AnimationController _shakeController;
-  // Shake: 3 s active, 2 s pause, repeat
-  static const _shakeDuration = Duration(milliseconds: 3000);
-  static const _shakePauseDuration = Duration(milliseconds: 2000);
-  bool _shakeActive = true;
 
   // Live target list built during scanning (mutable so we can update status)
   final List<Target> _liveTargets = [];
-
-  static const _cyan = Color(0xFF00F5FF);
-  static const _bg = Color(0xFF1A1F3A);
-  static const _darkBg = Color(0xFF0A0E27);
 
   @override
   void initState() {
@@ -88,95 +73,26 @@ class _TargetInputPanelState extends State<TargetInputPanel>
         _liveTargets.add(t);
       }
     }
-
-    _shakeController = AnimationController(
-      vsync: this,
-      duration: _shakeDuration,
-    );
-
-    // Check initial scope state after first frame
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      final appState = context.read<AppState>();
-      if (_hasScopeData(appState)) {
-        _stopShake();
-      } else {
-        _runShakeLoop();
-        _appStateListener = appState;
-        appState.addListener(_onAppStateChanged);
-      }
-    });
-  }
-
-  bool _hasScopeData(AppState appState) {
-    final p = appState.currentProject;
-    return (p?.scope?.isNotEmpty ?? false) ||
-        (p?.scopeExclusions?.isNotEmpty ?? false) ||
-        (p?.scopeNotes?.isNotEmpty ?? false);
-  }
-
-  void _onAppStateChanged() {
-    if (!mounted) return;
-    final appState = context.read<AppState>();
-    if (_hasScopeData(appState)) {
-      _stopShake();
-      _appStateListener = null;
-      appState.removeListener(_onAppStateChanged);
-    }
-  }
-
-  void _runShakeLoop() async {
-    while (mounted && _shakeActive) {
-      await _shakeController.forward(from: 0);
-      if (!mounted || !_shakeActive) break;
-      await Future.delayed(_shakePauseDuration);
-    }
-  }
-
-  void _stopShake() {
-    if (!_shakeActive) return;
-    _shakeActive = false;
-    _shakeController.stop();
-    _shakeController.value = 0;
   }
 
   @override
   void dispose() {
-    _shakeController.dispose();
-    _inputController.dispose();
-    _appStateListener?.removeListener(_onAppStateChanged);
     super.dispose();
   }
 
-  Future<void> _pickFile() async {
-    final result = await FileDialog.pickFiles(
-      dialogTitle: 'Open target list',
-      allowedExtensions: ['txt'],
-    );
-    if (result != null && result.files.single.path != null) {
-      final content = await File(result.files.single.path!).readAsString();
-      _inputController.text = content
-          .trim()
-          .split('\n')
-          .map((l) => l.trim())
-          .where((l) => l.isNotEmpty)
-          .join('\n');
-    }
+  /// Public entry point called by the GO button in [_ScopePanel].
+  Future<void> startScan(String scopeInput) async {
+    await _startScan(scopeInput);
   }
 
-  Future<void> _startScan() async {
-    _stopShake();
+  Future<void> _startScan(String externalInput) async {
     final appState = context.read<AppState>();
-    String input = _inputController.text.trim();
+    String input = externalInput.trim();
 
-    // Fall back to IN-SCOPE TARGETS from the Engagement Scope dialog if the
-    // text field is empty.
     if (input.isEmpty) {
       final scopeList = appState.currentProject?.scopeList ?? [];
-      if (scopeList.isNotEmpty) {
-        input = scopeList.join('\n');
-      }
+      if (scopeList.isNotEmpty) input = scopeList.join('\n');
     }
-
     if (input.isEmpty) return;
 
     if (widget.adminPassword == null && widget.onPasswordNeeded != null) {
@@ -190,33 +106,24 @@ class _TargetInputPanelState extends State<TargetInputPanel>
       _liveTargets.clear();
     });
 
-    // Seed live list with already-complete targets from DB so they show immediately
+    // Seed with already-complete targets
     for (final existing in widget.existingTargets) {
-      if (existing.status == TargetStatus.complete) {
-        _liveTargets.add(existing);
-      }
+      if (existing.status == TargetStatus.complete) _liveTargets.add(existing);
     }
-    await widget.onTargetsDiscovered(List.from(_liveTargets));
 
     try {
       final addresses = ReconService.parseTargetInput(input);
       if (addresses.isEmpty) {
-        setState(() {
-          _statusMessage = 'No valid addresses found';
-          _isScanning = false;
-        });
+        setState(() { _statusMessage = 'No valid addresses found'; _isScanning = false; });
         return;
       }
 
-      // Only scan addresses not already complete in DB
       final alreadyDone = widget.existingTargets
           .where((t) => t.status == TargetStatus.complete)
           .map((t) => t.address)
           .toSet();
       List<String> toScan = addresses.where((a) => !alreadyDone.contains(a)).toList();
 
-      // Apply OUT-OF-SCOPE EXCLUSIONS — remove any address that matches the
-      // engagement scope exclusion list so GO honours the same rules as ANALYZE.
       final exclusionList = appState.currentProject?.exclusionList ?? [];
       if (exclusionList.isNotEmpty) {
         final excluded = toScan.where((a) {
@@ -224,19 +131,21 @@ class _TargetInputPanelState extends State<TargetInputPanel>
           return r == ScopeResult.excluded;
         }).toList();
         if (excluded.isNotEmpty) {
-          for (final addr in excluded) {
-            widget.onProgress('[$addr] Excluded by engagement scope — skipping');
-          }
+          for (final addr in excluded) widget.onProgress('[$addr] Excluded by engagement scope — skipping');
           toScan = toScan.where((a) => !excluded.contains(a)).toList();
         }
       }
 
-      // Add pending entries for addresses that still need scanning
+      // Add pending entries
       for (final addr in toScan) {
         if (!_liveTargets.any((t) => t.address == addr)) {
           _liveTargets.add(Target(address: addr, status: TargetStatus.pending));
         }
       }
+
+      // Push ALL targets (including pending) to AppState immediately so the
+      // stats bar shows the correct count as soon as GO is pressed.
+      await widget.onTargetsDiscovered(List.from(_liveTargets));
 
       if (toScan.isEmpty) {
         final completeCount = _liveTargets.where((t) => t.status == TargetStatus.complete).length;
@@ -248,17 +157,18 @@ class _TargetInputPanelState extends State<TargetInputPanel>
         return;
       }
 
-      // --- Fast parallel host-alive pre-sweep ---
-      // Use nmap -sn for the entire subnet when possible (seconds vs minutes).
-      // Falls back to parallel pings if nmap is unavailable.
+      // Fast parallel host-alive pre-sweep
       List<String> aliveHosts = toScan;
       if (toScan.length > 1) {
         setState(() => _statusMessage = 'Checking which of ${toScan.length} hosts are up...');
         widget.onProgress('Host pre-sweep: running nmap -sn on ${toScan.length} targets...');
-        aliveHosts = await _nmapPingSweep(toScan, widget.onProgress);
-        if (aliveHosts.isEmpty) {
-          // nmap unavailable or returned nothing — fall back to parallel pings
-          widget.onProgress('nmap sweep returned no results — falling back to parallel ping...');
+        final nmapResult = await _nmapPingSweep(toScan, widget.onProgress);
+        if (nmapResult != null) {
+          // nmap ran successfully — its result is definitive, no ping fallback
+          aliveHosts = nmapResult;
+        } else {
+          // nmap unavailable or failed — fall back to parallel pings
+          widget.onProgress('nmap unavailable — falling back to parallel ping...');
           final aliveResults = await Future.wait(
             toScan.map((addr) => ReconService.quickHostAlive(addr).then((up) => MapEntry(addr, up))),
           );
@@ -282,19 +192,14 @@ class _TargetInputPanelState extends State<TargetInputPanel>
 
       setState(() => _statusMessage = 'Scanning ${aliveHosts.length} target(s)...');
 
-      // --- Parallel recon: N=4 internal, N=2 external ---
-      // Determine concurrency from the first address scope
       final firstScope = aliveHosts.isNotEmpty
           ? DeviceUtils.classifyTarget(aliveHosts.first)
           : TargetScope.internal;
       final concurrency = firstScope == TargetScope.external ? 2 : 4;
 
-      // Process in batches of [concurrency]
       for (int batchStart = 0; batchStart < aliveHosts.length; batchStart += concurrency) {
         final batch = aliveHosts.skip(batchStart).take(concurrency).toList();
-        for (final addr in batch) {
-          _updateTargetStatus(addr, TargetStatus.scanning);
-        }
+        for (final addr in batch) _updateTargetStatus(addr, TargetStatus.scanning);
 
         final batchResults = await Future.wait(batch.map((addr) async {
           final recon = ReconService(
@@ -309,6 +214,10 @@ class _TargetInputPanelState extends State<TargetInputPanel>
               if (mounted) setState(() => _statusMessage = msg);
             },
             onPromptResponse: widget.onPromptResponse,
+            onTokensUsed: (sent, received) {
+              // Use the captured appState reference — safe across async gaps.
+              appState.recordTokenUsage('recon', sent, received);
+            },
           );
           return MapEntry(
             addr,
@@ -343,16 +252,15 @@ class _TargetInputPanelState extends State<TargetInputPanel>
       });
       if (completeCount > 0) widget.onScanComplete?.call();
     } catch (e) {
-      setState(() {
-        _statusMessage = 'Error: $e';
-        _isScanning = false;
-      });
+      setState(() { _statusMessage = 'Error: $e'; _isScanning = false; });
     }
   }
 
   /// Run a single nmap -sn sweep over all [addresses] and return the live ones.
-  /// Returns an empty list if nmap is unavailable or the sweep fails.
-  static Future<List<String>> _nmapPingSweep(
+  /// Returns null if nmap is unavailable or the sweep fails (caller should
+  /// fall back to ping). Returns an empty list if nmap ran successfully but
+  /// found no live hosts (caller should NOT fall back — result is definitive).
+  static Future<List<String>?> _nmapPingSweep(
     List<String> addresses,
     void Function(String) onProgress,
   ) async {
@@ -361,9 +269,9 @@ class _TargetInputPanelState extends State<TargetInputPanel>
         'nmap',
         ['-sn', '-T4', '--open', '-oG', '-', ...addresses],
       ).timeout(const Duration(minutes: 3));
-      if (result.exitCode != 0) return [];
+      if (result.exitCode != 0) return null;
       final output = result.stdout as String;
-      if (output.isEmpty) return [];
+      if (output.isEmpty) return null;
       final alive = RegExp(r'Host:\s+(\d{1,3}(?:\.\d{1,3}){3})\s')
           .allMatches(output)
           .map((m) => m.group(1)!)
@@ -371,7 +279,7 @@ class _TargetInputPanelState extends State<TargetInputPanel>
       onProgress('nmap -sn found ${alive.length}/${addresses.length} live hosts');
       return alive;
     } catch (_) {
-      return [];
+      return null;
     }
   }
 
@@ -383,273 +291,28 @@ class _TargetInputPanelState extends State<TargetInputPanel>
     if (mounted) setState(() {});
   }
 
-  Future<void> _deleteTarget(Target target) async {
-    setState(() => _liveTargets.removeWhere((t) => t.address == target.address));
-    await widget.onTargetDeleted?.call(target);
-    final useful = _liveTargets.where((t) => t.status == TargetStatus.complete).toList();
-    await widget.onTargetsDiscovered(List.from(useful));
-  }
-
-  void _reset() {
-    setState(() {
-      _liveTargets.clear();
-      _statusMessage = '';
-      _inputController.clear();
-    });
-    widget.onTargetsDiscovered([]);
-  }
-
-  Color _statusColor(TargetStatus status) {
-    switch (status) {
-      case TargetStatus.complete:
-        return const Color(0xFF00FF88);
-      case TargetStatus.scanning:
-        return _cyan;
-      case TargetStatus.excluded:
-        return Colors.white24;
-      case TargetStatus.down:
-        return Colors.white12;
-      case TargetStatus.pending:
-        return Colors.white38;
+  /// Called by [_ScopePanel] via [onPickFile] to load a file into the scope field.
+  Future<void> pickFileIntoController(TextEditingController scopeCtrl) async {
+    final result = await FileDialog.pickFiles(
+      dialogTitle: 'Open target list',
+      allowedExtensions: ['txt'],
+    );
+    if (result != null && result.files.single.path != null) {
+      final content = await File(result.files.single.path!).readAsString();
+      final lines = content
+          .trim()
+          .split('\n')
+          .map((l) => l.trim())
+          .where((l) => l.isNotEmpty)
+          .join('\n');
+      final existing = scopeCtrl.text.trim();
+      scopeCtrl.text = existing.isEmpty ? lines : '$existing\n$lines';
     }
   }
 
-  IconData _statusIcon(TargetStatus status) {
-    switch (status) {
-      case TargetStatus.complete:
-        return Icons.check_circle;
-      case TargetStatus.scanning:
-        return Icons.radar;
-      case TargetStatus.excluded:
-        return Icons.remove_circle_outline;
-      case TargetStatus.down:
-        return Icons.cancel_outlined;
-      case TargetStatus.pending:
-        return Icons.circle_outlined;
-    }
-  }
+  bool get isScanning => _isScanning;
+  String get statusMessage => _statusMessage;
 
   @override
-  Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.all(8),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: _bg,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: _cyan.withOpacity(0.3)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // ── Input area (always visible) ───────────────────────────────────
-          Row(
-            children: [
-              const Text('TARGET SCOPE',
-                  style: TextStyle(color: _cyan, fontWeight: FontWeight.bold, fontSize: 10)),
-              const SizedBox(width: 6),
-              Consumer<AppState>(
-                builder: (context, appState, _) {
-                  final hasScopeData = _hasScopeData(appState);
-                  final iconColor = hasScopeData
-                      ? const Color(0xFF00FF88)
-                      : Colors.white38;
-                  final iconData = hasScopeData
-                      ? Icons.shield
-                      : Icons.shield_outlined;
-                  return AnimatedBuilder(
-                    animation: _shakeController,
-                    builder: (context, child) {
-                      final offset = _shakeActive
-                          ? math.sin(_shakeController.value * math.pi * 8) * 2.0
-                          : 0.0;
-                      return Transform.translate(
-                        offset: Offset(offset, 0),
-                        child: child,
-                      );
-                    },
-                    child: SizedBox(
-                      width: 22,
-                      height: 22,
-                      child: IconButton(
-                        padding: EdgeInsets.zero,
-                        tooltip: 'Engagement Scope',
-                        icon: Icon(iconData, size: 14, color: iconColor),
-                        onPressed: appState.currentProject != null
-                            ? () => showDialog(
-                                context: context,
-                                builder: (_) => const ScopeConfigDialog())
-                            : null,
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          TextField(
-            controller: _inputController,
-            maxLines: 3,
-            enabled: !_isScanning,
-            style: const TextStyle(
-                color: Colors.white, fontFamily: 'monospace', fontSize: 10),
-            decoration: InputDecoration(
-              hintText: 'IP, hostname, CIDR (192.168.1.0/24), comma or newline separated',
-              hintStyle: const TextStyle(color: Colors.white38, fontSize: 9),
-              border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                  borderSide: const BorderSide(color: _cyan)),
-              enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                  borderSide: BorderSide(color: _cyan.withOpacity(0.3))),
-              focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                  borderSide: const BorderSide(color: _cyan, width: 2)),
-              disabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                  borderSide: BorderSide(color: _cyan.withOpacity(0.1))),
-              filled: true,
-              fillColor: _darkBg,
-              contentPadding: const EdgeInsets.all(8),
-            ),
-          ),
-          const SizedBox(height: 6),
-          Row(
-            children: [
-              Expanded(
-                child: ElevatedButton.icon(
-                  onPressed: _isScanning ? null : _startScan,
-                  icon: _isScanning
-                      ? const SizedBox(
-                          width: 14,
-                          height: 14,
-                          child: CircularProgressIndicator(
-                              color: Colors.white, strokeWidth: 2))
-                      : const Icon(Icons.radar, color: Colors.white, size: 14),
-                  label: Text(
-                    _isScanning ? 'SCANNING...' : 'GO',
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 12),
-                  ),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: _cyan,
-                    disabledBackgroundColor: _cyan.withOpacity(0.3),
-                    padding: const EdgeInsets.symmetric(vertical: 10),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 6),
-              OutlinedButton.icon(
-                onPressed: _isScanning ? null : _pickFile,
-                icon: const Icon(Icons.upload_file, size: 14, color: _cyan),
-                label: const Text('FILE',
-                    style: TextStyle(color: _cyan, fontSize: 10)),
-                style: OutlinedButton.styleFrom(
-                  side: BorderSide(color: _cyan.withOpacity(0.5)),
-                  padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 10),
-                ),
-              ),
-            ],
-          ),
-
-          // ── Live target list ──────────────────────────────────────────────
-          if (_liveTargets.isNotEmpty) ...[
-            const SizedBox(height: 10),
-            const Text('TARGETS',
-                style: TextStyle(
-                    color: _cyan, fontWeight: FontWeight.bold, fontSize: 10)),
-            const SizedBox(height: 6),
-            Flexible(
-              child: ListView.builder(
-                shrinkWrap: true,
-                itemCount: _liveTargets.where((t) => t.status != TargetStatus.down).length,
-                itemBuilder: (context, index) {
-                  final visibleTargets = _liveTargets.where((t) => t.status != TargetStatus.down).toList();
-                  final t = visibleTargets[index];
-                  final color = _statusColor(t.status);
-                  final isSelectable = t.status == TargetStatus.complete;
-                  final isSelected = widget.selectedTarget?.address == t.address;
-                  final isScanning = t.status == TargetStatus.scanning;
-
-                  return GestureDetector(
-                    onTap: isSelectable ? () => widget.onTargetSelected(t) : null,
-                    child: Container(
-                      margin: const EdgeInsets.only(bottom: 4),
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-                      decoration: BoxDecoration(
-                        color: isSelected ? _cyan.withOpacity(0.12) : _darkBg,
-                        borderRadius: BorderRadius.circular(6),
-                        border: Border.all(
-                            color: isSelected ? _cyan : color.withOpacity(0.4)),
-                      ),
-                      child: Row(
-                        children: [
-                          isScanning
-                              ? SizedBox(
-                                  width: 14,
-                                  height: 14,
-                                  child: CircularProgressIndicator(
-                                      color: color, strokeWidth: 2))
-                              : Icon(_statusIcon(t.status), size: 14, color: color),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              t.address,
-                              style: TextStyle(
-                                  color: isSelectable ? Colors.white : Colors.white38,
-                                  fontSize: 10,
-                                  fontFamily: 'monospace'),
-                            ),
-                          ),
-                          // "?" badge: analysis complete but 0 findings
-                          if (t.noFindings)
-                            Tooltip(
-                              message: 'Analyzed — no findings generated',
-                              child: Container(
-                                margin: const EdgeInsets.only(right: 4),
-                                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                                decoration: BoxDecoration(
-                                  color: Colors.white12,
-                                  borderRadius: BorderRadius.circular(4),
-                                  border: Border.all(color: Colors.white24),
-                                ),
-                                child: const Text('?', style: TextStyle(color: Colors.white38, fontSize: 10, fontWeight: FontWeight.bold)),
-                              ),
-                            ),
-                          if (isSelected)
-                            const Icon(Icons.chevron_right, size: 12, color: _cyan),
-                          if (!isScanning)
-                            GestureDetector(
-                              onTap: () => _deleteTarget(t),
-                              child: const Padding(
-                                padding: EdgeInsets.only(left: 6),
-                                child: Icon(Icons.close, size: 12, color: Colors.white24),
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ),
-          ],
-
-          // ── Status message ────────────────────────────────────────────────
-          if (_statusMessage.isNotEmpty) ...[
-            const SizedBox(height: 4),
-            Text(
-              _statusMessage,
-              style: const TextStyle(color: Colors.white38, fontSize: 9),
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ],
-        ],
-      ),
-    );
-  }
+  Widget build(BuildContext context) => const SizedBox.shrink();
 }

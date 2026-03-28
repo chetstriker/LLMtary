@@ -17,17 +17,15 @@ import 'settings_screen.dart';
 import '../widgets/app_state.dart';
 import '../widgets/admin_password_dialog.dart';
 import '../widgets/command_approval_widget.dart';
-import '../widgets/target_input_panel.dart';
-import '../widgets/prompt_log_panel.dart';
-import '../widgets/debug_log_panel.dart';
-import '../widgets/command_log_panel.dart';
-import '../widgets/vulnerability_table.dart';
-import '../widgets/report_config_dialog.dart';
 import '../widgets/results_modal.dart';
 import '../utils/app_exceptions.dart';
 import '../services/storage_service.dart';
 import '../services/prompt_templates.dart';
 import '../services/llm_service.dart';
+import 'tabs/scope_recon_tab.dart';
+import 'tabs/vuln_hunt_tab.dart' show VulnHuntTab, showAnalysisCompleteDialog;
+import 'tabs/proof_exploit_tab.dart' show ProofExploitTab, showExecutionCompleteDialog;
+import 'tabs/result_report_tab.dart';
 
 class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
@@ -40,10 +38,9 @@ class _MainScreenState extends State<MainScreen> {
   bool _isAnalyzing = false;
   bool _isExecuting = false;
   final _logScrollController = ScrollController();
-  bool _showLeftPanel = true;
-  bool _showRightPanel = true;
-  double _vulnTableHeight = 250;
   Completer<String?>? _approvalCompleter;
+  final Set<String> _analyzingAddresses = {};
+  final Set<String> _executingAddresses = {};
 
   void _scrollToProof(int vulnIdx) async {
     final appState = context.read<AppState>();
@@ -121,113 +118,70 @@ class _MainScreenState extends State<MainScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF0A0E27),
+      backgroundColor: const Color(0xFF0D0F1A),
       appBar: _buildAppBar(),
       body: Stack(
         children: [
-          Row(
-            children: [
-              if (_showLeftPanel)
-                SizedBox(
-                  width: 350,
-                  child: Column(
-                    children: [
-                      Flexible(
-                        child: Consumer<AppState>(
-                        builder: (context, appState, _) => TargetInputPanel(
-                          llmSettings: appState.llmSettings,
-                          requireApproval: appState.requireApproval,
-                          adminPassword: appState.adminPassword,
-                          onPasswordNeeded: () => _ensureSessionPassword(),
-                          onInstallPasswordNeeded: _onInstallPasswordNeeded,
-                          onApprovalNeeded: appState.requireApproval
-                              ? (command) async {
-                                  _approvalCompleter = Completer<String?>();
-                                  appState.setPendingCommand(command);
-                                  return await _approvalCompleter!.future;
-                                }
-                              : null,
-                          onProgress: (msg) => appState.addDebugLog(msg),
-                          onPromptResponse: (p, r) => appState.addPromptLog(p, r),
-                          onCommandExecuted: (cmd, output) async {
-                            await appState.loadCommandLogs();
-                          },
-                          onTargetsDiscovered: (targets) async => await appState.setTargets(targets),
-                          onTargetDeleted: (target) => appState.deleteTarget(target),
-                          onScanComplete: () {
-                            appState.setScanComplete(true);
-                            final done = appState.targets.where((t) => t.status == TargetStatus.complete).length;
-                            if (mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                                content: Text('Scan complete — $done target(s) ready for analysis'),
-                                duration: const Duration(seconds: 4),
-                              ));
-                            }
-                          },
-                          targets: appState.targets,
-                          existingTargets: appState.targets,
-                          selectedTarget: appState.selectedTarget,
-                          onTargetSelected: (t) => appState.selectTarget(t),
-                          projectName: appState.currentProjectName,
-                          projectId: appState.currentProject?.id ?? 0,
-                          getTargetId: (addr) => appState.targets
-                              .firstWhere((t) => t.address == addr, orElse: () => Target(address: addr))
-                              .id ?? 0,
-                        ),
-                      ),),
-                      Flexible(child: PromptLogPanel(onExport: _exportPrompts)),
-                    ],
-                  ),
+          Consumer<AppState>(
+            builder: (context, appState, _) => AnimatedSwitcher(
+              duration: const Duration(milliseconds: 180),
+              child: IndexedStack(
+                key: ValueKey(appState.activeTab),
+                index: appState.activeTab,
+              children: [
+                ScopeReconTab(
+                  isAnalyzing: _isAnalyzing,
+                  isExecuting: _isExecuting,
+                  onApprovalNeeded: () {
+                    _approvalCompleter = Completer<String?>();
+                    return _approvalCompleter!;
+                  },
+                  onEnsurePassword: _ensureSessionPassword,
+                  onInstallPasswordNeeded: _onInstallPasswordNeeded,
+                  onExportLogs: _exportLogs,
+                  onExportPrompts: _exportPrompts,
+                  onExportDebug: _exportDebug,
                 ),
-              Expanded(
-                child: Column(
-                  children: [
-                    SizedBox(
-                      height: _vulnTableHeight,
-                      child: Consumer<AppState>(
-                        builder: (context, appState, _) => VulnerabilityTable(
-                          isExecuting: _isExecuting,
-                          onExecuteSelected: _executeSelected,
-                          onToggleSelection: _toggleSelection,
-                          onScrollToProof: _scrollToProof,
-                          onAnalyze: _analyzeDevice,
-                          isAnalyzing: _isAnalyzing,
-                          analyzeEnabled: appState.scanComplete,
-                          executeEnabled: appState.analysisComplete,
-                        ),
-                      ),
-                    ),
-                    _buildResizeHandle(),
-                    Expanded(
-                      child: CommandLogPanel(
-                        scrollController: _logScrollController,
-                        onExport: _exportLogs,
-                      ),
-                    ),
-                  ],
+                VulnHuntTab(
+                  isAnalyzing: _isAnalyzing,
+                  isExecuting: _isExecuting,
+                  onAnalyze: _analyzeDevice,
+                  onToggleSelection: _toggleSelection,
+                  onScrollToProof: _scrollToProof,
+                  onExportLogs: _exportLogs,
+                  onExportPrompts: _exportPrompts,
+                  onExportDebug: _exportDebug,
+                  analyzingAddresses: _analyzingAddresses,
                 ),
-              ),
-              if (_showRightPanel)
-                SizedBox(
-                  width: 350,
-                  child: DebugLogPanel(onExport: _exportDebug),
+                ProofExploitTab(
+                  isAnalyzing: _isAnalyzing,
+                  isExecuting: _isExecuting,
+                  onExecuteSelected: _executeSelected,
+                  onToggleSelection: _toggleSelection,
+                  onScrollToProof: _scrollToProof,
+                  onExportLogs: _exportLogs,
+                  onExportPrompts: _exportPrompts,
+                  onExportDebug: _exportDebug,
+                  executingAddresses: _executingAddresses,
                 ),
-            ],
+                const ResultReportTab(),
+              ],
+            ),
+            ),
           ),
           _buildApprovalOverlay(),
-          _buildPanelToggleButtons(),
         ],
       ),
     );
   }
 
   AppBar _buildAppBar() {
-    final appState = context.read<AppState>();
     return AppBar(
-      backgroundColor: const Color(0xFF1A1F3A),
+      backgroundColor: const Color(0xFF0A0C16),
       elevation: 0,
+      toolbarHeight: 52,
       leading: IconButton(
-        icon: const Icon(Icons.arrow_back, color: Color(0xFF00F5FF)),
+        icon: const Icon(Icons.arrow_back, color: Color(0xFF7C5CFC)),
         onPressed: () {
           context.read<AppState>().setCurrentProject(null);
           Navigator.of(context).pop();
@@ -237,25 +191,38 @@ class _MainScreenState extends State<MainScreen> {
       title: Row(
         children: [
           Container(
-            padding: const EdgeInsets.all(8),
+            padding: const EdgeInsets.all(7),
             decoration: BoxDecoration(
-              gradient: const LinearGradient(colors: [Color(0xFF00F5FF), Color(0xFF0080FF)]),
+              gradient: const LinearGradient(colors: [Color(0xFF7C5CFC), Color(0xFF5B8DEF)]),
               borderRadius: BorderRadius.circular(8),
             ),
-            child: const Icon(Icons.security, color: Colors.white, size: 20),
+            child: const Icon(Icons.security, color: Colors.white, size: 18),
           ),
-          const SizedBox(width: 12),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text('PenExecute', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 18)),
-              Text(appState.currentProjectName, style: const TextStyle(color: Color(0xFF00F5FF), fontSize: 11)),
-            ],
+          const SizedBox(width: 10),
+          const Text('PenExecute',
+              style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 16,
+                  letterSpacing: 0.5)),
+          const SizedBox(width: 28),
+          // Tab bar
+          Flexible(
+            child: Consumer<AppState>(
+              builder: (context, state, _) => Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _tabButton(state, 0, 'SCOPE / RECON'),
+                  _tabButton(state, 1, 'VULN / HUNT'),
+                  _tabButton(state, 2, 'PROOF / EXPLOIT'),
+                  _tabButton(state, 3, 'RESULT / REPORT'),
+                ],
+              ),
+            ),
           ),
         ],
       ),
       actions: [
-        // 6.1: Execution status badge — shows current iteration/phase during testing
         Consumer<AppState>(
           builder: (context, appState, _) {
             final status = appState.executionStatus;
@@ -264,39 +231,26 @@ class _MainScreenState extends State<MainScreen> {
               margin: const EdgeInsets.symmetric(vertical: 10),
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
               decoration: BoxDecoration(
-                color: const Color(0xFF0A0E27),
+                color: const Color(0xFF0D0F1A),
                 borderRadius: BorderRadius.circular(6),
-                border: Border.all(color: const Color(0xFFFFAA00).withOpacity(0.6)),
+                border: Border.all(color: const Color(0xFFFFBB33).withValues(alpha: 0.6)),
               ),
-              child: Text(status, style: const TextStyle(color: Color(0xFFFFAA00), fontSize: 10, fontFamily: 'monospace')),
+              child: Text(status, style: const TextStyle(color: Color(0xFFFFBB33), fontSize: 10, fontFamily: 'monospace')),
             );
           },
         ),
         const SizedBox(width: 8),
-        // 6.3: Credentials button — shows count badge and opens panel
-        Consumer<AppState>(
-          builder: (context, appState, _) {
-            final count = appState.credentials.length;
-            if (count == 0) return const SizedBox.shrink();
-            return TextButton.icon(
-              icon: const Icon(Icons.key, size: 16, color: Color(0xFF00FF88)),
-              label: Text('CREDS ($count)', style: const TextStyle(color: Color(0xFF00FF88), fontSize: 12, fontWeight: FontWeight.bold, letterSpacing: 0.8)),
-              onPressed: () => _showCredentials(appState),
-            );
-          },
-        ),
-        const SizedBox(width: 4),
         Container(
           margin: const EdgeInsets.symmetric(vertical: 8),
           padding: const EdgeInsets.symmetric(horizontal: 12),
           decoration: BoxDecoration(
-            color: const Color(0xFF0A0E27),
+            color: const Color(0xFF0D0F1A),
             borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: const Color(0xFF00F5FF).withOpacity(0.3)),
+            border: Border.all(color: const Color(0xFF7C5CFC).withValues(alpha: 0.3)),
           ),
           child: Row(
             children: [
-              const Icon(Icons.verified_user, color: Color(0xFF00F5FF), size: 16),
+              const Icon(Icons.verified_user, color: Color(0xFF7C5CFC), size: 16),
               const SizedBox(width: 8),
               const Text('Require Approval', style: TextStyle(color: Colors.white70, fontSize: 12)),
               const SizedBox(width: 8),
@@ -304,52 +258,16 @@ class _MainScreenState extends State<MainScreen> {
                 scale: 0.8,
                 child: Switch(
                   value: context.watch<AppState>().requireApproval,
-                  onChanged: (v) {
-                    context.read<AppState>().setRequireApproval(v);
-                  },
-                  activeThumbColor: const Color(0xFF00F5FF),
+                  onChanged: (v) => context.read<AppState>().setRequireApproval(v),
+                  activeThumbColor: const Color(0xFF7C5CFC),
                 ),
               ),
             ],
           ),
         ),
-        const SizedBox(width: 12),
-        Consumer<AppState>(
-          builder: (context, appState, _) => TextButton.icon(
-            icon: Icon(
-              Icons.bar_chart,
-              size: 16,
-              color: appState.hasResults ? const Color(0xFF00F5FF) : Colors.white24,
-            ),
-            label: Text(
-              'RESULTS',
-              style: TextStyle(
-                color: appState.hasResults ? const Color(0xFF00F5FF) : Colors.white24,
-                fontSize: 12,
-                fontWeight: FontWeight.bold,
-                letterSpacing: 0.8,
-              ),
-            ),
-            onPressed: appState.hasResults
-                ? () => _showResults(appState)
-                : null,
-          ),
-        ),
-        const SizedBox(width: 4),
-        Consumer<AppState>(
-          builder: (context, appState, _) => IconButton(
-            tooltip: 'Generate Report',
-            icon: Icon(
-              Icons.download,
-              size: 20,
-              color: appState.hasResults ? const Color(0xFF00F5FF) : Colors.white24,
-            ),
-            onPressed: appState.hasResults ? () => _exportReport(appState) : null,
-          ),
-        ),
-        const SizedBox(width: 4),
+        const SizedBox(width: 8),
         IconButton(
-          icon: const Icon(Icons.settings, color: Color(0xFF00F5FF)),
+          icon: const Icon(Icons.settings, color: Color(0xFF7C5CFC)),
           onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsScreen())),
         ),
         const SizedBox(width: 8),
@@ -357,37 +275,29 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 
-  Widget _buildResizeHandle() {
+  Widget _tabButton(AppState state, int index, String label) {
+    final labels = ['SCOPE / RECON', 'VULN / HUNT', 'PROOF / EXPLOIT', 'RESULT / REPORT'];
+    final unlocked = [state.tab1Unlocked, state.tab2Unlocked, state.tab3Unlocked, state.tab4Unlocked][index];
+    final isActive = state.activeTab == index;
     return GestureDetector(
-      onVerticalDragUpdate: (details) {
-        setState(() {
-          _vulnTableHeight = (_vulnTableHeight + details.delta.dy).clamp(150.0, 600.0);
-        });
-      },
-      child: MouseRegion(
-        cursor: SystemMouseCursors.resizeRow,
-        child: Container(
-          height: 8,
-          color: Colors.transparent,
-          alignment: Alignment.center,
-          child: Container(
-            width: 200,
-            height: 8,
-            decoration: BoxDecoration(
-              color: const Color(0xFF00F5FF).withOpacity(0.1),
-              borderRadius: BorderRadius.circular(4),
-            ),
-            child: Center(
-              child: Container(
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: const Color(0xFF00F5FF),
-                  borderRadius: BorderRadius.circular(2),
-                ),
+      onTap: unlocked ? () => state.setActiveTab(index) : null,
+      child: _TabShape(
+        isActive: isActive,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (!unlocked) const Icon(Icons.lock, size: 10, color: Colors.white24),
+            if (!unlocked) const SizedBox(width: 4),
+            Text(
+              labels[index],
+              style: TextStyle(
+                color: isActive ? Colors.white : unlocked ? Colors.white54 : Colors.white24,
+                fontSize: 11,
+                fontWeight: isActive ? FontWeight.w700 : FontWeight.w500,
+                letterSpacing: 0.8,
               ),
             ),
-          ),
+          ],
         ),
       ),
     );
@@ -425,35 +335,6 @@ class _MainScreenState extends State<MainScreen> {
         }
         return const SizedBox.shrink();
       },
-    );
-  }
-
-  Widget _buildPanelToggleButtons() {
-    return Stack(
-      children: [
-        Positioned(
-          left: 14,
-          bottom: 14,
-          child: FloatingActionButton(
-            heroTag: 'toggleLeft',
-            mini: true,
-            backgroundColor: const Color(0xFF1A1F3A),
-            onPressed: () => setState(() => _showLeftPanel = !_showLeftPanel),
-            child: Icon(_showLeftPanel ? Icons.chevron_right : Icons.chevron_left, color: const Color(0xFF00F5FF)),
-          ),
-        ),
-        Positioned(
-          right: 14,
-          bottom: 14,
-          child: FloatingActionButton(
-            heroTag: 'toggleRight',
-            mini: true,
-            backgroundColor: const Color(0xFF1A1F3A),
-            onPressed: () => setState(() => _showRightPanel = !_showRightPanel),
-            child: Icon(_showRightPanel ? Icons.chevron_left : Icons.chevron_right, color: const Color(0xFF00F5FF)),
-          ),
-        ),
-      ],
     );
   }
 
@@ -505,12 +386,16 @@ class _MainScreenState extends State<MainScreen> {
       for (final target in targetsToAnalyze) {
         appState.addDebugLog('Starting vulnerability analysis for ${target.address}...');
         appState.setExecutionStatus('Analyzing ${target.address}...');
+        setState(() => _analyzingAddresses.add(target.address));
         try {
           final deviceJson = await File(target.jsonFilePath).readAsString();
 
           final analyzer = VulnerabilityAnalyzer(
             onPromptResponse: (prompt, response) {
               appState.addPromptLog(prompt, response);
+            },
+            onTokensUsed: (sent, received) {
+              appState.recordTokenUsage('analyze', sent, received, targetId: target.id ?? 0);
             },
           );
           final vulns = await analyzer.analyzeDevice(
@@ -542,9 +427,10 @@ class _MainScreenState extends State<MainScreen> {
           await DatabaseHelper.updateTarget(target);
 
           appState.loadVulnerabilities();
-          if (mounted) setState(() {});
+          if (mounted) setState(() { _analyzingAddresses.remove(target.address); });
           analyzed++;
         } on ScopeViolationException catch (e) {
+          setState(() => _analyzingAddresses.remove(target.address));
           appState.addDebugLog('[${target.address}] Scope violation: $e — skipping');
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
@@ -552,6 +438,7 @@ class _MainScreenState extends State<MainScreen> {
             );
           }
         } catch (e) {
+          setState(() => _analyzingAddresses.remove(target.address));
           // Log and continue to next target — one failure must not stop the rest
           appState.addDebugLog('[${target.address}] Analysis error (skipping): $e');
           if (mounted) {
@@ -565,12 +452,8 @@ class _MainScreenState extends State<MainScreen> {
       appState.setAnalysisComplete(true);
       appState.setExecutionStatus('');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Analysis complete — $analyzed/${targetsToAnalyze.length} target(s) analyzed'),
-            duration: const Duration(seconds: 4),
-          ),
-        );
+        final totalVulns = appState.vulnerabilities.length;
+        showAnalysisCompleteDialog(context, appState, totalVulns, analyzed);
       }
     } catch (e) {
       context.read<AppState>().addDebugLog('Error: $e');
@@ -645,6 +528,7 @@ class _MainScreenState extends State<MainScreen> {
         continue;
       }
       appState.addDebugLog('Processing vulnerability id=${vuln.id} at index=$vulnIdx');
+      setState(() => _executingAddresses.add(vuln.targetAddress));
 
       try {
 
@@ -674,14 +558,19 @@ class _MainScreenState extends State<MainScreen> {
         onPromptResponse: (prompt, response) {
           appState.addPromptLog(prompt, response);
         },
+        onTokensUsed: (sent, received) {
+          final tid = appState.targets
+              .firstWhere((t) => t.address == vuln.targetAddress, orElse: () => appState.selectedTarget ?? appState.targets.first)
+              .id ?? 0;
+          appState.recordTokenUsage('execute', sent, received, targetId: tid);
+        },
         adminPassword: appState.adminPassword,
-        onApprovalNeeded: appState.requireApproval
-            ? (command) async {
-                _approvalCompleter = Completer<String?>();
-                appState.setPendingCommand(command);
-                return await _approvalCompleter!.future;
-              }
-            : null,
+        onApprovalNeeded: (command) async {
+          if (!appState.requireApproval) return 'once';
+          _approvalCompleter = Completer<String?>();
+          appState.setPendingCommand(command);
+          return await _approvalCompleter!.future;
+        },
         onPasswordNeeded: _onInstallPasswordNeeded,
         credentialBankContext: appState.credentialBankPromptBlock(vuln.targetAddress),
         confirmedFindingsContext: appState.confirmedFindingsPromptBlock(vuln.targetAddress),
@@ -788,6 +677,7 @@ class _MainScreenState extends State<MainScreen> {
       if (mounted) setState(() {});
 
       } catch (e) {
+        setState(() => _executingAddresses.remove(vuln.targetAddress));
         // Log and continue — one failed exploit test must not stop the rest
         appState.addDebugLog('[${vuln.problem}] Execution error (skipping): $e');
         if (mounted) {
@@ -857,14 +747,11 @@ class _MainScreenState extends State<MainScreen> {
     }
 
     appState.setExecutionStatus('');
-    setState(() => _isExecuting = false);
+    setState(() { _isExecuting = false; _executingAddresses.clear(); });
 
     final confirmedCount = appState.vulnerabilities.where((v) => v.status == VulnerabilityStatus.confirmed).length;
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('Execution complete — $confirmedCount confirmed finding(s) out of ${pendingVulns.length} tested'),
-        duration: const Duration(seconds: 5),
-      ));
+      showExecutionCompleteDialog(context, appState, confirmedCount, pendingVulns.length);
     }
 
     appState.setHasResults(true);
@@ -889,6 +776,9 @@ class _MainScreenState extends State<MainScreen> {
       final deviceJson = await File(target.jsonFilePath).readAsString();
       final analyzer = VulnerabilityAnalyzer(
         onPromptResponse: (p, r) => appState.addPromptLog(p, r),
+        onTokensUsed: (sent, received) {
+          appState.recordTokenUsage('analyze', sent, received);
+        },
       );
       final authVulns = await analyzer.analyzeDevice(
         deviceJson,
@@ -919,47 +809,6 @@ class _MainScreenState extends State<MainScreen> {
     } catch (e) {
       appState.addDebugLog('Authenticated re-analysis failed (non-fatal): $e');
     }
-  }
-
-  void _showCredentials(AppState appState) {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1A1F3A),
-        title: const Text('Discovered Credentials', style: TextStyle(color: Color(0xFF00FF88), fontWeight: FontWeight.bold)),
-        content: SizedBox(
-          width: 600,
-          child: appState.credentials.isEmpty
-              ? const Text('No credentials discovered yet.', style: TextStyle(color: Colors.white70))
-              : SingleChildScrollView(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: appState.credentials.map((c) => Container(
-                      margin: const EdgeInsets.only(bottom: 8),
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF0A0E27),
-                        borderRadius: BorderRadius.circular(6),
-                        border: Border.all(color: const Color(0xFF00FF88).withValues(alpha: 0.3)),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text('${c.service} @ ${c.host}', style: const TextStyle(color: Color(0xFF00FF88), fontFamily: 'monospace', fontSize: 12, fontWeight: FontWeight.bold)),
-                          const SizedBox(height: 4),
-                          Text('User: ${c.username}  |  ${c.secretType}: ${c.secret}', style: const TextStyle(color: Colors.white, fontFamily: 'monospace', fontSize: 12)),
-                          Text('Source: ${c.sourceVuln}', style: const TextStyle(color: Colors.white38, fontSize: 11)),
-                        ],
-                      ),
-                    )).toList(),
-                  ),
-                ),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('CLOSE', style: TextStyle(color: Color(0xFF00F5FF)))),
-        ],
-      ),
-    );
   }
 
   void _showResults(AppState appState) {
@@ -1075,24 +924,52 @@ class _MainScreenState extends State<MainScreen> {
     }
   }
 
-  Future<void> _exportReport(AppState state) async {
-    if (state.vulnerabilities.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No findings to export')),
-      );
-      return;
-    }
-    if (state.currentProject == null) return;
+}
 
-    // Phase 11: barrierDismissible=false so user can't dismiss while report is generating
-    await showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => ReportConfigDialog(appState: state),
-    );
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Report saved')),
+/// Custom tab shape: rectangle with a right-side triangular notch for the active tab.
+class _TabShape extends StatelessWidget {
+  final bool isActive;
+  final Widget child;
+
+  const _TabShape({required this.isActive, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    if (!isActive) {
+      return Container(
+        margin: const EdgeInsets.only(right: 2),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        child: child,
+      );
+    }
+    return Container(
+      margin: const EdgeInsets.only(right: 2),
+      child: ClipPath(
+        clipper: _TabClipper(),
+        child: Container(
+          color: const Color(0xFF7C5CFC).withValues(alpha: 0.18),
+          padding: const EdgeInsets.only(left: 14, right: 22, top: 8, bottom: 8),
+          child: child,
+        ),
+      ),
     );
   }
+}
+
+class _TabClipper extends CustomClipper<Path> {
+  @override
+  Path getClip(Size size) {
+    const notch = 10.0;
+    final path = Path()
+      ..moveTo(0, 0)
+      ..lineTo(size.width - notch, 0)
+      ..lineTo(size.width, size.height / 2)
+      ..lineTo(size.width - notch, size.height)
+      ..lineTo(0, size.height)
+      ..close();
+    return path;
+  }
+
+  @override
+  bool shouldReclip(_TabClipper old) => false;
 }

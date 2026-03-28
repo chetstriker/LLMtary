@@ -194,6 +194,10 @@ class ProjectPorter {
     final promptMaps = await DatabaseHelper.getPromptLogs(projectId);
     final debugMaps = await DatabaseHelper.getDebugLogs(projectId);
     final creds = await DatabaseHelper.getCredentialsByProject(projectId);
+    final tokenUsageRows = await DatabaseHelper.getTokenUsage(projectId);
+    final db = await DatabaseHelper.database;
+    final execCmdRows = await db.query('executed_commands',
+        where: 'projectId = ?', whereArgs: [projectId]);
 
     // Build address → portable path map
     final targetEntries = <Map<String, dynamic>>[];
@@ -249,8 +253,14 @@ class ProjectPorter {
               'integrityImpact': v.integrityImpact,
               'availabilityImpact': v.availabilityImpact,
               'vulnerabilityType': v.vulnerabilityType,
+              'businessRisk': v.businessRisk,
               'statusReason': v.statusReason,
               'proofCommand': v.proofCommand,
+              'proofCommandExpectedOutput': v.proofCommandExpectedOutput,
+              'proofOutput': v.proofOutput,
+              'reproductionSteps': v.reproductionSteps,
+              'confirmedAt': v.confirmedAt?.toIso8601String(),
+              'remediationClass': v.remediationClass,
               'status': v.status.name,
             })
         .toList();
@@ -292,11 +302,28 @@ class ProjectPorter {
               'secret_type': c.secretType,
               'source_vuln': c.sourceVuln,
               'discovered_at': c.discoveredAt.toIso8601String(),
+              'credential_source': c.credentialSource.name,
             })
         .toList();
 
+    final tokenEntries = tokenUsageRows.map((r) => {
+      'target_id': addressById[r['target_id'] as int?] ?? '',
+      'phase': r['phase'],
+      'tokens_sent': r['tokens_sent'],
+      'tokens_received': r['tokens_received'],
+      'recorded_at': r['recorded_at'],
+    }).toList();
+
+    final execCmdEntries = execCmdRows.map((r) => {
+      'target_address': addressById[r['targetId'] as int?] ?? '',
+      'command_normalized': r['command_normalized'],
+      'output': r['output'],
+      'exit_code': r['exit_code'],
+      'executed_at': r['executed_at'],
+    }).toList();
+
     final manifest = {
-      'penex_version': 2,
+      'penex_version': 3,
       'exported_at': DateTime.now().toUtc().toIso8601String(),
       'exported_from_os': Platform.operatingSystem,
       'project': {
@@ -315,6 +342,9 @@ class ProjectPorter {
         'methodology': project.methodology,
         'risk_rating_model': project.riskRatingModel,
         'conclusion': project.conclusion,
+        'scope': project.scope,
+        'scope_exclusions': project.scopeExclusions,
+        'scope_notes': project.scopeNotes,
       },
       'targets': targetEntries,
       'vulnerabilities': vulnEntries,
@@ -322,6 +352,8 @@ class ProjectPorter {
       'prompt_logs': promptEntries,
       'debug_logs': debugEntries,
       'credentials': credEntries,
+      'token_usage': tokenEntries,
+      'executed_commands': execCmdEntries,
     };
 
     final archive = Archive();
@@ -392,6 +424,9 @@ class ProjectPorter {
       methodology: projectData['methodology'] as String?,
       riskRatingModel: projectData['risk_rating_model'] as String?,
       conclusion: projectData['conclusion'] as String?,
+      scope: projectData['scope'] as String?,
+      scopeExclusions: projectData['scope_exclusions'] as String?,
+      scopeNotes: projectData['scope_notes'] as String?,
     );
     final projectId = await DatabaseHelper.insertProject(project);
     final insertedProject = Project(
@@ -411,6 +446,9 @@ class ProjectPorter {
       methodology: project.methodology,
       riskRatingModel: project.riskRatingModel,
       conclusion: project.conclusion,
+      scope: project.scope,
+      scopeExclusions: project.scopeExclusions,
+      scopeNotes: project.scopeNotes,
     );
 
     // Insert targets + write recon files, build address → targetId map
@@ -483,8 +521,14 @@ class ProjectPorter {
           'integrityImpact': v['integrityImpact'] ?? 'NONE',
           'availabilityImpact': v['availabilityImpact'] ?? 'NONE',
           'vulnerabilityType': v['vulnerabilityType'] ?? '',
+          'businessRisk': v['businessRisk'] ?? '',
           'statusReason': v['statusReason'] ?? '',
           'proofCommand': v['proofCommand'],
+          'proofCommandExpectedOutput': v['proofCommandExpectedOutput'],
+          'proofOutput': v['proofOutput'],
+          'reproductionSteps': v['reproductionSteps'],
+          'confirmedAt': v['confirmedAt'],
+          'remediationClass': v['remediationClass'] ?? 'unclassified',
           'status': v['status'] ?? 'pending',
         });
       }
@@ -542,6 +586,39 @@ class ProjectPorter {
             'secret_type': c['secret_type'] as String? ?? 'password',
             'source_vuln': c['source_vuln'] as String? ?? '',
             'discovered_at': DateTime.tryParse(c['discovered_at'] as String? ?? '')?.toIso8601String() ?? now.toIso8601String(),
+            'credential_source': c['credential_source'] as String? ?? 'extractedFromOutput',
+          },
+          conflictAlgorithm: ConflictAlgorithm.ignore,
+        );
+      }
+
+      // Insert token usage
+      for (final t in (manifest['token_usage'] as List? ?? []).cast<Map<String, dynamic>>()) {
+        final addr = t['target_id'] as String? ?? '';
+        final targetId = addressToTargetId[addr] ?? 0;
+        await txn.insert('token_usage', {
+          'project_id': projectId,
+          'target_id': targetId,
+          'phase': t['phase'] as String? ?? '',
+          'tokens_sent': t['tokens_sent'] as int? ?? 0,
+          'tokens_received': t['tokens_received'] as int? ?? 0,
+          'recorded_at': t['recorded_at'] as String? ?? now.toIso8601String(),
+        });
+      }
+
+      // Insert executed commands
+      for (final e in (manifest['executed_commands'] as List? ?? []).cast<Map<String, dynamic>>()) {
+        final addr = e['target_address'] as String? ?? '';
+        final targetId = addressToTargetId[addr] ?? 0;
+        await txn.insert(
+          'executed_commands',
+          {
+            'projectId': projectId,
+            'targetId': targetId,
+            'command_normalized': e['command_normalized'] as String? ?? '',
+            'output': e['output'] as String? ?? '',
+            'exit_code': e['exit_code'] as int? ?? -1,
+            'executed_at': e['executed_at'] as String? ?? now.toIso8601String(),
           },
           conflictAlgorithm: ConflictAlgorithm.ignore,
         );
@@ -578,6 +655,9 @@ class ProjectPorter {
         methodology: insertedProject.methodology,
         riskRatingModel: insertedProject.riskRatingModel,
         conclusion: insertedProject.conclusion,
+        scope: insertedProject.scope,
+        scopeExclusions: insertedProject.scopeExclusions,
+        scopeNotes: insertedProject.scopeNotes,
       );
     }
 

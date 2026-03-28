@@ -48,6 +48,18 @@ class AppState extends ChangeNotifier {
   bool _analysisComplete = false;
   Project? _currentProject;
 
+  // Token accumulators
+  int _tokensSentTotal = 0;
+  int _tokensReceivedTotal = 0;
+  int _tokensSentRecon = 0;
+  int _tokensReceivedRecon = 0;
+  int _tokensSentAnalyze = 0;
+  int _tokensReceivedAnalyze = 0;
+  int _tokensSentExecute = 0;
+  int _tokensReceivedExecute = 0;
+  int _tokensSentReport = 0;
+  int _tokensReceivedReport = 0;
+
   List<Vulnerability> get vulnerabilities => _vulnerabilities;
   List<CommandLog> get commandLogs => _commandLogs;
   List<String> get projectScope =>
@@ -67,10 +79,52 @@ class AppState extends ChangeNotifier {
   bool get scanComplete => _scanComplete;
   bool get analysisComplete => _analysisComplete;
   bool get sessionPasswordEntered => _adminPassword != null && _adminPassword!.isNotEmpty;
+  // Tab navigation
+  int _activeTab = 0;
+
+  int get activeTab => _activeTab;
+
+  void setActiveTab(int index) {
+    _activeTab = index;
+    notifyListeners();
+  }
+
+  bool get tab1Unlocked => true;
+  bool get tab2Unlocked => scanComplete;
+  bool get tab3Unlocked => analysisComplete;
+  bool get tab4Unlocked => hasResults || analysisComplete;
+
   Project? get currentProject => _currentProject;
   String get currentProjectName => _currentProject?.name ?? 'default';
   int get _projectId => _currentProject?.id ?? 0;
   int get _activeTargetId => _selectedTarget?.id ?? 0;
+
+  int get tokensSentTotal => _tokensSentTotal;
+  int get tokensReceivedTotal => _tokensReceivedTotal;
+  int get tokensSentRecon => _tokensSentRecon;
+  int get tokensReceivedRecon => _tokensReceivedRecon;
+  int get tokensSentAnalyze => _tokensSentAnalyze;
+  int get tokensReceivedAnalyze => _tokensReceivedAnalyze;
+  int get tokensSentExecute => _tokensSentExecute;
+  int get tokensReceivedExecute => _tokensReceivedExecute;
+  int get tokensSentReport => _tokensSentReport;
+  int get tokensReceivedReport => _tokensReceivedReport;
+
+  void recordTokenUsage(String phase, int sent, int received, {int targetId = 0}) {
+    _tokensSentTotal += sent;
+    _tokensReceivedTotal += received;
+    switch (phase) {
+      case 'recon':   _tokensSentRecon += sent;   _tokensReceivedRecon += received;
+      case 'analyze': _tokensSentAnalyze += sent; _tokensReceivedAnalyze += received;
+      case 'execute': _tokensSentExecute += sent; _tokensReceivedExecute += received;
+      case 'report':  _tokensSentReport += sent;  _tokensReceivedReport += received;
+    }
+    if (_projectId > 0) {
+      DatabaseHelper.insertTokenUsage(
+        _projectId, targetId > 0 ? targetId : _activeTargetId, phase, sent, received);
+    }
+    notifyListeners();
+  }
 
   /// Add a credential to the bank, deduplicating by fingerprint.
   /// Only verified (extracted_from_output) credentials are persisted to DB.
@@ -219,6 +273,17 @@ Raise confidence to HIGH for any finding where these credentials directly enable
     _scanComplete = false;
     _analysisComplete = false;
     _hasResults = false;
+    _tokensSentTotal = 0;
+    _tokensReceivedTotal = 0;
+    _tokensSentRecon = 0;
+    _tokensReceivedRecon = 0;
+    _tokensSentAnalyze = 0;
+    _tokensReceivedAnalyze = 0;
+    _tokensSentExecute = 0;
+    _tokensReceivedExecute = 0;
+    _tokensSentReport = 0;
+    _tokensReceivedReport = 0;
+    _activeTab = 0;
     if (project != null) await loadProjectData();
     notifyListeners();
   }
@@ -282,6 +347,19 @@ Raise confidence to HIGH for any finding where these credentials directly enable
         DateTime.parse(m['timestamp'] as String),
       ));
     }
+
+    // Load persisted token totals
+    final totals = await DatabaseHelper.getTokenTotals(project.id!);
+    _tokensSentTotal = totals['totalSent'] ?? 0;
+    _tokensReceivedTotal = totals['totalReceived'] ?? 0;
+    _tokensSentRecon = totals['reconSent'] ?? 0;
+    _tokensReceivedRecon = totals['reconReceived'] ?? 0;
+    _tokensSentAnalyze = totals['analyzeSent'] ?? 0;
+    _tokensReceivedAnalyze = totals['analyzeReceived'] ?? 0;
+    _tokensSentExecute = totals['executeSent'] ?? 0;
+    _tokensReceivedExecute = totals['executeReceived'] ?? 0;
+    _tokensSentReport = totals['reportSent'] ?? 0;
+    _tokensReceivedReport = totals['reportReceived'] ?? 0;
 
     notifyListeners();
   }

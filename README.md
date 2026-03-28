@@ -45,25 +45,35 @@ Analysis runs in two sequential phases, mirroring the structure of a professiona
 - Each selected finding goes through a validation loop that runs real commands against the target
 - The LLM plans its approach, executes commands, evaluates output, and adapts — progressing through RECON → VERIFICATION → EXPLOITATION → CONFIRMATION phases
 - Loop terminates when: vulnerability is confirmed with proof, ruled out conclusively, or all reasonable approaches are exhausted
-- Hard cap of **100 iterations** for CVE-backed findings, **20 iterations** for speculative findings
+- Configurable iteration caps per finding type (CVE-backed vs. speculative), settable in AI Configuration
 - Duplicate command detection and semantic approach exhaustion tracking prevent spinning
 - **OPSEC-aware prompting** — each iteration includes guidance on request pacing, scan noise reduction, tool signature minimization, and test impact limits
 - **Rate-limit detection** — if command output contains rate-limiting or blocking signals (429, "too many requests", "you have been blocked", etc.), the executor detects it, notifies the LLM, and adjusts its approach for the next iteration
 - Metasploit pre-flight check runs once before testing begins; Metasploit is skipped for the session if unavailable
+- **Two-tier command validation** runs before every command execution:
+  - *Tier 1 (static, zero cost)*: blocks non-script file execution (e.g. passing a wordlist to bash), pipe-to-shell patterns (`curl url | bash`), and auto-corrects Windows paths in WSL contexts
+  - *Tier 2 (LLM-assisted, cached)*: validates correct flag usage for high-risk tools (nmap, sqlmap, gobuster, hydra, nuclei, metasploit, etc.); first call per tool costs one LLM round-trip, all subsequent calls are free; 20-second timeout — never stalls the loop
 
 ### Attack Chain Reasoning
 - When a vulnerability is confirmed, the executor identifies whether it enables or simplifies testing another vulnerability type ("chain opportunity") and notes it in the finding's proof
 - Confirmed artifacts (RCE, SQLi, auth bypass, LFI, SSRF, etc.) are fed forward as context — subsequent vulnerabilities on the same target know what access has already been achieved
 - After all per-vulnerability loops complete, if ≥2 findings are confirmed, a post-execution chain reasoning pass fires — identifying how the confirmed findings can be combined into higher-impact multi-step attack paths. These are added as `AttackChain` findings in the vulnerability table
 
+### Post-Exploitation Enumeration
+- When a confirmed finding grants high-value access (RCE, command injection, authentication bypass, default credentials), a **Post-Exploitation Enumeration** pseudo-vulnerability is automatically queued
+- The enumeration loop enumerates users, groups, network interfaces, running services, readable credential files, and privilege escalation paths — documenting the full impact of the access achieved
+
 ### Credential Bank
 - Discovered credentials are collected into a session-wide credential bank
 - Credentials are automatically included as context when testing subsequent vulnerabilities on the same target — enabling credential reuse and chained attack paths
 - Deduplicates by service/host/username fingerprint
+- Verified credentials (seen in command output) are persisted to SQLite; inferred credentials (LLM-suggested) are memory-only and labeled as unverified in prompts
+- When verified credentials are discovered during execution, an **authenticated re-analysis** pass automatically runs for the affected target to surface additional findings that require credentials
 
 ### Command Approval Mode
 - Optional mode that pauses before executing each command and shows it to the user for approval or denial
 - Approved commands run; denied commands are skipped with the LLM notified to try a different approach
+- The toggle takes effect immediately — enabling or disabling approval mid-execution applies to the very next command
 
 ### Autonomous Recon
 - Built-in recon service that drives initial scan data collection through an LLM-guided loop
@@ -79,6 +89,8 @@ Analysis runs in two sequential phases, mirroring the structure of a professiona
 - **HTML report** — professional formatted report with cover page, executive summary, severity breakdown by target, full findings with CVSS-style metadata, and discovered credentials table
 - **Markdown report** — same content as HTML in portable Markdown format
 - **CSV export** — flat findings list for import into spreadsheets or other tools
+- Assessment start and end dates are saved per-project; end date defaults to today if not explicitly set
+- AI-assisted generation for executive summary, methodology, risk rating model, and conclusion sections
 
 ### Cross-Platform
 - Runs natively on **Linux**, **macOS**, and **Windows**
@@ -86,11 +98,15 @@ Analysis runs in two sequential phases, mirroring the structure of a professiona
 - OS detection informs the LLM's command choices throughout the testing loop
 
 ### Safety Controls
-- Dangerous command blocklist (`rm -rf`, `format`, `mkfs`, `dd`, `shutdown`, `:(){ :|:& };:`, etc.)
-- Configurable command whitelist for commands that should always be allowed without prompting
-- Per-tool setup validation — tools that require initialization (e.g. Metasploit database) are checked before use
-- Connection timeout warnings — when a port connection times out, the executor is instructed not to retry that port
-- Sensitive output sanitization before storage and display
+- **Dangerous command blocklist** — hard-blocks destructive commands: `rm -rf /`, `format`, `mkfs`, `dd if=`, `shutdown`, `reboot`, fork bombs (`:(){ :|:& };:`), and similar patterns. These are never executed regardless of LLM output.
+- **Non-script file execution detection** — hard-blocks attempts to execute non-script files as shell scripts (e.g. passing a wordlist as a bash argument), which would cause the process to hang indefinitely
+- **Pipe-to-shell blocking** — hard-blocks `cat file | bash`, `curl url | bash`, and similar patterns
+- **Command approval mode** — when enabled, every command is shown to the user before execution; the user can allow once, always allow (adds to whitelist), or deny
+- **Configurable command whitelist** — commands added to the whitelist always execute without prompting, even in approval mode
+- **Per-tool setup validation** — tools that require initialization (e.g. Metasploit database via `msfdb init`) are checked before use; the tool is skipped for the session if the check fails
+- **Connection timeout protection** — when a port connection times out, the executor is instructed not to retry that port
+- **Sensitive output sanitization** — command output is scrubbed of credentials, API keys, and tokens before storage and display
+- **Scope enforcement** — findings are validated against the configured scope and exclusion lists; out-of-scope findings are discarded
 
 ---
 
@@ -155,7 +171,7 @@ The LLM selects tools based on the objective — if a useful tool is missing, it
 ## Usage
 
 ### 1. Configure AI Settings
-Click the settings icon (top right). Select your AI provider, enter your API key and model name. A "Test Connection" button validates the configuration. Settings are saved per-provider.
+Click the settings icon (top right). Select your AI provider, enter your API key and model name. A "Test" button validates the configuration. Settings are saved per-provider.
 
 **Recommended models:** Models with strong reasoning and large context windows perform best. Claude Opus/Sonnet, GPT-4o, Gemini 1.5 Pro, and large Ollama models (70B+) all work well. Smaller models (< 13B) tend to produce lower-quality findings and make more command errors.
 
@@ -163,20 +179,20 @@ Click the settings icon (top right). Select your AI provider, enter your API key
 Projects organize your work. Create a named project, then add targets to it. Each target can be a hostname, FQDN, or IP address.
 
 ### 3. Input Scan Data
-Paste your existing scan data JSON into the device input panel, or use the built-in recon feature to collect scan data autonomously. The JSON schema is documented below.
+Use the **SCOPE / RECON** tab to run autonomous recon against your targets, or paste existing scan data JSON directly. The JSON schema is documented below.
 
 ### 4. Analyze
-Click **Analyze** to run the vulnerability analysis pipeline. Multiple LLM passes run in parallel. Findings appear in the vulnerability table as they arrive, sorted by severity.
+Navigate to the **VULN / HUNT** tab and click **Analyze**. Multiple LLM passes run in parallel. Findings appear in the vulnerability table as they arrive, sorted by severity.
 
 ### 5. Select and Execute
-Check the vulnerabilities you want to actively test. Click **Execute Selected**. The exploit testing loop runs each finding through active validation. Status icons update in real time:
+Navigate to the **PROOF / EXPLOIT** tab. Check the vulnerabilities you want to actively test and click **Execute Selected**. The exploit testing loop runs each finding through active validation. Status icons update in real time:
 - `[PENDING]` — not yet tested
 - `[CONFIRMED]` — exploitation succeeded with proof
 - `[NOT VULNERABLE]` — definitively ruled out
 - `[UNDETERMINED]` — tested but inconclusive (all approaches exhausted or target unreachable)
 
 ### 6. Review and Export
-Click **Results** to view the full findings summary. Export as HTML, Markdown, or CSV from the toolbar.
+Navigate to the **RESULT / REPORT** tab to view the full findings summary and generate your report as HTML, Markdown, or CSV.
 
 ---
 
@@ -334,8 +350,14 @@ lib/
 │   ├── llm_settings.dart         # AI provider configuration
 │   └── llm_provider.dart         # Provider enum with metadata
 ├── screens/
-│   ├── main_screen.dart          # Primary workspace (analysis, execution, results)
-│   └── settings_screen.dart      # AI provider and execution settings
+│   ├── home_screen.dart          # Project selection and management
+│   ├── main_screen.dart          # Primary workspace with tab navigation
+│   ├── settings_screen.dart      # AI provider and execution settings
+│   └── tabs/
+│       ├── scope_recon_tab.dart  # Autonomous recon and target management
+│       ├── vuln_hunt_tab.dart    # Vulnerability analysis pipeline
+│       ├── proof_exploit_tab.dart # Exploit execution and results
+│       └── result_report_tab.dart # Report generation
 ├── services/
 │   ├── vulnerability_analyzer.dart  # Multi-prompt parallel analysis pipeline
 │   ├── exploit_executor.dart        # Autonomous exploit testing loop
@@ -344,12 +366,16 @@ lib/
 │   ├── command_executor.dart        # Shell command execution with safety controls
 │   ├── llm_service.dart             # LLM API client (all providers)
 │   ├── report_generator.dart        # HTML/Markdown/CSV report generation
+│   ├── report_content_service.dart  # AI-assisted report section generation
 │   ├── project_porter.dart          # Encrypted project export/import
 │   ├── storage_service.dart         # File system path management
-│   └── tool_manager.dart            # Tool availability detection and caching
+│   ├── tool_manager.dart            # Tool availability detection and caching
+│   ├── background_process_manager.dart  # Long-running listener processes (Responder, ntlmrelayx)
+│   └── environment_discovery.dart   # OS/environment detection
 ├── utils/
 │   ├── device_utils.dart         # Target IP extraction and scope classification
 │   ├── command_utils.dart        # Command history, deduplication, approach tracking
+│   ├── command_validator.dart    # Two-tier pre-execution command validation
 │   ├── cvss_calculator.dart      # CVSS score computation
 │   ├── json_parser.dart          # Robust JSON extraction from LLM responses
 │   ├── output_sanitizer.dart     # Sensitive data redaction
@@ -379,7 +405,9 @@ lib/
 | Temperature | LLM sampling temperature (lower = more deterministic; default 0.22) |
 | Max Tokens | Maximum tokens per LLM response (default 4096) |
 | Timeout | Seconds before an LLM request times out (default 240s) |
-| Require Approval | Pause and prompt before executing each shell command |
+| Max Iterations (with CVE) | Exploitation loop cap for findings with a known CVE ID |
+| Max Iterations (no CVE) | Exploitation loop cap for generic findings without a CVE ID |
+| Require Approval | Pause and prompt before executing each shell command; toggle takes effect immediately |
 | Command Whitelist | Commands that bypass the approval prompt |
 | Storage Path | Base directory for scan output file storage |
 
@@ -391,7 +419,7 @@ PenExecute executes real shell commands on your local machine against real targe
 
 **You are responsible for ensuring you have authorization to test any target.** Unauthorized scanning or exploitation is illegal in most jurisdictions regardless of the tools used.
 
-The built-in safety controls (dangerous command blocklist, approval mode, timeout protection) are designed to prevent accidents, not to substitute for professional judgment and proper engagement scoping.
+The built-in safety controls (dangerous command blocklist, non-script execution detection, pipe-to-shell blocking, approval mode, timeout protection, scope enforcement) are designed to prevent accidents, not to substitute for professional judgment and proper engagement scoping.
 
 ---
 

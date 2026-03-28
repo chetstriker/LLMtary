@@ -168,6 +168,7 @@ class _ReportConfigDialogState extends State<ReportConfigDialog> {
 
   Future<void> _onGenerate() async {
     if (!_formKey.currentState!.validate()) return;
+    _endDate ??= DateTime.now();
     if (_startDate != null && _endDate != null && _endDate!.isBefore(_startDate!)) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Assessment end date must be on or after start date')),

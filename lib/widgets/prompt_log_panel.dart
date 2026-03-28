@@ -101,11 +101,13 @@ class _PromptLogPanelState extends State<PromptLogPanel> {
                                     color: const Color(0xFF00F5FF).withOpacity(0.1),
                                     borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
                                   ),
-                                  child: const Row(
+                                  child: Row(
                                     children: [
-                                      Icon(Icons.arrow_upward, color: Color(0xFF00F5FF), size: 12),
-                                      SizedBox(width: 4),
-                                      Text('PROMPT', style: TextStyle(color: Color(0xFF00F5FF), fontSize: 10, fontWeight: FontWeight.bold)),
+                                      const Icon(Icons.arrow_upward, color: Color(0xFF00F5FF), size: 12),
+                                      const SizedBox(width: 4),
+                                      const Text('PROMPT', style: TextStyle(color: Color(0xFF00F5FF), fontSize: 10, fontWeight: FontWeight.bold)),
+                                      const SizedBox(width: 8),
+                                      Text('[${log.timestamp.toString().substring(11, 19)}]', style: const TextStyle(color: Color(0xFF00F5FF), fontSize: 9, fontFamily: 'monospace')),
                                     ],
                                   ),
                                 ),

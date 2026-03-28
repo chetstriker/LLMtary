@@ -5,6 +5,7 @@ import '../models/project.dart';
 import '../services/project_porter.dart';
 import '../services/storage_service.dart';
 import '../widgets/app_state.dart';
+import '../widgets/llm_setup_wizard.dart';
 import 'main_screen.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -17,15 +18,29 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   List<Project> _projects = [];
   bool _loading = true;
+  final Map<int, int> _projectTokenTotals = {};
 
-  static const _cyan = Color(0xFF00F5FF);
-  static const _bg = Color(0xFF0A0E27);
-  static const _card = Color(0xFF1A1F3A);
+  static const _cyan = Color(0xFF7C5CFC);
+  static const _bg = Color(0xFF0D0F1A);
+  static const _card = Color(0xFF161929);
 
   @override
   void initState() {
     super.initState();
     _loadProjects();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _checkWizard());
+  }
+
+  Future<void> _checkWizard() async {
+    final provider = await DatabaseHelper.getSetting('current_provider');
+    final isConfigured = provider != null && provider != 'none' && provider.isNotEmpty;
+    if (!isConfigured && mounted) {
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => const LlmSetupWizard(),
+      );
+    }
   }
 
   Future<void> _loadProjects() async {
@@ -35,6 +50,13 @@ class _HomeScreenState extends State<HomeScreen> {
       debugPrint('[HomeScreen] calling DatabaseHelper.getProjects()...');
       _projects = await DatabaseHelper.getProjects();
       debugPrint('[HomeScreen] getProjects() returned ${_projects.length} project(s): ${_projects.map((p) => p.name).toList()}');
+      // Load token totals for each project
+      for (final p in _projects) {
+        if (p.id != null) {
+          final totals = await DatabaseHelper.getTokenTotals(p.id!);
+          _projectTokenTotals[p.id!] = (totals['totalSent'] ?? 0) + (totals['totalReceived'] ?? 0);
+        }
+      }
     } catch (e, st) {
       debugPrint('[HomeScreen] getProjects() threw: $e\n$st');
     } finally {
@@ -270,6 +292,8 @@ class _HomeScreenState extends State<HomeScreen> {
                         if (project.scanComplete) _statusChip('SCANNED', const Color(0xFF00FF88)),
                         if (project.analysisComplete) _statusChip('ANALYZED', _cyan),
                         if (project.hasResults) _statusChip('RESULTS', const Color(0xFFFFAA00)),
+                        if (project.id != null && (_projectTokenTotals[project.id!] ?? 0) > 0)
+                          _statusChip('~${_fmtTokens(_projectTokenTotals[project.id!]!)} tokens', Colors.white24),
                       ],
                     ),
                   ],
@@ -290,6 +314,12 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
       ),
     );
+  }
+
+  String _fmtTokens(int n) {
+    if (n >= 1000000) return '${(n / 1000000).toStringAsFixed(1)}M';
+    if (n >= 1000) return '${(n / 1000).toStringAsFixed(0)}K';
+    return n.toString();
   }
 
   Widget _statusChip(String label, Color color) {

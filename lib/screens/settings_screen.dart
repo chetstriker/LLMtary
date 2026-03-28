@@ -25,7 +25,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _modelSearchController = TextEditingController();
   double _temperature = ConfigDefaults.temperature;
   int _maxTokens = ConfigDefaults.maxTokens;
-  int _maxIterations = ConfigDefaults.maxIterations;
   int _timeoutSeconds = ConfigDefaults.timeoutSeconds;
   int _maxIterationsWithCve = 30;
   int _maxIterationsNoCve = 15;
@@ -48,7 +47,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _timeoutSeconds = settings.timeoutSeconds;
     _maxIterationsWithCve = settings.maxIterationsWithCve;
     _maxIterationsNoCve = settings.maxIterationsNoCve;
-    _loadMaxIterations();
     _loadWhitelist();
     _loadStoragePath();
   }
@@ -72,12 +70,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() {
       _whitelistedCommands = results.map((r) => r['command'] as String).toList();
     });
-  }
-
-  Future<void> _loadMaxIterations() async {
-    final value = await DatabaseHelper.getSetting(SettingsKeys.maxIterations);
-    final parsed = int.tryParse(value ?? '') ?? 25;
-    setState(() => _maxIterations = parsed.clamp(1, 25));
   }
 
   @override
@@ -119,60 +111,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
+        child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 680),
         child: Column(
           children: [
-            Container(
-              padding: const EdgeInsets.all(24),
-              decoration: BoxDecoration(
-                color: const Color(0xFF1A1F3A),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: const Color(0xFF00F5FF).withOpacity(0.3)),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('ATTEMPTS', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 14, letterSpacing: 1)),
-                  const SizedBox(height: 16),
-                  Tooltip(
-                    message: 'Controls the maximum tries or attempts the LLM can perform on each vulnerability before giving up',
-                    child: const Text('MAX ITERATIONS', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 12)),
-                  ),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: SliderTheme(
-                          data: SliderThemeData(
-                            activeTrackColor: const Color(0xFF00F5FF),
-                            inactiveTrackColor: const Color(0xFF00F5FF).withOpacity(0.2),
-                            thumbColor: const Color(0xFF00F5FF),
-                            overlayColor: const Color(0xFF00F5FF).withOpacity(0.2),
-                          ),
-                          child: Slider(
-                            value: _maxIterations.toDouble(),
-                            min: 1,
-                            max: 25,
-                            divisions: 24,
-                            onChanged: (v) => setState(() => _maxIterations = v.round()),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF0A0E27),
-                          borderRadius: BorderRadius.circular(6),
-                          border: Border.all(color: const Color(0xFF00F5FF).withOpacity(0.3)),
-                        ),
-                        child: Text('$_maxIterations', style: const TextStyle(color: Color(0xFF00F5FF), fontFamily: 'monospace', fontWeight: FontWeight.bold)),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
             Container(
               padding: const EdgeInsets.all(24),
               decoration: BoxDecoration(
@@ -218,6 +161,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           _baseUrlController.text = v.requiresBaseUrl ? v.defaultBaseUrl : '';
                           _apiKeyController.text = '';
                           _modelController.text = '';
+                          _temperature = ConfigDefaults.temperature;
+                          _maxTokens = ConfigDefaults.maxTokens;
+                          _timeoutSeconds = ConfigDefaults.timeoutSeconds;
                         }
                         _availableModels = [];
                       });
@@ -471,43 +417,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   fillColor: const Color(0xFF0A0E27),
                 ),
                 onChanged: (v) => _maxTokens = int.tryParse(v) ?? 4096,
-              ),
-              const SizedBox(height: 24),
-              Tooltip(
-                message: 'Controls the maximum tries or attempts the LLM can perform on each vulnerability before giving up',
-                child: const Text('MAX ITERATIONS', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 12)),
-              ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  Expanded(
-                    child: SliderTheme(
-                      data: SliderThemeData(
-                        activeTrackColor: const Color(0xFF00F5FF),
-                        inactiveTrackColor: const Color(0xFF00F5FF).withOpacity(0.2),
-                        thumbColor: const Color(0xFF00F5FF),
-                        overlayColor: const Color(0xFF00F5FF).withOpacity(0.2),
-                      ),
-                      child: Slider(
-                        value: _maxIterations.toDouble(),
-                        min: 1,
-                        max: 25,
-                        divisions: 24,
-                        onChanged: (v) => setState(() => _maxIterations = v.round()),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF0A0E27),
-                      borderRadius: BorderRadius.circular(6),
-                      border: Border.all(color: const Color(0xFF00F5FF).withOpacity(0.3)),
-                    ),
-                    child: Text('$_maxIterations', style: const TextStyle(color: Color(0xFF00F5FF), fontFamily: 'monospace', fontWeight: FontWeight.bold)),
-                  ),
-                ],
               ),
               const SizedBox(height: 24),
               const Text('TIMEOUT', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 12)),
@@ -793,6 +702,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ],
       ),
+        ),
+        ),
       ),
     );
   }
@@ -883,7 +794,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
     
     context.read<AppState>().updateLLMSettings(settings);
-    DatabaseHelper.saveSetting(SettingsKeys.maxIterations, _maxIterations.toString());
     Navigator.pop(context);
   }
 }

@@ -194,6 +194,7 @@ class ReconService {
   final Function(String, String)? onPromptResponse;
   final Function(String, String)? onCommandExecuted;
   final Function(String)? onTargetDown;
+  final void Function(int sent, int received)? onTokensUsed;
 
   static const int _maxIterations = 100;
   static const int _maxIterationsExternal = 100;
@@ -208,6 +209,7 @@ class ReconService {
     this.onPromptResponse,
     this.onCommandExecuted,
     this.onTargetDown,
+    this.onTokensUsed,
   });
 
   // ---------------------------------------------------------------------------
@@ -432,7 +434,7 @@ Do NOT propose another port scan variant. Instead:
 
       String response;
       try {
-        response = await llmService.sendMessage(settings, prompt);
+        response = await llmService.sendMessage(settings, prompt, onTokensUsed: onTokensUsed);
       } catch (e) {
         onProgress?.call('[$address] LLM error: $e');
         history += 'Iteration ${iteration + 1}: LLM error: $e\n\n';
@@ -1639,7 +1641,7 @@ Schema:
 Respond ONLY with valid JSON.''';
 
     try {
-      final response = await llmService.sendMessage(settings, prompt);
+      final response = await llmService.sendMessage(settings, prompt, onTokensUsed: onTokensUsed);
       final parsed = JsonParser.tryParseJson(response);
       if (parsed != null) _deepMerge(findings, parsed);
     } catch (_) {}
@@ -1674,7 +1676,7 @@ Port 80/443 behind Cloudflare = web application is fully testable for XSS, CSRF,
 Respond ONLY with valid JSON.''';
 
     try {
-      final response = await llmService.sendMessage(settings, prompt);
+      final response = await llmService.sendMessage(settings, prompt, onTokensUsed: onTokensUsed);
       final eval = JsonParser.tryParseJson(response);
       if (eval == null || eval['useful'] != true) {
         onProgress?.call('[$address] Excluded: ${eval?['reason'] ?? 'no useful data'}');
@@ -1911,17 +1913,26 @@ Respond ONLY with valid JSON.''';
       nmapTimedOut = true;
     }
 
-    // Parse the saved XML directly to update findings and detect web/SMB ports
+    // Parse the saved XML directly to update findings and detect web/SMB ports.
+    // Retry up to 3 times with a short delay to handle WSL/network filesystem
+    // flush latency where the file may not be fully visible immediately after
+    // nmap exits.
     try {
       final xmlFile = File(nmapXmlPath);
-      if (await xmlFile.exists()) {
-        final xmlContent = await xmlFile.readAsString();
-        if (xmlContent.isNotEmpty) {
-          // Check for truncated XML (nmap killed before finishing)
-          if (!xmlContent.contains('</nmaprun>')) {
-            nmapTimedOut = true;
-          }
-          final parsedPorts = ReconService.parseNmapXml(xmlContent);
+      String xmlContent = '';
+      for (int attempt = 0; attempt < 3; attempt++) {
+        if (await xmlFile.exists()) {
+          xmlContent = await xmlFile.readAsString();
+          if (xmlContent.contains('</nmaprun>')) break;
+        }
+        if (attempt < 2) await Future.delayed(const Duration(milliseconds: 500));
+      }
+      if (xmlContent.isEmpty) {
+        nmapTimedOut = true;
+      } else if (!xmlContent.contains('</nmaprun>')) {
+        nmapTimedOut = true;
+      } else {
+        final parsedPorts = ReconService.parseNmapXml(xmlContent);
           if (parsedPorts.isEmpty && !nmapTimedOut) {
             onProgress?.call('[$address] nmap found 0 open ports — host may be filtered or down');
           }
@@ -1941,9 +1952,6 @@ Respond ONLY with valid JSON.''';
                 svc.contains('http');
           });
           hasSmbPort = parsedPorts.any((p) => p['port'] == 445);
-        }
-      } else {
-        nmapTimedOut = true;
       }
     } catch (_) {}
 
@@ -2269,13 +2277,14 @@ Respond ONLY with valid JSON.''';
   static List<String> buildWebProbeCommands(String target, int port, bool isTls, String outDir) {
     final scheme = isTls ? 'https' : 'http';
     final base = '$scheme://$target:$port';
+    final nullDevice = Platform.isWindows ? 'NUL' : '/dev/null';
     return [
       'curl -s -I -L --max-time 10 $base | tee "$outDir/headers_$port.txt"',
       for (final path in [
         '/robots.txt', '/sitemap.xml', '/.well-known/security.txt',
         '/crossdomain.xml', '/swagger.json', '/openapi.json', '/api/docs', '/graphql',
       ])
-        'curl -s -o /dev/null -w "%{http_code} $path" --max-time 5 $base$path',
+        'curl -s -o $nullDevice -w "%{http_code} $path" --max-time 5 $base$path',
     ];
   }
 
@@ -2454,3 +2463,4 @@ Respond ONLY with valid JSON.''';
     }
   }
 }
+
