@@ -260,7 +260,7 @@ class ProjectPorter {
               'proofOutput': v.proofOutput,
               'reproductionSteps': v.reproductionSteps,
               'confirmedAt': v.confirmedAt?.toIso8601String(),
-              'remediationClass': v.remediationClass,
+              'remediationClass': v.remediationClass.name,
               'status': v.status.name,
             })
         .toList();
