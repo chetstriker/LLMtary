@@ -383,6 +383,9 @@ class ReconService {
     bool reducedBudget = false;
     // effectiveMaxIter may be reduced by D.3 diminishing returns logic
     int effectiveMaxIter = maxIter;
+    // Phase 4.4: Consecutive failure detection — track stalled recon loops
+    int itersSinceNewData = 0;
+    int findingsSizeAtLastCheck = 0;
 
     if (scope == TargetScope.external && ReconService._isDomainName(address)) {
       onProgress?.call('[$address] Running passive OSINT...');
@@ -570,6 +573,17 @@ Do NOT propose another port scan variant. Instead:
 - If all connectivity approaches fail, CONCLUDE with host_useful=false
 ''';
         }
+        // Phase 4.4: Inject stalled warning when no new data for 3+ iterations
+        if (itersSinceNewData >= 3) {
+          historyHint += '\n\u26a0\ufe0f WARNING: No new reconnaissance data has been found in the last $itersSinceNewData iterations. '
+              'Do NOT repeat previous scan types. Try a fundamentally different approach or conclude reconnaissance.\n';
+        }
+      }
+
+      // Phase 4.4: Auto-exit when stalled for 5+ consecutive iterations
+      if (itersSinceNewData >= 5) {
+        onProgress?.call('[$address] Phase 4.4: No new data for $itersSinceNewData iterations — exiting recon loop');
+        break;
       }
 
       final prompt = _buildCommandPrompt(
@@ -914,6 +928,15 @@ Do NOT propose another port scan variant. Instead:
         final emptyApproach = CommandUtils.classifyReconApproach(command, address);
         approachFailureCounts[emptyApproach] = (approachFailureCounts[emptyApproach] ?? 0) + 1;
         approachFailureReasons.putIfAbsent(emptyApproach, () => 'produced empty output');
+      }
+
+      // Phase 4.4: Update stall detection counters based on findings size delta
+      final currentFindingsSize = _findingsSize(findings);
+      if (currentFindingsSize > findingsSizeAtLastCheck) {
+        itersSinceNewData = 0;
+        findingsSizeAtLastCheck = currentFindingsSize;
+      } else {
+        itersSinceNewData++;
       }
     }
 
@@ -1750,6 +1773,23 @@ Use passive sources — do not send emails or interact with mail servers.
     return count;
   }
 
+  /// Phase 4.4: Compute a weighted size score for findings to detect stalled loops.
+  /// Returns a numeric score that grows when new data is actually added to findings.
+  static int _findingsSize(Map<String, dynamic> findings) {
+    int size = 0;
+    final ports = (findings['open_ports'] as List?) ?? [];
+    size += ports.length * 10;
+    final web = (findings['web_findings'] as List?) ?? [];
+    size += web.length * 5;
+    final dns = (findings['dns_findings'] as List?) ?? [];
+    size += dns.length * 3;
+    // Count any non-empty string values as data
+    findings.forEach((k, v) {
+      if (v is String && v.isNotEmpty) size += v.length;
+    });
+    return size;
+  }
+
   /// Detect if the target appears to be an embedded device.
   static bool _isEmbeddedDevice(Map<String, dynamic> findings) {
     final indicators = [
@@ -1831,11 +1871,16 @@ These never contain version or vulnerability information on embedded devices.\n'
     String output,
     Map<String, dynamic> findings,
   ) async {
-    // Phase 4.4: Try deterministic parsers first to avoid LLM token spend.
+    // Try deterministic parsers first to avoid LLM token spend.
     // Falls back to LLM parsing for complex/unknown output formats.
     final deterministicResult = _tryDeterministicParse(command, output, address);
     if (deterministicResult != null) {
       _deepMerge(findings, deterministicResult);
+      return;
+    }
+
+    // Phase 1.1: Skip LLM extraction for trivial/empty outputs
+    if (_isTrivialOutput(output)) {
       return;
     }
 
@@ -1861,54 +1906,7 @@ CRITICAL FOR VERSION EXTRACTION:
 - If you see asset URLs like "/core/assets/vendor/jquery/jquery.min.js?v=10.6.3", the "v=" value is the CMS version
 
 Schema:
-{
-  "device": {
-    "os": "full OS string",
-    "os_version": "version",
-    "hostname": "hostname",
-    "mac": "MAC address",
-    "uptime": "uptime if shown"
-  },
-  "open_ports": [{
-    "port": 80,
-    "protocol": "tcp",
-    "state": "open",
-    "service": "http",
-    "product": "Apache httpd",
-    "version": "2.4.41",
-    "extra_info": "(Ubuntu)",
-    "banner": "raw banner text",
-    "cpe": "cpe:/a:apache:http_server:2.4.41"
-  }],
-  "nmap_scripts": [{"port": 80, "script_id": "http-title", "output": "full script output"}],
-  "web_findings": [{
-    "url": "http://target:80",
-    "status": 200,
-    "server": "Apache/2.4.41",
-    "content_type": "text/html",
-    "powered_by": "PHP/7.4",
-    "headers": {"X-Frame-Options": "SAMEORIGIN"},
-    "title": "page title",
-    "paths_found": ["/admin", "/login"],
-    "technologies": ["WordPress 5.8", "jQuery 3.6"],
-    "notes": "any other relevant observations"
-  }],
-  "smb_findings": [{
-    "share": "ADMIN\$",
-    "type": "Disk",
-    "access": "NO ACCESS",
-    "os": "Windows 10",
-    "domain": "WORKGROUP",
-    "signing": "disabled",
-    "notes": ""
-  }],
-  "dns_findings": [{"record_type": "A", "name": "target", "value": "1.2.3.4", "ttl": 300}],
-  "ftp_findings": [{"anonymous_allowed": false, "banner": "vsftpd 3.0.3", "files": []}],
-  "ssh_findings": [{"version": "OpenSSH 8.2", "algorithms": [], "host_keys": []}],
-  "db_findings": [{"type": "mysql", "version": "8.0.27", "databases": [], "notes": ""}],
-  "waf_findings": [{"waf": "Cloudflare", "detected_by": "cf-ray header", "notes": "rate limiting likely"}],
-  "other_findings": [{"type": "snmp", "data": "full extracted data"}]
-}
+${_buildDynamicSchema(command)}
 
 Respond ONLY with valid JSON.''';
 
@@ -1947,6 +1945,178 @@ Respond ONLY with valid JSON.''';
     }
 
     return null; // Unknown format — fall back to LLM
+  }
+
+  /// Phase 1.1: Returns true when command output contains no actionable data
+  /// worth sending to the LLM for extraction — saves significant token cost.
+  bool _isTrivialOutput(String output) {
+    final trimmed = output.trim();
+
+    // Always skip if under 100 chars (no meaningful data possible)
+    if (trimmed.length < 100) {
+      // BUT allow short outputs that contain useful patterns
+      final usefulShortPatterns = [
+        RegExp(r'\d+/tcp\s+open'),                              // nmap port line
+        RegExp(r'230\s+login\s+success', caseSensitive: false), // FTP anon success
+        RegExp(r'ssh-\d+\.\d+', caseSensitive: false),          // SSH version
+        RegExp(r'220\s+\w', caseSensitive: false),               // FTP/SMTP banner
+        RegExp(r'HTTP/\d\.\d\s+\d{3}'),                         // HTTP response
+      ];
+      if (usefulShortPatterns.any((p) => p.hasMatch(trimmed))) return false;
+      return true;
+    }
+
+    final lowerOutput = trimmed.toLowerCase();
+
+    // Error-only outputs (these specific strings mean nothing extractable)
+    final errorOnlyLines = [
+      'connection refused',
+      'operation not permitted',
+      'quitting!',
+      'no route to host',
+      'host unreachable',
+      'network unreachable',
+      'you requested a scan type which requires root',
+      'permission denied',
+      'command not found',
+      'ncat: ',
+      'arping: socket:',
+      'socket: operation not permitted',
+    ];
+
+    // If output is short AND contains only error text, skip
+    if (trimmed.length < 300) {
+      final isAllErrors = errorOnlyLines.any((e) => lowerOutput.contains(e));
+      // But don't skip if there's something useful alongside the error
+      final hasUsefulData = lowerOutput.contains('/tcp') ||
+          lowerOutput.contains('/udp') ||
+          lowerOutput.contains('version') ||
+          lowerOutput.contains('banner') ||
+          RegExp(r'\d+\.\d+\.\d+').hasMatch(lowerOutput); // version number
+      if (isAllErrors && !hasUsefulData) return true;
+    }
+
+    return false;
+  }
+
+  /// Phase 1.2: Returns only the schema sections relevant to the command being
+  /// parsed. Reduces prompt tokens by omitting irrelevant schema sections.
+  String _buildDynamicSchema(String command) {
+    final cmd = command.toLowerCase();
+
+    final sections = <String>[];
+
+    // Device block — always included
+    sections.add('''  "device": {
+    "os": "full OS string",
+    "os_version": "version",
+    "hostname": "hostname",
+    "mac": "MAC address",
+    "uptime": "uptime if shown"
+  }''');
+
+    // Open ports — for nmap, masscan, port scan output
+    final isPortScan = cmd.contains('nmap') || cmd.contains('masscan') ||
+        cmd.contains('rustscan') || cmd.contains('unicornscan') ||
+        cmd.contains('-p ') || cmd.contains('--top-ports');
+    if (isPortScan) {
+      sections.add('''  "open_ports": [{
+    "port": 80,
+    "protocol": "tcp",
+    "state": "open",
+    "service": "http",
+    "product": "Apache httpd",
+    "version": "2.4.41",
+    "extra_info": "(Ubuntu)",
+    "banner": "raw banner text",
+    "cpe": "cpe:/a:apache:http_server:2.4.41"
+  }]''');
+      sections.add('  "nmap_scripts": [{"port": 80, "script_id": "http-title", "output": "full script output"}]');
+    }
+
+    // Web findings — for curl, wget, HTTP requests, nikto, gobuster, ffuf, dirb
+    final isWeb = cmd.contains('curl') || cmd.contains('wget') ||
+        cmd.contains('http') || cmd.contains('nikto') ||
+        cmd.contains('gobuster') || cmd.contains('ffuf') ||
+        cmd.contains('dirb') || cmd.contains('wfuzz') ||
+        cmd.contains('whatweb') || cmd.contains('wafw00f');
+    if (isWeb) {
+      sections.add('''  "web_findings": [{
+    "url": "http://target:80",
+    "status": 200,
+    "server": "Apache/2.4.41",
+    "content_type": "text/html",
+    "powered_by": "PHP/7.4",
+    "headers": {"X-Frame-Options": "SAMEORIGIN"},
+    "title": "page title",
+    "paths_found": ["/admin", "/login"],
+    "technologies": ["WordPress 5.8", "jQuery 3.6"],
+    "notes": "any other relevant observations"
+  }]''');
+      sections.add('  "waf_findings": [{"waf": "Cloudflare", "detected_by": "cf-ray header", "notes": "rate limiting likely"}]');
+    }
+
+    // SMB findings — for smbclient, crackmapexec smb, nmap smb scripts
+    final isSmb = cmd.contains('smbclient') || cmd.contains('crackmapexec') ||
+        cmd.contains('smbmap') || cmd.contains('enum4linux') ||
+        (cmd.contains('nmap') && (cmd.contains('smb') || cmd.contains('445') || cmd.contains('139')));
+    if (isSmb) {
+      sections.add('''  "smb_findings": [{
+    "share": "ADMIN\$",
+    "type": "Disk",
+    "access": "NO ACCESS",
+    "os": "Windows 10",
+    "domain": "WORKGROUP",
+    "signing": "disabled",
+    "notes": ""
+  }]''');
+    }
+
+    // DNS findings — for dig, nslookup, host, dnsrecon, fierce, dnsenum
+    final isDns = cmd.contains('dig') || cmd.contains('nslookup') ||
+        cmd.contains('host ') || cmd.contains('dnsrecon') ||
+        cmd.contains('fierce') || cmd.contains('dnsenum') ||
+        cmd.contains('zone-transfer') || (cmd.contains('nmap') && cmd.contains('dns'));
+    if (isDns) {
+      sections.add('  "dns_findings": [{"record_type": "A", "name": "target", "value": "1.2.3.4", "ttl": 300}]');
+    }
+
+    // FTP findings — for ftp, lftp, curl ftp://
+    final isFtp = cmd.contains(' ftp') || cmd.contains('lftp') ||
+        cmd.contains('ftp://') || (cmd.contains('nmap') && cmd.contains('ftp'));
+    if (isFtp) {
+      sections.add('  "ftp_findings": [{"anonymous_allowed": false, "banner": "vsftpd 3.0.3", "files": []}]');
+    }
+
+    // SSH findings — for ssh-keyscan, nmap ssh scripts
+    final isSsh = cmd.contains('ssh-keyscan') ||
+        (cmd.contains('nmap') && cmd.contains('ssh'));
+    if (isSsh) {
+      sections.add('  "ssh_findings": [{"version": "OpenSSH 8.2", "algorithms": [], "host_keys": []}]');
+    }
+
+    // DB findings — for mysql, psql, mongo, redis, mssql
+    final isDb = cmd.contains('mysql') || cmd.contains('psql') ||
+        cmd.contains('mongo') || cmd.contains('redis') ||
+        cmd.contains('sqlcmd') || cmd.contains('mssql') ||
+        cmd.contains('3306') || cmd.contains('5432') || cmd.contains('27017');
+    if (isDb) {
+      sections.add('  "db_findings": [{"type": "mysql", "version": "8.0.27", "databases": [], "notes": ""}]');
+    }
+
+    // SNMP findings — for snmpwalk, onesixtyone, etc.
+    final isSnmp = cmd.contains('snmp') || cmd.contains('onesixtyone') ||
+        cmd.contains('161') || cmd.contains('162');
+    if (isSnmp) {
+      sections.add('  "other_findings": [{"type": "snmp", "data": "full extracted data"}]');
+    }
+
+    // If nothing specific matched, include a generic catch-all
+    if (!isPortScan && !isWeb && !isSmb && !isDns && !isFtp && !isSsh && !isDb && !isSnmp) {
+      sections.add('  "other_findings": [{"type": "generic", "data": "full extracted data"}]');
+    }
+
+    return '{\n${sections.join(',\n')}\n}';
   }
 
   /// Parse dig/nslookup output into dns_findings entries.

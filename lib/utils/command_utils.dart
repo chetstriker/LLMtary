@@ -145,15 +145,39 @@ class CommandUtils {
   }
   /// Normalize a command string for duplicate detection.
   ///
-  /// Lowercases, collapses whitespace, strips curl flags, and masks timestamps.
+  /// Lowercases, collapses whitespace, strips output file redirections,
+  /// iteration-specific temp paths, curl flags, and masks timestamps.
   static String normalizeCommand(String cmd) {
     return cmd
         .trim()
+        // Strip nmap output file flags: -oX file.xml, -oN file.txt, -oG file, -oA base
+        .replaceAll(RegExp(r'-o[XxNnGgAa]\s+\S+'), '')
+        // Strip output redirection: > file, 2>file
+        .replaceAll(RegExp(r'\s2?>\s*\S+'), '')
+        // Strip --output-file=...
+        .replaceAll(RegExp(r'--output(?:-file)?(?:=|\s)\S+'), '')
+        // Strip temp iteration files like /tmp/scan_iter3.xml → /tmp/scan
+        .replaceAll(RegExp(r'/tmp/\w+_iter\d+\.\w+'), '/tmp/scan')
+        .replaceAll(RegExp(r'/tmp/\w+\d+\.\w+'), '/tmp/scan')
         .toLowerCase()
         .replaceAll(RegExp(r'\s+'), ' ')
+        // Strip nmap output file flags: -oX file.xml, -oN file.txt, -oG file.gnmap, -oA basename
+        .replaceAll(RegExp(r'-o[xngXNGA]\s+\S+'), '')
+        // Strip output redirection: > file, >> file, 2> file
+        .replaceAll(RegExp(r'2?>>?\s+\S+'), '')
+        .replaceAll(RegExp(r'>\s+\S+'), '')
+        // Strip --output-file=... or --output ...
+        .replaceAll(RegExp(r'--output(?:-file)?(?:=|\s+)\S+'), '')
+        // Strip iteration-specific temp file paths /tmp/scan_iter3.xml -> /tmp/scan.xml
+        .replaceAll(RegExp(r'/tmp/[a-z_]+_iter\d+[._]\w+'), '/tmp/scan')
+        .replaceAll(RegExp(r'/tmp/[a-z_]+\d+[._]\w+'), '/tmp/scan')
+        // Strip curl flags (existing)
         .replaceAll(RegExp(r'curl\s+(-[a-zA-Z]+\s+)*'), 'curl ')
+        // Strip timestamps (existing)
         .replaceAll(RegExp(r'\d{4}-\d{2}-\d{2}'), 'DATE')
-        .replaceAll(RegExp(r'\d{2}:\d{2}:\d{2}'), 'TIME');
+        .replaceAll(RegExp(r'\d{2}:\d{2}:\d{2}'), 'TIME')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
   }
 
   /// Check if a command is functionally similar to already executed commands.

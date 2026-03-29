@@ -32,6 +32,27 @@ class CommandExecutor {
   // Track tools whose setup has failed (to avoid repeated attempts)
   static final Set<String> _toolSetupFailures = {};
 
+  // Track known-invalid nmap script names to avoid wasting iterations
+  static final Set<String> _invalidNmapScripts = {'dcom', 'rdp-enum-encryption'};
+
+  // Tool flag hint dictionary for commonly misused tools
+  static const Map<String, String> _toolFlagHints = {
+    'ffuf': 'ffuf -w WORDLIST -u URL/FUZZ [-e .php,.html,.txt] [-x http://proxy:8080 (proxy only, NOT extensions)] [-mc 200,301,302] [-fc 404]',
+    'nmap': 'nmap [-sV] [-sC] [-p PORTS] [-oX outfile.xml] [--script SCRIPTNAME] (scripts: smb-enum-shares, http-title, ftp-anon, ssl-cert, msrpc-enum, etc. — NOT "dcom", use msrpc-enum for RPC)',
+    'curl': 'curl [-sk] [-o /dev/null] [-w "%{http_code}"] [-H "Header: value"] [-d "body"] [-X POST] [-b "cookie=val"] [-L]',
+    'hydra': 'hydra -L users.txt -P pass.txt [-s PORT] [-f] SERVICE://TARGET (services: ftp, ssh, http-post-form, smb)',
+    'sqlmap': 'sqlmap -u "URL" [--data "body"] [--dbs] [--tables] [--dump] [-p PARAM] [--level=3] [--risk=2]',
+    'wfuzz': 'wfuzz -w WORDLIST -u URL/FUZZ [--hc 404] [--hw N] [-H "Header: val"]',
+    'gobuster': 'gobuster dir -u URL -w WORDLIST [-x .php,.html] [-b 404,403] [-t 40]',
+    'nikto': 'nikto -h TARGET [-p PORT] [-ssl] [-C all]',
+    'enum4linux': 'enum4linux [-a] [-U] [-S] [-G] TARGET',
+    'smbclient': r"smbclient //TARGET/SHARE [-U 'user%pass'] [-N] [-c 'ls']",
+    'rpcclient': "rpcclient -U '' -N TARGET -c 'enumdomusers'",
+    'crackmapexec': 'crackmapexec smb TARGET [-u USER] [-p PASS] [--shares] [--users] [--pass-pol]',
+    'ncat': 'ncat [-w TIMEOUT] [-z] TARGET PORT  (use -w3 for short timeout)',
+    'ftp': 'ftp TARGET PORT  (then: open TARGET PORT, user anonymous, ls, get FILE)',
+  };
+
   // Mark a tool's setup as failed so we don't retry
   static void markToolSetupFailed(String tool) {
     _toolSetupFailures.add(tool.toLowerCase());
@@ -317,6 +338,38 @@ Respond ONLY with valid JSON.''';
     _toolUsageCache.clear();
     _toolSetupCache.clear();
     _toolSetupFailures.clear();
+  }
+
+  /// Add a known-invalid nmap script name so future commands using it are skipped.
+  static void addInvalidNmapScript(String scriptName) {
+    final name = scriptName.trim();
+    if (name.isNotEmpty && _invalidNmapScripts.add(name)) {
+      print('${_timestamp()} DEBUG: Added invalid nmap script to blocklist: $name');
+    }
+  }
+
+  /// Return a formatted hint block for the given list of tool names.
+  /// Only includes entries that appear in [tools].
+  static String getToolHints(List<String> tools) {
+    final matched = <String>[];
+    for (final tool in tools) {
+      final key = tool.trim().toLowerCase();
+      if (_toolFlagHints.containsKey(key)) {
+        matched.add('- $key: ${_toolFlagHints[key]}');
+      }
+    }
+    if (matched.isEmpty) return '';
+    return '## Tool Usage Reference (correct flags):\n${matched.join('\n')}';
+  }
+
+  /// Extract the tool name from a command string (first token, path prefix stripped).
+  static List<String> extractToolsFromCommand(String command) {
+    final trimmed = command.trim();
+    if (trimmed.isEmpty) return [];
+    // Take the first whitespace-delimited token and strip any leading path
+    final firstToken = trimmed.split(RegExp(r'\s+')).first;
+    final toolName = firstToken.split(RegExp(r'[/\\]')).last.toLowerCase();
+    return toolName.isNotEmpty ? [toolName] : [];
   }
   
   static Future<String> getOsInfo() async {
@@ -1109,6 +1162,84 @@ Respond ONLY with valid JSON.''';
     }
   }
 
+  /// Extract all script names from an nmap --script argument.
+  /// Handles both `--script name1,name2` and repeated `--script name` patterns.
+  static List<String> _extractNmapScriptNames(String command) {
+    final scripts = <String>[];
+    // Match all --script <value> occurrences (value may be comma-separated)
+    final pattern = RegExp(r'--script\s+([^\s\-][^\s]*)', caseSensitive: false);
+    for (final match in pattern.allMatches(command)) {
+      final value = match.group(1) ?? '';
+      for (final name in value.split(',')) {
+        final trimmed = name.trim();
+        if (trimmed.isNotEmpty) scripts.add(trimmed);
+      }
+    }
+    return scripts;
+  }
+
+  /// Parse nmap output for invalid-script error messages and register any found names.
+  static void _checkNmapOutputForInvalidScripts(String output) {
+    // Pattern: "NSE: failed to open: /usr/share/nmap/scripts/dcom.nse"
+    // Pattern: "dcom did not match a category, filename, or directory"
+    // Pattern: "No such script: dcom"
+    final patterns = [
+      RegExp(r"Failed to open[^/]*/usr/share/nmap/scripts/([^\s\.]+)", caseSensitive: false),
+      RegExp(r"(\S+)\s+did not match a category", caseSensitive: false),
+      RegExp(r"No such script[:\s]+(\S+)", caseSensitive: false),
+    ];
+    for (final re in patterns) {
+      for (final match in re.allMatches(output)) {
+        final name = (match.group(1) ?? '').trim();
+        if (name.isNotEmpty) {
+          addInvalidNmapScript(name);
+        }
+      }
+    }
+  }
+
+  /// Phase 5.1: Returns true if the command was an nmap UDP/SNMP scan that failed
+  /// because root privileges are required.
+  static bool _isSnmpRootFailure(String command, String output) {
+    final cmdLower = command.toLowerCase();
+    final outLower = output.toLowerCase();
+    return (cmdLower.contains('nmap') && cmdLower.contains('-su')) &&
+        (outLower.contains('requires root privileges') ||
+         outLower.contains('quitting!') ||
+         outLower.contains('must be root'));
+  }
+
+  /// Phase 5.1: Retry SNMP enumeration using non-root tools when nmap UDP scan
+  /// fails due to privilege requirements.
+  static Future<Map<String, dynamic>?> _retrySnmpWithoutRoot(String originalCmd, bool elevated) async {
+    // Extract target IP from original nmap command
+    final ipMatch = RegExp(r'\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b').firstMatch(originalCmd);
+    if (ipMatch == null) return null;
+    final target = ipMatch.group(1)!;
+
+    final fallbacks = [
+      'snmpwalk -v2c -c public $target 2>/dev/null',
+      'onesixtyone $target public 2>/dev/null',
+      'snmpwalk -v2c -c private $target 2>/dev/null',
+      'snmpwalk -v1 -c public $target 2>/dev/null',
+    ];
+
+    for (final cmd in fallbacks) {
+      try {
+        final result = await executeCommand(cmd, elevated)
+            .timeout(const Duration(seconds: 20));
+        final out = (result['output'] ?? '').toString();
+        // Return first result that has actual SNMP data (not just empty or error)
+        if ((result['exitCode'] as int? ?? -1) == 0 && out.length > 30) {
+          return result;
+        }
+      } catch (_) {
+        continue;
+      }
+    }
+    return null;
+  }
+
   static Future<Map<String, dynamic>> executeCommand(String command, bool requireApproval, {String? adminPassword, Future<String?> Function(String)? onApprovalNeeded}) async {
     for (final pattern in _dangerousPatterns) {
       if (pattern.hasMatch(command)) {
@@ -1117,6 +1248,23 @@ Respond ONLY with valid JSON.''';
           'output': 'BLOCKED: Dangerous command detected',
           'error': 'Command matches dangerous pattern: ${pattern.pattern}',
         };
+      }
+    }
+
+    // Phase 4.2 — Nmap script name validation
+    // Before executing, check whether any --script names are known-invalid.
+    if (command.contains('--script')) {
+      final scriptNames = _extractNmapScriptNames(command);
+      for (final name in scriptNames) {
+        if (_invalidNmapScripts.contains(name.toLowerCase()) ||
+            _invalidNmapScripts.contains(name)) {
+          print('${_timestamp()} DEBUG: Skipping nmap command — script "$name" is known invalid');
+          return {
+            'exitCode': 1,
+            'output': "SKIPPED: nmap script '$name' is known invalid. Use a different approach.",
+            'error': "Invalid nmap script: $name",
+          };
+        }
       }
     }
 
@@ -1152,7 +1300,7 @@ Respond ONLY with valid JSON.''';
       }
 
       CommandResult result;
-      
+
       if (Platform.isWindows) {
         if (await isWslAvailable()) {
           result = await _executeInWsl(execCommand);
@@ -1169,7 +1317,20 @@ Respond ONLY with valid JSON.''';
           'error': 'Platform not supported',
         };
       }
-      
+
+      // Phase 4.2 — parse nmap output for invalid script names and register them
+      if (command.contains('nmap')) {
+        final combinedOutput = '${result.output}\n${result.error}';
+        _checkNmapOutputForInvalidScripts(combinedOutput);
+
+        // Phase 5.1: SNMP privilege fallback — if nmap UDP scan failed due to root requirement,
+        // automatically retry with non-root SNMP tools
+        if (_isSnmpRootFailure(command, combinedOutput)) {
+          final fallbackResult = await _retrySnmpWithoutRoot(command, requireApproval);
+          if (fallbackResult != null) return fallbackResult;
+        }
+      }
+
       return {
         'exitCode': result.exitCode,
         'output': result.output.isEmpty ? result.error : result.output,

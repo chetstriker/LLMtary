@@ -6,6 +6,19 @@ import '../utils/device_utils.dart';
 /// Separates the large prompt text from orchestration logic to keep
 /// exploit_executor.dart focused on its core loop.
 class PromptTemplates {
+  /// Current version of the prompt template library.
+  /// Increment this when making changes to any prompt text.
+  static const int promptTemplateVersion = 2;
+
+  /// Changelog:
+  /// v2 (2026-03-29): Added AJP/Ghostcat prompt, JetDirect/PJL prompt,
+  ///                  fixed RPC enumeration commands, strengthened AD gating.
+  /// v1 (initial):    Original prompt set.
+  static const String promptVersionChangelog = '''
+v2 (2026-03-29): Added ajpGhostcatPrompt, jetDirectPjlPrompt. Fixed dcom script reference.
+v1 (initial): Original prompt templates.
+''';
+
   // ---------------------------------------------------------------------------
   // Specialized analysis prompts
   // ---------------------------------------------------------------------------
@@ -551,6 +564,13 @@ $deviceJson
   Evidence to look for: port 5985 (HTTP) or 5986 (HTTPS) open; service name "winrm", "microsoft-httpapi", or "wsman"; Windows host indicators.
   Generate a finding when WinRM ports are detected: accessibility combined with any credential (domain account, local admin) yields remote command execution.
   Severity: HIGH when accessible with non-admin credentials; CRITICAL when accessible from external network or without authentication.
+- RPC Endpoint Mapper (port 135):
+  Attacker objective: enumerate RPC services to identify attack surface and pivot paths.
+  Evidence to look for: port 135 open on a Windows host.
+  Correct RPC enumeration approach: enumerate registered endpoints via the RPC endpoint mapper, then enumerate domain users and groups via named pipe authentication.
+  Correct commands: `nmap -p 135 --script msrpc-enum TARGET`, `rpcclient -U "" -N TARGET -c "enumdomusers"`, `impacket-rpcdump TARGET`
+  Note: `nmap --script dcom` is NOT a valid script — use `msrpc-enum` instead.
+  Severity: MEDIUM (information disclosure) to HIGH (if null session domain enumeration succeeds).
 - WMI over DCOM (port 135 + Windows host + domain environment):
   Attacker objective: execute commands via Windows Management Instrumentation using any valid credential — a native Windows capability that is difficult to detect.
   Evidence to look for: port 135 (RPC endpoint mapper) open on a Windows host with a domain environment confirmed; any Windows service account implied by application stack.
@@ -5168,4 +5188,75 @@ Most business logic findings will be MEDIUM confidence from recon — the attack
 - Do NOT generate findings for features that have no evidence in the recon data
 
 ''';
+
+  /// Analysis prompt for AJP/Apache JServ Protocol vulnerabilities (port 8009).
+  /// Fired when AJP service is detected. Covers Ghostcat (CVE-2020-1938) and AJP misconfigs.
+  static String ajpGhostcatPrompt(String deviceJson) {
+    return '''You are an expert penetration tester analyzing an AJP (Apache JServ Protocol) connector.
+
+Target reconnaissance data:
+$deviceJson
+
+AJP is detected on this target. Analyze for the following vulnerabilities:
+
+## 1. Ghostcat / CVE-2020-1938 (CRITICAL)
+Apache Tomcat versions < 9.0.31 / 8.5.51 / 7.0.100 allow unauthenticated file read and potential RCE via the AJP connector.
+- The attack reads arbitrary files from the web application (e.g., /WEB-INF/web.xml reveals credentials/config)
+- RCE is possible if file upload is enabled on the target
+- Evidence: AJP connector accepting connections on port 8009 with no authentication required
+
+## 2. AJP Authentication Bypass
+AJP connectors with no requiredSecret attribute allow direct request forwarding with arbitrary attributes
+- Attackers can set javax.servlet.include.* attributes to access restricted resources
+- Evidence: AJP connector responds to requests without authentication challenge
+
+## 3. Information Disclosure via AJP
+Internal server state, headers, and resources may be accessible without HTTP-layer controls
+- Evidence: AJP responds with internal-only content not visible via HTTP/HTTPS
+
+## 4. Unencrypted AJP (MEDIUM)
+Standard AJP (port 8009) is plaintext — all traffic including session tokens is interceptable
+- Evidence: AJP port open without TLS wrapper
+
+Based on the recon data, generate findings for each applicable vulnerability.
+Return a JSON array of vulnerability objects:
+[{"problem": "string", "severity": "CRITICAL|HIGH|MEDIUM|LOW", "confidence": "HIGH|MEDIUM|LOW", "evidence": "string", "description": "string", "recommendation": "string", "vulnerabilityType": "string", "attackVector": "NETWORK", "proofCommand": "optional proof-of-concept command"}]
+
+Only include findings that are plausible given the recon data. If Tomcat version is unknown, set confidence to MEDIUM for Ghostcat.''';
+  }
+
+  /// Analysis prompt for JetDirect/PJL printer vulnerabilities (port 9100).
+  /// Covers PJL information disclosure, filesystem access, and config read attacks.
+  static String jetDirectPjlPrompt(String deviceJson) {
+    return '''You are an expert penetration tester analyzing a JetDirect/PJL printer service.
+
+Target reconnaissance data:
+$deviceJson
+
+Port 9100 (JetDirect) is open. Analyze for the following printer-specific vulnerabilities:
+
+## 1. PJL Information Disclosure (HIGH)
+PJL (Printer Job Language) allows querying printer identity and firmware without authentication.
+Proof command: echo -e "@PJL\\r\\n@PJL INFO ID\\r\\n" | ncat -w3 TARGET 9100
+Expected evidence: Printer model string, firmware version returned
+
+## 2. PJL Filesystem Directory Listing (HIGH)
+Some printers expose their filesystem via PJL FSDIRLIST, allowing enumeration of stored files.
+Proof command: printf "@PJL\\r\\n@PJL FSDIRLIST FORMAT:BINARY NAME=\\"0:\\\\\\\\" ENTRY=1 COUNT=64\\r\\n" | ncat -w3 TARGET 9100
+Expected evidence: Directory listing of printer storage
+
+## 3. PJL Config File Read (HIGH)
+The printer config file (CFG-PAGE.TXT) may contain network settings and admin credentials.
+Proof command: printf "@PJL\\r\\n@PJL FSQUERY FORMAT:BINARY NAME=\\"0:\\\\\\\\CFG-PAGE.TXT\\"\\r\\n" | ncat -w3 TARGET 9100
+Expected evidence: Config file content with IP settings, potentially admin password
+
+## 4. PJL Factory Reset (CRITICAL - Destructive, mark as observation only)
+PJL allows unauthenticated reset of the printer to factory defaults.
+DO NOT execute — mark as a theoretical finding if PJL access is confirmed.
+
+IMPORTANT: All ncat commands to port 9100 must use -w3 (3 second timeout). Do not use longer timeouts.
+
+Generate findings for each applicable vulnerability based on the recon data.
+Return a JSON array: [{"problem": "...", "severity": "...", "confidence": "...", "evidence": "...", "description": "...", "recommendation": "...", "vulnerabilityType": "...", "proofCommand": "..."}]''';
+  }
 }

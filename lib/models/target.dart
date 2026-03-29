@@ -11,6 +11,9 @@ class Target {
   bool executionComplete;
   /// True when analysis completed but produced 0 vulnerability findings.
   bool noFindings;
+  /// Stores the device classification result (e.g. 'router', 'workstation', 'webServer').
+  /// Populated after recon completes via DeviceClassifier.
+  String? classifiedAs;
 
   Target({
     this.id,
@@ -22,6 +25,7 @@ class Target {
     this.analysisComplete = false,
     this.executionComplete = false,
     this.noFindings = false,
+    this.classifiedAs,
   });
 
   Map<String, dynamic> toMap() => {
@@ -33,6 +37,7 @@ class Target {
     'status': status.name,
     'analysisComplete': analysisComplete ? 1 : 0,
     'executionComplete': executionComplete ? 1 : 0,
+    if (classifiedAs != null) 'classifiedAs': classifiedAs,
   };
 
   factory Target.fromMap(Map<String, dynamic> map) => Target(
@@ -47,5 +52,6 @@ class Target {
     ),
     analysisComplete: (map['analysisComplete'] as int? ?? 0) == 1,
     executionComplete: (map['executionComplete'] as int? ?? 0) == 1,
+    classifiedAs: map['classifiedAs'] as String?,
   );
 }

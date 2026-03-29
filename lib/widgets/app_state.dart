@@ -113,6 +113,63 @@ class AppState extends ChangeNotifier {
   int get tokensSentReport => _tokensSentReport;
   int get tokensReceivedReport => _tokensReceivedReport;
 
+  /// Estimated cost in USD based on current token usage and the active provider's pricing.
+  double get estimatedCostUsd {
+    final inputTokens = _tokensSentTotal / 4.0; // chars to tokens approximation
+    final outputTokens = _tokensReceivedTotal / 4.0;
+
+    // Per-MTok pricing (input, output) by provider
+    double inputPricePerMTok = 0.0;
+    double outputPricePerMTok = 0.0;
+
+    switch (_llmSettings.provider) {
+      case LLMProvider.claude:
+        // Approximate Sonnet pricing
+        inputPricePerMTok = 3.0;
+        outputPricePerMTok = 15.0;
+        break;
+      case LLMProvider.chatGPT:
+        inputPricePerMTok = 2.5;
+        outputPricePerMTok = 10.0;
+        break;
+      case LLMProvider.gemini:
+        inputPricePerMTok = 1.25;
+        outputPricePerMTok = 5.0;
+        break;
+      case LLMProvider.openRouter:
+        // Conservative estimate
+        inputPricePerMTok = 2.0;
+        outputPricePerMTok = 8.0;
+        break;
+      case LLMProvider.ollama:
+      case LLMProvider.lmStudio:
+      case LLMProvider.none:
+      case LLMProvider.custom:
+        return 0.0; // Local — free
+    }
+
+    return (inputTokens / 1000000.0 * inputPricePerMTok) +
+           (outputTokens / 1000000.0 * outputPricePerMTok);
+  }
+
+  /// Formatted cost string for display (e.g., "~\$12.45" or "Local (free)")
+  String get estimatedCostDisplay {
+    final provider = _llmSettings.provider;
+    if (provider == LLMProvider.ollama || provider == LLMProvider.lmStudio ||
+        provider == LLMProvider.none) {
+      return 'Local (free)';
+    }
+    final cost = estimatedCostUsd;
+    if (cost < 0.01) return '<\$0.01';
+    return '~\$${cost.toStringAsFixed(2)}';
+  }
+
+  /// Estimated tokens sent across all phases
+  int get estimatedTokensSent => (_tokensSentTotal / 4).round();
+
+  /// Estimated tokens received across all phases
+  int get estimatedTokensReceived => (_tokensReceivedTotal / 4).round();
+
   void recordTokenUsage(String phase, int sent, int received, {int targetId = 0}) {
     _tokensSentTotal += sent;
     _tokensReceivedTotal += received;

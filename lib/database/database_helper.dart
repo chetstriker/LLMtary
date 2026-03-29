@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart';
 import 'package:path_provider/path_provider.dart';
@@ -27,7 +29,7 @@ class DatabaseHelper {
 
     final db = await openDatabase(
       path,
-      version: 18,
+      version: 20,
       singleInstance: true,
       onConfigure: (db) async {
         await db.execute('PRAGMA busy_timeout=5000');
@@ -65,7 +67,8 @@ class DatabaseHelper {
             targetId INTEGER DEFAULT 0,
             projectId INTEGER DEFAULT 0,
             status TEXT NOT NULL,
-            remediationClass TEXT NOT NULL DEFAULT 'unclassified'
+            remediationClass TEXT NOT NULL DEFAULT 'unclassified',
+            reportReady INTEGER NOT NULL DEFAULT 1
           )
         ''');
 
@@ -132,7 +135,8 @@ class DatabaseHelper {
             summary TEXT,
             status TEXT NOT NULL,
             analysisComplete INTEGER NOT NULL DEFAULT 0,
-            executionComplete INTEGER NOT NULL DEFAULT 0
+            executionComplete INTEGER NOT NULL DEFAULT 0,
+            classifiedAs TEXT
           )
         ''');
 
@@ -213,6 +217,24 @@ class DatabaseHelper {
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
           )
         ''');
+
+        await db.execute('''
+          CREATE TABLE IF NOT EXISTS session_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            projectId INTEGER NOT NULL,
+            targetId INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            phase TEXT,
+            input_chars INTEGER DEFAULT 0,
+            output_chars INTEGER DEFAULT 0,
+            duration_ms INTEGER DEFAULT 0,
+            metadata TEXT DEFAULT '{}',
+            timestamp TEXT NOT NULL
+          )
+        ''');
+        await db.execute(
+          'CREATE INDEX IF NOT EXISTS idx_session_events ON session_events(projectId, targetId, phase)'
+        );
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         debugPrint('[DB] onUpgrade: $oldVersion → $newVersion');
@@ -381,6 +403,29 @@ class DatabaseHelper {
               FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
             )
           ''');
+        }
+        if (oldVersion < 19) {
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS session_events (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              projectId INTEGER NOT NULL,
+              targetId INTEGER NOT NULL,
+              event_type TEXT NOT NULL,
+              phase TEXT,
+              input_chars INTEGER DEFAULT 0,
+              output_chars INTEGER DEFAULT 0,
+              duration_ms INTEGER DEFAULT 0,
+              metadata TEXT DEFAULT '{}',
+              timestamp TEXT NOT NULL
+            )
+          ''');
+          await db.execute(
+            'CREATE INDEX IF NOT EXISTS idx_session_events ON session_events(projectId, targetId, phase)'
+          );
+        }
+        if (oldVersion < 20) {
+          try { await db.execute('ALTER TABLE vulnerabilities ADD COLUMN reportReady INTEGER NOT NULL DEFAULT 1'); } catch (_) {}
+          try { await db.execute('ALTER TABLE targets ADD COLUMN classifiedAs TEXT'); } catch (_) {}
         }
       },
     );
@@ -863,5 +908,410 @@ class DatabaseHelper {
           : (sent: existing.sent + s, received: existing.received + rv);
     }
     return result;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 6.1 — Session Events
+  // ---------------------------------------------------------------------------
+
+  /// Insert a structured session event for tracking LLM calls, commands, and
+  /// phase transitions. [metadata] is serialised to a JSON string for storage.
+  static Future<void> insertSessionEvent({
+    required int projectId,
+    required int targetId,
+    required String eventType,
+    String? phase,
+    int inputChars = 0,
+    int outputChars = 0,
+    int durationMs = 0,
+    Map<String, dynamic> metadata = const {},
+  }) async {
+    final db = await database;
+    await db.insert('session_events', {
+      'projectId': projectId,
+      'targetId': targetId,
+      'event_type': eventType,
+      'phase': phase,
+      'input_chars': inputChars,
+      'output_chars': outputChars,
+      'duration_ms': durationMs,
+      'metadata': jsonEncode(metadata),
+      'timestamp': DateTime.now().toIso8601String(),
+    });
+  }
+
+  /// Query session events for a project, optionally filtered by [phase] and/or
+  /// [eventType]. Results are ordered chronologically (oldest first).
+  static Future<List<Map<String, dynamic>>> getSessionEvents(
+    int projectId, {
+    String? phase,
+    String? eventType,
+  }) async {
+    final db = await database;
+    final conditions = <String>['projectId = ?'];
+    final args = <dynamic>[projectId];
+    if (phase != null) {
+      conditions.add('phase = ?');
+      args.add(phase);
+    }
+    if (eventType != null) {
+      conditions.add('event_type = ?');
+      args.add(eventType);
+    }
+    return db.query(
+      'session_events',
+      where: conditions.join(' AND '),
+      whereArgs: args,
+      orderBy: 'timestamp ASC',
+    );
+  }
+
+  /// Returns aggregate statistics for a project derived from [session_events].
+  ///
+  /// Returned map keys:
+  ///   totalLlmCalls, totalInputChars, totalOutputChars, totalCommands,
+  ///   estimatedInputTokens, estimatedOutputTokens,
+  ///   perPhase (Map with recon/analysis/execution sub-maps).
+  static Future<Map<String, dynamic>> getSessionStats(int projectId) async {
+    final rows = await getSessionEvents(projectId);
+
+    int totalLlmCalls = 0;
+    int totalInputChars = 0;
+    int totalOutputChars = 0;
+    int totalCommands = 0;
+
+    // Per-phase accumulators: recon, analysis, execution
+    final phaseKeys = ['recon', 'analysis', 'execution'];
+    final perPhase = <String, Map<String, int>>{
+      for (final k in phaseKeys)
+        k: {'llmCalls': 0, 'inputChars': 0, 'outputChars': 0, 'commands': 0},
+    };
+
+    for (final row in rows) {
+      final eventType = row['event_type'] as String? ?? '';
+      final phase = (row['phase'] as String? ?? '').toLowerCase();
+      final inputChars = row['input_chars'] as int? ?? 0;
+      final outputChars = row['output_chars'] as int? ?? 0;
+
+      if (eventType == 'llm_call') {
+        totalLlmCalls++;
+        totalInputChars += inputChars;
+        totalOutputChars += outputChars;
+        if (perPhase.containsKey(phase)) {
+          perPhase[phase]!['llmCalls'] = (perPhase[phase]!['llmCalls'] ?? 0) + 1;
+          perPhase[phase]!['inputChars'] = (perPhase[phase]!['inputChars'] ?? 0) + inputChars;
+          perPhase[phase]!['outputChars'] = (perPhase[phase]!['outputChars'] ?? 0) + outputChars;
+        }
+      } else if (eventType == 'command_run') {
+        totalCommands++;
+        if (perPhase.containsKey(phase)) {
+          perPhase[phase]!['commands'] = (perPhase[phase]!['commands'] ?? 0) + 1;
+        }
+      }
+    }
+
+    return {
+      'totalLlmCalls': totalLlmCalls,
+      'totalInputChars': totalInputChars,
+      'totalOutputChars': totalOutputChars,
+      'totalCommands': totalCommands,
+      'estimatedInputTokens': totalInputChars ~/ 4,
+      'estimatedOutputTokens': totalOutputChars ~/ 4,
+      'perPhase': perPhase,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 2.1 — Composite-Key Vulnerability Deduplication
+  // ---------------------------------------------------------------------------
+
+  /// Extracts the primary port number from a vulnerability's [evidence] and
+  /// [description] text. Returns null if no port pattern is found.
+  ///
+  /// Recognised patterns (case-insensitive):
+  ///   "port 21", "port 8000", ":21 ", ":8000 ", "/21/", "21/tcp"
+  static int? extractPrimaryPort(String evidence, String description) {
+    final combined = '$evidence $description';
+    // Ordered from most specific to least specific to reduce false positives.
+    final patterns = [
+      RegExp(r'\bport\s+(\d{1,5})\b', caseSensitive: false),
+      RegExp(r':(\d{1,5})\s'),
+      RegExp(r'/(\d{1,5})/', caseSensitive: false),
+      RegExp(r'\b(\d{1,5})/tcp\b', caseSensitive: false),
+      RegExp(r'\b(\d{1,5})/udp\b', caseSensitive: false),
+    ];
+
+    for (final pattern in patterns) {
+      final match = pattern.firstMatch(combined);
+      if (match != null) {
+        final port = int.tryParse(match.group(1) ?? '');
+        if (port != null && port >= 1 && port <= 65535) return port;
+      }
+    }
+    return null;
+  }
+
+  /// Returns an existing [Vulnerability] that matches the composite key
+  /// (projectId, targetId, targetAddress, port, vulnerabilityType), or null
+  /// if no duplicate exists.
+  static Future<Vulnerability?> findDuplicateVulnerability({
+    required int projectId,
+    required int targetId,
+    required String targetAddress,
+    required String vulnerabilityType,
+    required int port,
+  }) async {
+    final db = await database;
+    // Fetch all findings for this project+target+address+type — port matching
+    // must be done in Dart because the port is extracted from free-text fields.
+    final rows = await db.query(
+      'vulnerabilities',
+      where: 'projectId = ? AND targetId = ? AND targetAddress = ? AND vulnerabilityType = ?',
+      whereArgs: [projectId, targetId, targetAddress, vulnerabilityType],
+    );
+    for (final row in rows) {
+      final vuln = Vulnerability.fromMap(row);
+      final existingPort = extractPrimaryPort(vuln.evidence, vuln.description);
+      if (existingPort == port) return vuln;
+    }
+    return null;
+  }
+
+  /// Returns a numeric rank for a [VulnerabilityStatus] value.
+  /// Higher rank = more valuable to keep.
+  static int _statusRank(VulnerabilityStatus s) {
+    switch (s) {
+      case VulnerabilityStatus.confirmed:    return 3;
+      case VulnerabilityStatus.undetermined: return 2;
+      case VulnerabilityStatus.notVulnerable: return 1;
+      case VulnerabilityStatus.pending:      return 0;
+    }
+  }
+
+  /// Runs a full composite-key deduplication pass across all findings for
+  /// [projectId]. Groups by (targetAddress, port, vulnerabilityType) and keeps
+  /// the "best" representative:
+  ///   confirmed > undetermined > notVulnerable > pending
+  ///   then longer evidence text as tiebreaker.
+  ///
+  /// Returns the count of removed duplicate records.
+  static Future<int> runDeduplicationPass(int projectId) async {
+    final db = await database;
+    final rows = await db.query(
+      'vulnerabilities',
+      where: 'projectId = ?',
+      whereArgs: [projectId],
+    );
+    final vulns = rows.map(Vulnerability.fromMap).toList();
+
+    // Group by composite key.
+    final groups = <String, List<Vulnerability>>{};
+    for (final v in vulns) {
+      final port = extractPrimaryPort(v.evidence, v.description) ?? 0;
+      final key = '${v.targetAddress}:$port:${v.vulnerabilityType}';
+      groups.putIfAbsent(key, () => []).add(v);
+    }
+
+    int removed = 0;
+    for (final entry in groups.entries) {
+      final group = entry.value;
+      if (group.length <= 1) continue;
+
+      // Determine the best finding to keep.
+      group.sort((a, b) {
+        final statusCmp = _statusRank(b.status).compareTo(_statusRank(a.status));
+        if (statusCmp != 0) return statusCmp;
+        return b.evidence.length.compareTo(a.evidence.length);
+      });
+
+      final keep = group.first;
+      final toRemove = group.skip(1).toList();
+
+      for (final dup in toRemove) {
+        if (dup.id == null) continue;
+        await db.delete('vulnerabilities', where: 'id = ?', whereArgs: [dup.id]);
+        removed++;
+        debugPrint(
+          '[DB] Dedup: merged "${dup.problem}" into "${keep.problem}" '
+          '(same port+vulnType composite key for ${dup.targetAddress})',
+        );
+      }
+    }
+    return removed;
+  }
+
+  /// Tokenises a vulnerability title into a set of lowercase words, stripping
+  /// common stop-words and non-alphabetic characters.
+  static Set<String> _tokenizeTitle(String title) {
+    const stopWords = {
+      'a', 'an', 'the', 'and', 'or', 'in', 'on', 'at', 'to', 'for',
+      'of', 'with', 'via', 'by', 'is', 'are', 'was', 'be', 'this',
+    };
+    return title
+        .toLowerCase()
+        .split(RegExp(r'[\s\W_]+'))
+        .where((w) => w.length > 2 && !stopWords.contains(w))
+        .toSet();
+  }
+
+  /// Computes the Jaccard similarity between two sets of tokens.
+  static double _jaccardSimilarity(Set<String> a, Set<String> b) {
+    if (a.isEmpty && b.isEmpty) return 1.0;
+    if (a.isEmpty || b.isEmpty) return 0.0;
+    final intersection = a.intersection(b).length;
+    final union = a.union(b).length;
+    return intersection / union;
+  }
+
+  /// Runs a title-similarity deduplication pass for [projectId].
+  /// Within each target, pairs of findings on the same [targetAddress] are
+  /// compared using Jaccard similarity on their tokenised titles. Pairs that
+  /// exceed [threshold] (default 0.65) are merged — keeping the better-status
+  /// finding, or the one with more evidence text on a tie.
+  ///
+  /// Returns the count of removed duplicate records.
+  static Future<int> runTitleSimilarityDedup(
+    int projectId, {
+    double threshold = 0.65,
+  }) async {
+    final db = await database;
+    final rows = await db.query(
+      'vulnerabilities',
+      where: 'projectId = ?',
+      whereArgs: [projectId],
+    );
+    final vulns = rows.map(Vulnerability.fromMap).toList();
+
+    // Group by targetAddress for pairwise comparison within each host.
+    final byAddress = <String, List<Vulnerability>>{};
+    for (final v in vulns) {
+      byAddress.putIfAbsent(v.targetAddress, () => []).add(v);
+    }
+
+    final toDelete = <int>{};
+
+    for (final group in byAddress.values) {
+      for (int i = 0; i < group.length; i++) {
+        for (int j = i + 1; j < group.length; j++) {
+          final a = group[i];
+          final b = group[j];
+
+          // Skip if either was already marked for removal.
+          if (toDelete.contains(a.id) || toDelete.contains(b.id)) continue;
+
+          // Only consider findings on the same target.
+          if (a.targetId != b.targetId) continue;
+
+          final tokA = _tokenizeTitle(a.problem);
+          final tokB = _tokenizeTitle(b.problem);
+          final sim = _jaccardSimilarity(tokA, tokB);
+
+          if (sim >= threshold) {
+            // Keep the one with higher status rank, then longer evidence.
+            final rankA = _statusRank(a.status);
+            final rankB = _statusRank(b.status);
+            final Vulnerability keep;
+            final Vulnerability discard;
+            if (rankA > rankB || (rankA == rankB && a.evidence.length >= b.evidence.length)) {
+              keep = a;
+              discard = b;
+            } else {
+              keep = b;
+              discard = a;
+            }
+            if (discard.id != null) {
+              toDelete.add(discard.id!);
+              debugPrint(
+                '[DB] TitleSimilarityDedup: merged "${discard.problem}" into '
+                '"${keep.problem}" (similarity=${sim.toStringAsFixed(2)}, '
+                'target=${discard.targetAddress})',
+              );
+            }
+          }
+        }
+      }
+    }
+
+    for (final id in toDelete) {
+      await db.delete('vulnerabilities', where: 'id = ?', whereArgs: [id]);
+    }
+    return toDelete.length;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 6.5 — Per-target re-analysis trigger
+  // ---------------------------------------------------------------------------
+
+  /// Clears all vulnerability findings for a specific target so it can be re-analyzed.
+  /// Does NOT clear other targets in the same project.
+  static Future<void> clearTargetFindings(int projectId, int targetId) async {
+    final db = await database;
+    await db.delete('vulnerabilities',
+        where: 'projectId = ? AND targetId = ?',
+        whereArgs: [projectId, targetId]);
+    // Also reset target analysis state
+    await db.update('targets',
+        {'analysisComplete': 0, 'executionComplete': 0},
+        where: 'id = ? AND projectId = ?',
+        whereArgs: [targetId, projectId]);
+  }
+
+  /// Resets all undetermined findings for a target back to pending so they can be re-executed.
+  static Future<int> resetUndeterminedToPending(int projectId, int targetId) async {
+    final db = await database;
+    return await db.update('vulnerabilities',
+        {'status': 'pending', 'statusReason': null, 'proofOutput': null},
+        where: 'projectId = ? AND targetId = ? AND status = ?',
+        whereArgs: [projectId, targetId, 'undetermined']);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 7.1 — Confidence calibration (report-ready filter)
+  // ---------------------------------------------------------------------------
+
+  /// Returns only report-ready findings (reportReady = 1 or null) for export.
+  static Future<List<Map<String, dynamic>>> getReportReadyVulnerabilities(
+      int projectId) async {
+    final db = await database;
+    return await db.query('vulnerabilities',
+        where: 'projectId = ? AND reportReady != 0',
+        whereArgs: [projectId],
+        orderBy: 'severity DESC, status DESC');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 7.2 — Attack chain tracking (data layer)
+  // ---------------------------------------------------------------------------
+
+  /// Returns all attack chain findings (vulnerabilityType = 'AttackChain') for a project.
+  static Future<List<Map<String, dynamic>>> getAttackChains(int projectId) async {
+    final db = await database;
+    return await db.query('vulnerabilities',
+        where: 'projectId = ? AND vulnerabilityType = ?',
+        whereArgs: [projectId, 'AttackChain'],
+        orderBy: 'severity DESC');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 6.3 — Post-Session Deduplication Pass
+  // ---------------------------------------------------------------------------
+
+  /// Runs both deduplication passes (composite-key and title-similarity) for
+  /// [projectId] and returns a summary map:
+  ///   { 'compositeRemoved': N, 'similarityRemoved': M, 'total': N+M }
+  ///
+  /// The pass is idempotent — running it twice produces the same result.
+  static Future<Map<String, int>> runFullDeduplicationPass(int projectId) async {
+    final compositeRemoved = await runDeduplicationPass(projectId);
+    final similarityRemoved = await runTitleSimilarityDedup(projectId);
+    debugPrint(
+      '[DB] runFullDeduplicationPass(project=$projectId): '
+      'composite=$compositeRemoved, similarity=$similarityRemoved',
+    );
+    return {
+      'compositeRemoved': compositeRemoved,
+      'similarityRemoved': similarityRemoved,
+      'total': compositeRemoved + similarityRemoved,
+    };
   }
 }

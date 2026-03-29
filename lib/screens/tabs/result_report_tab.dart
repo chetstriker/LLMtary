@@ -230,6 +230,10 @@ class _InlineReportFormState extends State<_InlineReportForm> {
           ),
           const SizedBox(height: 24),
 
+          // Attack chains
+          _AttackChainsSection(appState: appState),
+          const SizedBox(height: 24),
+
           // Authorship
           const Text('REPORT CONFIGURATION', style: TextStyle(color: _cyan, fontWeight: FontWeight.bold, fontSize: 12, letterSpacing: 1)),
           const SizedBox(height: 12),
@@ -412,6 +416,237 @@ class _InlineReportFormState extends State<_InlineReportForm> {
           border: Border.all(color: selected ? _cyan : Colors.white24),
         ),
         child: Text(label, style: TextStyle(color: selected ? Colors.black : Colors.white54, fontSize: 11, fontWeight: selected ? FontWeight.bold : FontWeight.normal)),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Attack chains panel
+// ---------------------------------------------------------------------------
+
+class _AttackChainsSection extends StatefulWidget {
+  final AppState appState;
+  const _AttackChainsSection({required this.appState});
+
+  @override
+  State<_AttackChainsSection> createState() => _AttackChainsSectionState();
+}
+
+class _AttackChainsSectionState extends State<_AttackChainsSection> {
+  List<Map<String, dynamic>> _chains = [];
+  bool _loading = false;
+  int? _loadedProjectId;
+
+  static const _cyan = Color(0xFF00F5FF);
+  static const _card = Color(0xFF1A1F3A);
+  static const _dark = Color(0xFF0A0E27);
+
+  @override
+  void didUpdateWidget(_AttackChainsSection oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final newId = widget.appState.currentProject?.id;
+    if (newId != _loadedProjectId) _load(newId);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _load(widget.appState.currentProject?.id);
+  }
+
+  Future<void> _load(int? projectId) async {
+    if (projectId == null) { setState(() { _chains = []; _loadedProjectId = null; }); return; }
+    setState(() => _loading = true);
+    final chains = await DatabaseHelper.getAttackChains(projectId);
+    if (mounted) setState(() { _chains = chains; _loadedProjectId = projectId; _loading = false; });
+  }
+
+  Color _severityColor(String severity) => switch (severity.toUpperCase()) {
+    'CRITICAL' => const Color(0xFFFF0040),
+    'HIGH'     => const Color(0xFFFF6B00),
+    'MEDIUM'   => const Color(0xFFFFAA00),
+    'LOW'      => _cyan,
+    _          => Colors.white38,
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    // Re-check if project changed since last build (e.g. Consumer rebuild)
+    final currentId = widget.appState.currentProject?.id;
+    if (currentId != _loadedProjectId && !_loading) {
+      Future.microtask(() => _load(currentId));
+    }
+
+    // Only render if there are chains or we're loading
+    final attackChains = _chains.where((c) {
+      final vt = (c['vulnerabilityType'] as String? ?? '');
+      return vt == 'AttackChain';
+    }).toList();
+
+    // Also include any AppState vulns of type AttackChain (live, before DB flush)
+    final liveChains = widget.appState.vulnerabilities
+        .where((v) => v.vulnerabilityType == 'AttackChain')
+        .toList();
+
+    // Merge: prefer DB records, supplement with live ones not yet persisted
+    final dbIds = {for (final c in attackChains) c['id'] as int?};
+    for (final lv in liveChains) {
+      if (!dbIds.contains(lv.id)) {
+        attackChains.add({
+          'id': lv.id,
+          'problem': lv.problem,
+          'severity': lv.severity,
+          'description': lv.description,
+          'evidence': lv.evidence,
+          'targetAddress': lv.targetAddress,
+          'vulnerabilityType': lv.vulnerabilityType,
+        });
+      }
+    }
+
+    if (!_loading && attackChains.isEmpty) return const SizedBox.shrink();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(children: [
+          const Text('ATTACK CHAINS', style: TextStyle(color: Color(0xFFFF6B00), fontWeight: FontWeight.bold, fontSize: 12, letterSpacing: 1)),
+          const SizedBox(width: 8),
+          if (_loading)
+            const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(color: Color(0xFFFF6B00), strokeWidth: 2))
+          else
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+              decoration: BoxDecoration(color: const Color(0xFFFF6B00).withValues(alpha: 0.2), borderRadius: BorderRadius.circular(10), border: Border.all(color: const Color(0xFFFF6B00).withValues(alpha: 0.5))),
+              child: Text('${attackChains.length}', style: const TextStyle(color: Color(0xFFFF6B00), fontSize: 10, fontWeight: FontWeight.bold)),
+            ),
+          const Spacer(),
+          IconButton(
+            icon: const Icon(Icons.refresh, size: 14, color: Color(0xFFFF6B00)),
+            onPressed: _loading ? null : () => _load(currentId),
+            tooltip: 'Refresh chains',
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(),
+          ),
+        ]),
+        const SizedBox(height: 8),
+        ...attackChains.map((chain) => _ChainCard(chain: chain, severityColor: _severityColor(chain['severity'] as String? ?? ''), cardColor: _card, darkColor: _dark)),
+      ],
+    );
+  }
+}
+
+class _ChainCard extends StatefulWidget {
+  final Map<String, dynamic> chain;
+  final Color severityColor;
+  final Color cardColor;
+  final Color darkColor;
+  const _ChainCard({required this.chain, required this.severityColor, required this.cardColor, required this.darkColor});
+
+  @override
+  State<_ChainCard> createState() => _ChainCardState();
+}
+
+class _ChainCardState extends State<_ChainCard> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final chain = widget.chain;
+    final problem = chain['problem'] as String? ?? 'Attack Chain';
+    final severity = (chain['severity'] as String? ?? 'UNKNOWN').toUpperCase();
+    final description = chain['description'] as String? ?? '';
+    final evidence = chain['evidence'] as String? ?? '';
+    final target = chain['targetAddress'] as String? ?? '';
+    final color = widget.severityColor;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Container(
+        decoration: BoxDecoration(
+          color: widget.cardColor,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: color.withValues(alpha: 0.4)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Header row — always visible
+            InkWell(
+              onTap: () => setState(() => _expanded = !_expanded),
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                child: Row(children: [
+                  // Severity badge
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                    decoration: BoxDecoration(color: color.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(4), border: Border.all(color: color.withValues(alpha: 0.6))),
+                    child: Text(severity, style: TextStyle(color: color, fontSize: 9, fontWeight: FontWeight.bold, letterSpacing: 0.8)),
+                  ),
+                  const SizedBox(width: 10),
+                  // Chain icon
+                  Icon(Icons.account_tree, size: 14, color: color.withValues(alpha: 0.7)),
+                  const SizedBox(width: 6),
+                  // Title
+                  Expanded(child: Text(problem, style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600), overflow: TextOverflow.ellipsis)),
+                  // Target badge
+                  if (target.isNotEmpty) ...[
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.05), borderRadius: BorderRadius.circular(4), border: Border.all(color: Colors.white12)),
+                      child: Text(target, style: const TextStyle(color: Colors.white38, fontSize: 9, fontFamily: 'monospace')),
+                    ),
+                  ],
+                  const SizedBox(width: 6),
+                  Icon(_expanded ? Icons.expand_less : Icons.expand_more, color: Colors.white38, size: 16),
+                ]),
+              ),
+            ),
+
+            // Expanded body
+            if (_expanded) ...[
+              const Divider(color: Colors.white12, height: 1),
+              Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (description.isNotEmpty) ...[
+                      const Text('CHAIN STEPS', style: TextStyle(color: Colors.white38, fontSize: 9, letterSpacing: 1, fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 6),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(color: widget.darkColor, borderRadius: BorderRadius.circular(6), border: Border.all(color: Colors.white12)),
+                        child: SelectableText(
+                          description,
+                          style: const TextStyle(color: Colors.white70, fontSize: 11, height: 1.6),
+                        ),
+                      ),
+                    ],
+                    if (evidence.isNotEmpty) ...[
+                      const SizedBox(height: 10),
+                      const Text('EVIDENCE', style: TextStyle(color: Colors.white38, fontSize: 9, letterSpacing: 1, fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 6),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(color: widget.darkColor, borderRadius: BorderRadius.circular(6), border: Border.all(color: Colors.white12)),
+                        child: SelectableText(
+                          evidence,
+                          style: const TextStyle(color: Colors.white54, fontSize: 11, fontStyle: FontStyle.italic, height: 1.5),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }

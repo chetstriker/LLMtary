@@ -169,6 +169,59 @@ class _MainScreenState extends State<MainScreen> {
             ),
             ),
           ),
+          // Execution status toast — bottom-center overlay
+          Consumer<AppState>(
+            builder: (context, appState, _) {
+              final status = appState.executionStatus;
+              return AnimatedSlide(
+                offset: status.isEmpty ? const Offset(0, 1.5) : Offset.zero,
+                duration: const Duration(milliseconds: 220),
+                curve: Curves.easeOut,
+                child: AnimatedOpacity(
+                  opacity: status.isEmpty ? 0.0 : 1.0,
+                  duration: const Duration(milliseconds: 180),
+                  child: Align(
+                    alignment: Alignment.bottomCenter,
+                    child: Padding(
+                      padding: const EdgeInsets.only(bottom: 16),
+                      child: Container(
+                        constraints: const BoxConstraints(maxWidth: 680),
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF0D0F1A),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: const Color(0xFFFFBB33).withValues(alpha: 0.6)),
+                          boxShadow: [
+                            BoxShadow(color: const Color(0xFFFFBB33).withValues(alpha: 0.12), blurRadius: 12, spreadRadius: 1),
+                            BoxShadow(color: Colors.black.withValues(alpha: 0.5), blurRadius: 8),
+                          ],
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const SizedBox(
+                              width: 10,
+                              height: 10,
+                              child: CircularProgressIndicator(color: Color(0xFFFFBB33), strokeWidth: 1.5),
+                            ),
+                            const SizedBox(width: 10),
+                            Flexible(
+                              child: Text(
+                                status,
+                                style: const TextStyle(color: Color(0xFFFFBB33), fontSize: 11, fontFamily: 'monospace'),
+                                overflow: TextOverflow.ellipsis,
+                                maxLines: 1,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
           _buildApprovalOverlay(),
         ],
       ),
@@ -223,22 +276,6 @@ class _MainScreenState extends State<MainScreen> {
         ],
       ),
       actions: [
-        Consumer<AppState>(
-          builder: (context, appState, _) {
-            final status = appState.executionStatus;
-            if (status.isEmpty) return const SizedBox.shrink();
-            return Container(
-              margin: const EdgeInsets.symmetric(vertical: 10),
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              decoration: BoxDecoration(
-                color: const Color(0xFF0D0F1A),
-                borderRadius: BorderRadius.circular(6),
-                border: Border.all(color: const Color(0xFFFFBB33).withValues(alpha: 0.6)),
-              ),
-              child: Text(status, style: const TextStyle(color: Color(0xFFFFBB33), fontSize: 10, fontFamily: 'monospace')),
-            );
-          },
-        ),
         const SizedBox(width: 8),
         Container(
           margin: const EdgeInsets.symmetric(vertical: 8),
