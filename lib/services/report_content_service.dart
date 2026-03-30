@@ -16,6 +16,7 @@ class ReportContentService {
   static Future<String> generateSection({
     required String prompt,
     required LLMSettings settings,
+    void Function(int sent, int received)? onTokensUsed,
   }) async {
     final writeSettings = LLMSettings(
       provider: settings.provider,
@@ -31,6 +32,7 @@ class ReportContentService {
       writeSettings,
       prompt,
       useSystemPrompt: false,
+      onTokensUsed: onTokensUsed,
     );
     return response.trim();
   }

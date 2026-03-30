@@ -1,6 +1,8 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import '../../models/credential.dart';
 import '../../models/vulnerability.dart';
 import '../../widgets/app_state.dart';
 import '../../widgets/stats_bar.dart';
@@ -10,8 +12,29 @@ import '../../services/report_generator.dart';
 import '../../services/report_content_service.dart';
 import '../../utils/file_dialog.dart';
 
-class ResultReportTab extends StatelessWidget {
+class ResultReportTab extends StatefulWidget {
   const ResultReportTab({super.key});
+
+  @override
+  State<ResultReportTab> createState() => _ResultReportTabState();
+}
+
+class _ResultReportTabState extends State<ResultReportTab> {
+  static const _cyan = Color(0xFF00F5FF);
+  static const _card = Color(0xFF1A1F3A);
+
+  final _formKey2 = GlobalKey<_InlineReportFormState>();
+  String _format = 'html';
+  bool _confirmedOnly = true;
+  bool _savingReport = false;
+
+  Future<void> _onGenerate() async {
+    await _formKey2.currentState?.doGenerate(
+      _format,
+      _confirmedOnly,
+      onSavingChanged: (v) { if (mounted) setState(() => _savingReport = v); },
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -23,12 +46,97 @@ class ResultReportTab extends StatelessWidget {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Expanded(child: _InlineReportForm(appState: appState)),
-                const SizedBox(width: 350, child: _TokenStatsPanel()),
+                Expanded(child: _InlineReportForm(key: _formKey2, appState: appState)),
+                SizedBox(
+                  width: 350,
+                  child: _TokenStatsPanel(generateWidget: _buildGenerateCard(appState)),
+                ),
               ],
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildGenerateCard(AppState appState) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: const BoxDecoration(
+        color: _card,
+        border: Border(bottom: BorderSide(color: Colors.white12)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('GENERATE', style: TextStyle(color: _cyan, fontSize: 10, fontWeight: FontWeight.bold, letterSpacing: 1)),
+          const SizedBox(height: 10),
+          Row(children: [
+            const Text('Format:', style: TextStyle(color: Colors.white54, fontSize: 12)),
+            const SizedBox(width: 8),
+            _fmtChip('html', 'HTML'),
+            const SizedBox(width: 6),
+            _fmtChip('md', 'Markdown'),
+            const SizedBox(width: 6),
+            _fmtChip('csv', 'CSV'),
+          ]),
+          const SizedBox(height: 6),
+          Row(children: [
+            SizedBox(
+              width: 20,
+              height: 20,
+              child: Checkbox(
+                value: _confirmedOnly,
+                onChanged: (v) => setState(() => _confirmedOnly = v ?? true),
+                activeColor: _cyan,
+                side: const BorderSide(color: Colors.white38),
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+            ),
+            const SizedBox(width: 6),
+            const Text('Confirmed only', style: TextStyle(color: Colors.white54, fontSize: 12)),
+          ]),
+          const SizedBox(height: 12),
+          if (_savingReport)
+            const Row(children: [
+              SizedBox(width: 16, height: 16, child: CircularProgressIndicator(color: _cyan, strokeWidth: 2)),
+              SizedBox(width: 10),
+              Expanded(child: Text('Generating report…', style: TextStyle(color: Colors.white54, fontSize: 12))),
+            ])
+          else
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: appState.hasResults && !_savingReport ? _onGenerate : null,
+                icon: const Icon(Icons.download, size: 16),
+                label: const Text('Generate Report', style: TextStyle(fontWeight: FontWeight.bold)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _cyan,
+                  foregroundColor: Colors.black,
+                  disabledBackgroundColor: _cyan.withValues(alpha: 0.2),
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _fmtChip(String value, String label) {
+    final selected = _format == value;
+    return InkWell(
+      onTap: () => setState(() => _format = value),
+      borderRadius: BorderRadius.circular(20),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        decoration: BoxDecoration(
+          color: selected ? _cyan : Colors.transparent,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: selected ? _cyan : Colors.white24),
+        ),
+        child: Text(label, style: TextStyle(color: selected ? Colors.black : Colors.white54, fontSize: 11, fontWeight: selected ? FontWeight.bold : FontWeight.normal)),
       ),
     );
   }
@@ -40,7 +148,7 @@ class ResultReportTab extends StatelessWidget {
 
 class _InlineReportForm extends StatefulWidget {
   final AppState appState;
-  const _InlineReportForm({required this.appState});
+  const _InlineReportForm({super.key, required this.appState});
 
   @override
   State<_InlineReportForm> createState() => _InlineReportFormState();
@@ -57,9 +165,6 @@ class _InlineReportFormState extends State<_InlineReportForm> {
 
   DateTime? _startDate;
   DateTime? _endDate;
-  String _format = 'html';
-  bool _confirmedOnly = true;
-  bool _savingReport = false;
   final Map<String, bool> _generating = {
     'executiveSummary': false,
     'methodology': false,
@@ -67,7 +172,7 @@ class _InlineReportFormState extends State<_InlineReportForm> {
     'conclusion': false,
   };
 
-  bool get _anyGenerating => _generating.values.any((v) => v) || _savingReport;
+  bool get _anyGenerating => _generating.values.any((v) => v);
 
   static const _cyan = Color(0xFF00F5FF);
   static const _card = Color(0xFF1A1F3A);
@@ -104,6 +209,7 @@ class _InlineReportFormState extends State<_InlineReportForm> {
       final text = await ReportContentService.generateSection(
         prompt: prompt,
         settings: widget.appState.llmSettings,
+        onTokensUsed: (sent, received) => widget.appState.recordTokenUsage('report', sent, received),
       );
       ctrl.text = text;
     } catch (e) {
@@ -130,7 +236,8 @@ class _InlineReportFormState extends State<_InlineReportForm> {
     if (picked != null) setState(() { if (isStart) _startDate = picked; else _endDate = picked; });
   }
 
-  Future<void> _onGenerate() async {
+  /// Called by the parent tab's generate button. Public so _ResultReportTabState can invoke it.
+  Future<void> doGenerate(String format, bool confirmedOnly, {required void Function(bool) onSavingChanged}) async {
     if (!_formKey.currentState!.validate()) return;
     final project = widget.appState.currentProject;
     if (project?.id != null) {
@@ -146,7 +253,7 @@ class _InlineReportFormState extends State<_InlineReportForm> {
     }
 
     final slug = _titleCtrl.text.trim().replaceAll(RegExp(r'[^a-zA-Z0-9]+'), '_').replaceAll(RegExp(r'^_+|_+$'), '');
-    final fileName = switch (_format) {
+    final fileName = switch (format) {
       'html' => '${slug}_Report.html',
       'md'   => '${slug}_Report.md',
       'csv'  => '${slug}_Findings.csv',
@@ -155,7 +262,7 @@ class _InlineReportFormState extends State<_InlineReportForm> {
     final path = await FileDialog.saveFile(dialogTitle: 'Save Report', fileName: fileName);
     if (path == null || !mounted) return;
 
-    setState(() => _savingReport = true);
+    onSavingChanged(true);
     try {
       final updatedProject = (project ?? widget.appState.currentProject!).copyWith(
         reportTitle: _titleCtrl.text.trim(),
@@ -170,16 +277,16 @@ class _InlineReportFormState extends State<_InlineReportForm> {
           : <CommandLog>[];
 
       String? attackNarrative;
-      if (_format != 'csv') {
+      if (format != 'csv') {
         final narrativePrompt = ReportContentService.buildAttackNarrativePrompt(widget.appState);
         if (narrativePrompt != null) {
-          try { attackNarrative = await ReportContentService.generateSection(prompt: narrativePrompt, settings: widget.appState.llmSettings); } catch (_) {}
+          try { attackNarrative = await ReportContentService.generateSection(prompt: narrativePrompt, settings: widget.appState.llmSettings, onTokensUsed: (s, r) => widget.appState.recordTokenUsage('report', s, r)); } catch (_) {}
         }
       }
 
-      final content = switch (_format) {
-        'html' => ReportGenerator.generateHtml(project: updatedProject, targets: widget.appState.targets, vulnerabilities: widget.appState.vulnerabilities, credentials: widget.appState.credentials.toList(), commandLogs: commandLogs, scope: widget.appState.projectScope, llmSettings: widget.appState.llmSettings, startDate: _startDate, endDate: _endDate, attackNarrative: attackNarrative, confirmedOnly: _confirmedOnly),
-        'md'   => ReportGenerator.generateMarkdown(project: updatedProject, targets: widget.appState.targets, vulnerabilities: widget.appState.vulnerabilities, credentials: widget.appState.credentials.toList(), commandLogs: commandLogs, scope: widget.appState.projectScope, llmSettings: widget.appState.llmSettings, startDate: _startDate, endDate: _endDate, attackNarrative: attackNarrative, confirmedOnly: _confirmedOnly),
+      final content = switch (format) {
+        'html' => ReportGenerator.generateHtml(project: updatedProject, targets: widget.appState.targets, vulnerabilities: widget.appState.vulnerabilities, credentials: widget.appState.credentials.toList(), commandLogs: commandLogs, scope: widget.appState.projectScope, llmSettings: widget.appState.llmSettings, startDate: _startDate, endDate: _endDate, attackNarrative: attackNarrative, confirmedOnly: confirmedOnly),
+        'md'   => ReportGenerator.generateMarkdown(project: updatedProject, targets: widget.appState.targets, vulnerabilities: widget.appState.vulnerabilities, credentials: widget.appState.credentials.toList(), commandLogs: commandLogs, scope: widget.appState.projectScope, llmSettings: widget.appState.llmSettings, startDate: _startDate, endDate: _endDate, attackNarrative: attackNarrative, confirmedOnly: confirmedOnly),
         'csv'  => ReportGenerator.generateCsv(vulnerabilities: widget.appState.vulnerabilities, commandLogs: commandLogs, confirmedOnly: false),
         _      => '',
       };
@@ -189,7 +296,7 @@ class _InlineReportFormState extends State<_InlineReportForm> {
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Report generation failed: $e')));
     } finally {
-      if (mounted) setState(() => _savingReport = false);
+      onSavingChanged(false);
     }
   }
 
@@ -225,7 +332,10 @@ class _InlineReportFormState extends State<_InlineReportForm> {
               _statCard('HIGH', high, const Color(0xFFFF6B00)),
               _statCard('MEDIUM', medium, const Color(0xFFFFAA00)),
               _statCard('LOW', low, _cyan),
-              _statCard('CREDS', appState.credentials.length, const Color(0xFF00FF88)),
+              _statCard('CREDS', appState.credentials.length, const Color(0xFF00FF88),
+                onTap: appState.credentials.isNotEmpty
+                    ? () => _showCredentialsDialog(context, appState.credentials.toList())
+                    : null),
             ],
           ),
           const SizedBox(height: 24),
@@ -266,66 +376,133 @@ class _InlineReportFormState extends State<_InlineReportForm> {
           const SizedBox(height: 10),
           _narrativeCard('conclusion', 'Conclusion', _conclusionCtrl,
               () => ReportContentService.buildConclusionPrompt(appState)),
-          const SizedBox(height: 20),
-
-          // Format + generate
-          _sectionCard('Generate', [
-            Row(children: [
-              const Text('Format:', style: TextStyle(color: Colors.white54, fontSize: 12)),
-              const SizedBox(width: 8),
-              _formatChip('html', 'HTML'),
-              const SizedBox(width: 6),
-              _formatChip('md', 'Markdown'),
-              const SizedBox(width: 6),
-              _formatChip('csv', 'CSV'),
-              const Spacer(),
-              Row(children: [
-                Checkbox(value: _confirmedOnly, onChanged: (v) => setState(() => _confirmedOnly = v ?? true), activeColor: _cyan, side: const BorderSide(color: Colors.white38)),
-                const Text('Confirmed only', style: TextStyle(color: Colors.white54, fontSize: 12)),
-              ]),
-            ]),
-            const SizedBox(height: 12),
-            if (_savingReport)
-              const Row(children: [
-                SizedBox(width: 16, height: 16, child: CircularProgressIndicator(color: _cyan, strokeWidth: 2)),
-                SizedBox(width: 12),
-                Text('Generating report…', style: TextStyle(color: Colors.white54, fontSize: 13)),
-              ])
-            else
-              AnimatedBuilder(
-                animation: Listenable.merge([_titleCtrl, _pentesterCtrl]),
-                builder: (_, __) {
-                  final enabled = !_anyGenerating && _titleCtrl.text.trim().isNotEmpty && _pentesterCtrl.text.trim().isNotEmpty && appState.hasResults;
-                  return SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton.icon(
-                      onPressed: enabled ? _onGenerate : null,
-                      icon: const Icon(Icons.download, size: 16),
-                      label: const Text('Generate Report', style: TextStyle(fontWeight: FontWeight.bold)),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: _cyan,
-                        foregroundColor: Colors.black,
-                        disabledBackgroundColor: _cyan.withValues(alpha: 0.2),
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                      ),
-                    ),
-                  );
-                },
-              ),
-          ]),
         ],
       ),
     );
   }
 
-  Widget _statCard(String label, int value, Color color) => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-    decoration: BoxDecoration(color: _card, borderRadius: BorderRadius.circular(8), border: Border.all(color: color.withValues(alpha: 0.3))),
-    child: Column(mainAxisSize: MainAxisSize.min, children: [
-      Text(value.toString(), style: TextStyle(color: color, fontSize: 20, fontWeight: FontWeight.bold, fontFamily: 'monospace')),
-      Text(label, style: const TextStyle(color: Colors.white38, fontSize: 9, letterSpacing: 0.8)),
-    ]),
-  );
+  Widget _statCard(String label, int value, Color color, {VoidCallback? onTap}) {
+    final card = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: _card,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: onTap != null ? color.withValues(alpha: 0.6) : color.withValues(alpha: 0.3)),
+      ),
+      child: Column(mainAxisSize: MainAxisSize.min, children: [
+        Text(value.toString(), style: TextStyle(color: color, fontSize: 20, fontWeight: FontWeight.bold, fontFamily: 'monospace')),
+        Text(label, style: const TextStyle(color: Colors.white38, fontSize: 9, letterSpacing: 0.8)),
+        if (onTap != null) ...[
+          const SizedBox(height: 2),
+          Icon(Icons.open_in_new, size: 9, color: color.withValues(alpha: 0.5)),
+        ],
+      ]),
+    );
+    if (onTap == null) return card;
+    return InkWell(onTap: onTap, borderRadius: BorderRadius.circular(8), child: card);
+  }
+
+  void _showCredentialsDialog(BuildContext context, List<DiscoveredCredential> creds) {
+    Widget credCell(String value, {bool isSecret = false}) => Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 6),
+      child: SelectableText(
+        value.isEmpty ? '—' : value,
+        style: TextStyle(
+          color: isSecret ? const Color(0xFFFFAA00) : Colors.white70,
+          fontSize: 11,
+          fontFamily: isSecret ? 'monospace' : null,
+        ),
+      ),
+    );
+
+    showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: const Color(0xFF0A0E27),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: const BorderSide(color: Color(0xFF00FF88), width: 1)),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 900, maxHeight: 600),
+          child: Column(
+            children: [
+              // Header
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                decoration: const BoxDecoration(
+                  color: Color(0xFF1A1F3A),
+                  borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
+                ),
+                child: Row(children: [
+                  const Icon(Icons.key, color: Color(0xFF00FF88), size: 16),
+                  const SizedBox(width: 8),
+                  Text('CAPTURED CREDENTIALS (${creds.length})',
+                      style: const TextStyle(color: Color(0xFF00FF88), fontWeight: FontWeight.bold, fontSize: 13, letterSpacing: 1)),
+                  const Spacer(),
+                  TextButton.icon(
+                    onPressed: () {
+                      final buf = StringBuffer('ADDRESS\tPORT/SERVICE\tUSERNAME\tPASSWORD/HASH\tTYPE\n');
+                      for (final c in creds) {
+                        buf.writeln('${c.host}\t${c.service}\t${c.username}\t${c.secret}\t${c.secretType}');
+                      }
+                      Clipboard.setData(ClipboardData(text: buf.toString()));
+                      ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Credentials copied to clipboard')));
+                    },
+                    icon: const Icon(Icons.copy, size: 13),
+                    label: const Text('Copy All', style: TextStyle(fontSize: 12)),
+                    style: TextButton.styleFrom(foregroundColor: const Color(0xFF00FF88)),
+                  ),
+                  const SizedBox(width: 8),
+                  IconButton(
+                    onPressed: () => Navigator.of(ctx).pop(),
+                    icon: const Icon(Icons.close, color: Colors.white38, size: 16),
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
+                  ),
+                ]),
+              ),
+              // Table
+              Expanded(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.all(16),
+                  child: Table(
+                    defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+                    columnWidths: const {
+                      0: FlexColumnWidth(2),
+                      1: FlexColumnWidth(2),
+                      2: FlexColumnWidth(2),
+                      3: FlexColumnWidth(3),
+                      4: FlexColumnWidth(1.5),
+                    },
+                    children: [
+                      TableRow(
+                        decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: Colors.white12))),
+                        children: ['ADDRESS', 'PORT / SERVICE', 'USERNAME', 'PASSWORD / HASH', 'TYPE'].map((h) =>
+                          Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 6),
+                            child: Text(h, style: const TextStyle(color: Color(0xFF00F5FF), fontSize: 10, fontWeight: FontWeight.bold, letterSpacing: 0.8)),
+                          )
+                        ).toList(),
+                      ),
+                      ...creds.asMap().entries.map((e) => TableRow(
+                        decoration: BoxDecoration(color: e.key.isOdd ? const Color(0xFF1A1F3A) : Colors.transparent),
+                        children: [
+                          credCell(e.value.host),
+                          credCell(e.value.service),
+                          credCell(e.value.username),
+                          credCell(e.value.secret, isSecret: true),
+                          credCell(e.value.secretType),
+                        ],
+                      )),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 
   Widget _sectionCard(String label, List<Widget> children) => Container(
     padding: const EdgeInsets.all(14),
@@ -402,23 +579,6 @@ class _InlineReportFormState extends State<_InlineReportForm> {
     ]);
   }
 
-  Widget _formatChip(String value, String label) {
-    final selected = _format == value;
-    return InkWell(
-      onTap: () => setState(() => _format = value),
-      borderRadius: BorderRadius.circular(20),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-        decoration: BoxDecoration(
-          color: selected ? _cyan : Colors.transparent,
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: selected ? _cyan : Colors.white24),
-        ),
-        child: Text(label, style: TextStyle(color: selected ? Colors.black : Colors.white54, fontSize: 11, fontWeight: selected ? FontWeight.bold : FontWeight.normal)),
-      ),
-    );
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -657,7 +817,8 @@ class _ChainCardState extends State<_ChainCard> {
 // ---------------------------------------------------------------------------
 
 class _TokenStatsPanel extends StatefulWidget {
-  const _TokenStatsPanel();
+  final Widget? generateWidget;
+  const _TokenStatsPanel({this.generateWidget});
 
   @override
   State<_TokenStatsPanel> createState() => _TokenStatsPanelState();
@@ -674,6 +835,7 @@ class _TokenStatsPanelState extends State<_TokenStatsPanel> {
     final targetMap = {for (final t in appState.targets) t.id.toString(): t.address};
     final mapped = <String, ({int sent, int received})>{};
     for (final entry in result.entries) {
+      if (entry.key == '0') continue; // skip phantom targetId=0 records
       final addr = targetMap[entry.key] ?? 'Target ${entry.key}';
       mapped[addr] = entry.value;
     }
@@ -685,27 +847,32 @@ class _TokenStatsPanelState extends State<_TokenStatsPanel> {
     return Consumer<AppState>(
       builder: (context, appState, _) => Container(
         color: const Color(0xFF0D1230),
-        child: Column(
-          children: [
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-              color: const Color(0xFF1A1F3A),
-              child: Row(children: [
-                const Text('TOKEN USAGE', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 11, letterSpacing: 1)),
-                const Spacer(),
-                IconButton(
-                  icon: _loadingByTarget
-                      ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(color: Color(0xFF00F5FF), strokeWidth: 2))
-                      : const Icon(Icons.refresh, color: Color(0xFF00F5FF), size: 16),
-                  onPressed: _loadingByTarget ? null : () => _refresh(appState),
-                  tooltip: 'Refresh from DB',
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(),
-                ),
-              ]),
-            ),
-            Expanded(
-              child: SingleChildScrollView(
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Generate card — at the top, above token stats
+              if (widget.generateWidget != null) widget.generateWidget!,
+              // TOKEN USAGE header
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                color: const Color(0xFF1A1F3A),
+                child: Row(children: [
+                  const Text('TOKEN USAGE', style: TextStyle(color: Color(0xFF00F5FF), fontWeight: FontWeight.bold, fontSize: 11, letterSpacing: 1)),
+                  const Spacer(),
+                  IconButton(
+                    icon: _loadingByTarget
+                        ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(color: Color(0xFF00F5FF), strokeWidth: 2))
+                        : const Icon(Icons.refresh, color: Color(0xFF00F5FF), size: 16),
+                    onPressed: _loadingByTarget ? null : () => _refresh(appState),
+                    tooltip: 'Refresh from DB',
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
+                  ),
+                ]),
+              ),
+              // Token stats content
+              Padding(
                 padding: const EdgeInsets.all(16),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -740,8 +907,8 @@ class _TokenStatsPanelState extends State<_TokenStatsPanel> {
                   ],
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

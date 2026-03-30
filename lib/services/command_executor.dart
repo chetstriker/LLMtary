@@ -1035,10 +1035,27 @@ Respond ONLY with valid JSON.''';
       process.stderr.transform(utf8.decoder).listen((data) {
         print('${_timestamp()} [INSTALL STDERR] $data');
         stderrBuffer.write(data);
+        // Detect interactive sudo password prompts — kill immediately so we
+        // don't wait 5 minutes for sudo to time out on its own.
+        if (data.contains('sudo: timed out reading password') ||
+            data.contains('sudo: a password is required') ||
+            data.contains('[sudo] password for')) {
+          print('${_timestamp()} DEBUG: sudo password prompt detected in install — killing process');
+          _killProcessTree(process).catchError((_) {});
+        }
       });
 
-      // Increased timeout to 3 minutes for package installation
-      final exitCode = await process.exitCode.timeout(const Duration(minutes: 3));
+      // Increased timeout to 3 minutes for package installation.
+      // On timeout, kill the process immediately so it cannot linger and
+      // block the caller (e.g. waiting for an interactive sudo prompt).
+      int exitCode;
+      try {
+        exitCode = await process.exitCode.timeout(const Duration(minutes: 3));
+      } on TimeoutException {
+        print('${_timestamp()} DEBUG: Install timed out — killing process');
+        await _killProcessTree(process);
+        return false;
+      }
       final stdout = stdoutBuffer.toString();
       final stderr = stderrBuffer.toString();
       print('${_timestamp()} DEBUG: Install exit code: $exitCode');
@@ -1287,16 +1304,22 @@ Respond ONLY with valid JSON.''';
     }
 
     try {
-      // Inject sudo password only when the command itself starts with 'sudo'.
-      // Wrapping arbitrary commands in 'bash -c "..."' breaks single-quoted
-      // strings inside the command (e.g. curl -d '{"key":"val"}').
+      // Inject the admin password for any command that contains 'sudo'.
+      //
+      // Strategy: place a thin sudo wrapper script earlier in PATH so that
+      // every 'sudo' call within the command chain (including nested subshells
+      // like "timeout N bash -c 'sudo nmap ...'") automatically receives the
+      // password via stdin without requiring a TTY.
       String execCommand = command;
-      if (adminPassword != null && adminPassword.isNotEmpty) {
-        if (command.trim().startsWith('sudo') && !command.contains('sudo -S')) {
+      if (adminPassword != null && adminPassword.isNotEmpty && execCommand.contains('sudo')) {
+        if (Platform.isLinux || Platform.isMacOS) {
+          await _ensureSudoWrapper(adminPassword);
+          // Prepend wrapper dir to PATH for this invocation.
+          execCommand = 'export PATH=/tmp:\$PATH; $execCommand';
+        } else if (command.trim().startsWith('sudo') && !command.contains('sudo -S')) {
+          // WSL / Windows fallback: inject password for top-level sudo only.
           execCommand = command.replaceFirst('sudo', 'echo "$adminPassword" | sudo -S');
         }
-        // For commands that don't start with sudo, run as-is.
-        // The LLM is responsible for including sudo where needed.
       }
 
       CommandResult result;
@@ -1354,6 +1377,31 @@ Respond ONLY with valid JSON.''';
 
   /// Global command timeout. Generous to accommodate any tool the LLM chooses.
   static const Duration _commandTimeout = Duration(minutes: 30);
+
+  /// Write (or overwrite) a thin sudo wrapper at a fixed path in /tmp so that
+  /// any 'sudo' call within a command chain receives the password automatically
+  /// via stdin without requiring an interactive TTY.
+  ///
+  /// The wrapper is placed in /tmp and callers prepend /tmp to PATH before
+  /// running the command, ensuring our wrapper shadows /usr/bin/sudo.
+  static Future<void> _ensureSudoWrapper(String password) async {
+    try {
+      // Single-quote–safe escaping: replace each ' with '\''
+      final escaped = password.replaceAll("'", "'\\''");
+      const wrapperPath = '/tmp/.pe_sudo';
+      await File(wrapperPath).writeAsString(
+        "#!/bin/bash\necho '$escaped' | /usr/bin/sudo -S \"\$@\"\n",
+      );
+      await Process.run('chmod', ['700', wrapperPath]);
+      // Symlink as 'sudo' in /tmp so PATH lookup finds it first.
+      const sudoLink = '/tmp/sudo';
+      if (!await File(sudoLink).exists()) {
+        await Process.run('ln', ['-sf', wrapperPath, sudoLink]);
+      }
+    } catch (_) {
+      // Non-fatal — fallback behaviour still applies.
+    }
+  }
 
   /// Kill a process and all its children to prevent orphaned subprocesses.
   static Future<void> _killProcessTree(Process process) async {
@@ -1439,6 +1487,16 @@ Respond ONLY with valid JSON.''';
           _killProcessTree(process!);
           return;
         }
+        // Detect interactive sudo password prompts and kill immediately to
+        // prevent the process from blocking for up to 5 minutes.
+        if (sanitized.contains('sudo: timed out reading password') ||
+            sanitized.contains('sudo: a password is required') ||
+            sanitized.contains('[sudo] password for')) {
+          killed = true;
+          killReason = 'sudo requested interactive password — ensure the command pipes the password via "sudo -S"';
+          _killProcessTree(process!);
+          return;
+        }
         print('${_timestamp()} [STDERR] $sanitized');
         stderrBuffer.write(sanitized);
       });
@@ -1508,6 +1566,15 @@ Respond ONLY with valid JSON.''';
         if (totalBytes > _maxOutputBytes) {
           killed = true;
           killReason = 'Output exceeded ${_maxOutputBytes ~/ 1024}KB limit';
+          _killProcessTree(process!);
+          return;
+        }
+        // Detect interactive sudo password prompts and kill immediately.
+        if (sanitized.contains('sudo: timed out reading password') ||
+            sanitized.contains('sudo: a password is required') ||
+            sanitized.contains('[sudo] password for')) {
+          killed = true;
+          killReason = 'sudo requested interactive password — ensure the command pipes the password via "sudo -S"';
           _killProcessTree(process!);
           return;
         }

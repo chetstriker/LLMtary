@@ -5,11 +5,13 @@ import '../models/target.dart';
 class TargetProgressList extends StatelessWidget {
   final List<Target> targets;
   final Set<String> activeAddresses;
+  final Future<void> Function(Target)? onReAnalyze;
 
   const TargetProgressList({
     super.key,
     required this.targets,
     this.activeAddresses = const {},
+    this.onReAnalyze,
   });
 
   @override
@@ -25,6 +27,7 @@ class TargetProgressList extends StatelessWidget {
       itemBuilder: (context, i) => _TargetCard(
         target: targets[i],
         isActive: activeAddresses.contains(targets[i].address),
+        onReAnalyze: onReAnalyze,
       ),
     );
   }
@@ -33,8 +36,9 @@ class TargetProgressList extends StatelessWidget {
 class _TargetCard extends StatelessWidget {
   final Target target;
   final bool isActive;
+  final Future<void> Function(Target)? onReAnalyze;
 
-  const _TargetCard({required this.target, required this.isActive});
+  const _TargetCard({required this.target, required this.isActive, this.onReAnalyze});
 
   @override
   Widget build(BuildContext context) {
@@ -72,6 +76,20 @@ class _TargetCard extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
+                // Re-analyze button — shown when analysis is complete and not actively running
+                if (onReAnalyze != null && target.analysisComplete && !isActive)
+                  Tooltip(
+                    message: 'Analyze again',
+                    child: InkWell(
+                      onTap: () => onReAnalyze!(target),
+                      borderRadius: BorderRadius.circular(4),
+                      child: const Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                        child: Icon(Icons.refresh, size: 14, color: Colors.white38),
+                      ),
+                    ),
+                  ),
+                const SizedBox(width: 4),
                 _statusChip(),
               ],
             ),

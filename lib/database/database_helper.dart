@@ -471,6 +471,11 @@ class DatabaseHelper {
     return maps.map((map) => CommandLog.fromMap(map)).toList();
   }
 
+  static Future<void> deleteCommandLogsByVulnId(int vulnId) async {
+    final db = await database;
+    await db.delete('command_logs', where: 'vulnerabilityId = ?', whereArgs: [vulnId]);
+  }
+
   static Future<void> clearCommandLogs() async {
     final db = await database;
     await db.delete('command_logs');

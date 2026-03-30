@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../../models/target.dart';
 import '../../models/vulnerability.dart';
 import '../../widgets/app_state.dart';
 import '../../widgets/vulnerability_table.dart';
@@ -18,6 +19,7 @@ class VulnHuntTab extends StatelessWidget {
   final Future<void> Function(AppState) onExportPrompts;
   final Future<void> Function(AppState) onExportDebug;
   final Set<String> analyzingAddresses;
+  final Future<void> Function(Target)? onReAnalyze;
 
   const VulnHuntTab({
     super.key,
@@ -30,6 +32,7 @@ class VulnHuntTab extends StatelessWidget {
     required this.onExportPrompts,
     required this.onExportDebug,
     this.analyzingAddresses = const {},
+    this.onReAnalyze,
   });
 
   @override
@@ -47,6 +50,7 @@ class VulnHuntTab extends StatelessWidget {
               child: TargetProgressList(
                 targets: activeTargets,
                 activeAddresses: analyzingAddresses,
+                onReAnalyze: onReAnalyze,
               ),
             ),
             // Center: StatsBar + VulnerabilityTable with PulsatingButton on ANALYZE
@@ -61,7 +65,7 @@ class VulnHuntTab extends StatelessWidget {
                             .where((t) => t.analysisComplete)
                             .length;
                         return StatCard(
-                          label: 'VULN COMP',
+                          label: 'DEVICES ANALYZED',
                           value: vulnComplete,
                           color: const Color(0xFFFFBB33),
                           icon: Icons.bug_report_outlined,

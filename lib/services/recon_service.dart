@@ -321,7 +321,7 @@ class ReconService {
   // Main recon loop
   // ---------------------------------------------------------------------------
 
-  Future<String?> reconTarget(String address, String projectName, {int projectId = 0, int targetId = 0}) async {
+  Future<String?> reconTarget(String address, String projectName, {int projectId = 0, int targetId = 0, String? scopeNotes}) async {
     final llmService = LLMService(onPromptResponse: onPromptResponse);
     final env = await _ExecEnv.detect();
     final scope = DeviceUtils.classifyTarget(address);
@@ -433,6 +433,7 @@ class ReconService {
       scope: scope,
       outDir: outDir,
       envInfo: envInfo,
+      scopeNotes: scopeNotes,
     );
 
     for (int iteration = 0; iteration < effectiveMaxIter; iteration++) {
@@ -739,7 +740,16 @@ Do NOT propose another port scan variant. Instead:
         if (!exists) {
           onProgress?.call('[$address] $tool not found, attempting install...');
           final packageManager = await CommandExecutor.detectPackageManager();
-          final installed = await CommandExecutor.installTool(tool, settings, llmService, adminPassword: adminPassword, onPasswordNeeded: onPasswordNeeded);
+          bool installed;
+          try {
+            installed = await CommandExecutor.installTool(
+                tool, settings, llmService,
+                adminPassword: adminPassword,
+                onPasswordNeeded: onPasswordNeeded);
+          } catch (e) {
+            onProgress?.call('[$address] Install failed for $tool: $e');
+            installed = false;
+          }
           final installLog = CommandLog(
             timestamp: DateTime.now(),
             command: '$packageManager install $tool',
@@ -979,6 +989,7 @@ Do NOT propose another port scan variant. Instead:
     required TargetScope scope,
     required String outDir,
     EnvironmentInfo? envInfo,
+    String? scopeNotes,
   }) {
     final baseline = scope == TargetScope.external
         ? _externalBaseline(address, env)
@@ -989,6 +1000,7 @@ Do NOT propose another port scan variant. Instead:
 Target scope: $scopeLabel
 Your sole goal is to COLLECT DATA. Do NOT test exploits, do NOT attempt logins, do NOT modify anything on the target.
 Every command must be read-only and purely informational.
+${(scopeNotes != null && scopeNotes.isNotEmpty) ? '\n## RULES OF ENGAGEMENT:\n$scopeNotes\nAdhere to these constraints throughout all reconnaissance activities.\n' : ''}
 
 ## ATTACKER SYSTEM:
 - OS: ${env.osInfo}

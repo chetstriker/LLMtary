@@ -29,6 +29,7 @@ class TargetInputPanel extends StatefulWidget {
   final String projectName;
   final int projectId;
   final int Function(String address)? getTargetId;
+  final String? scopeNotes;
 
   const TargetInputPanel({
     super.key,
@@ -51,6 +52,7 @@ class TargetInputPanel extends StatefulWidget {
     this.projectName = 'default',
     this.projectId = 0,
     this.getTargetId,
+    this.scopeNotes,
   });
 
   @override
@@ -60,12 +62,16 @@ class TargetInputPanel extends StatefulWidget {
 class TargetInputPanelState extends State<TargetInputPanel> {
   bool _isScanning = false;
   String _statusMessage = '';
+  bool _cancelRequested = false;
 
   // Active ReconService instances so we can cancel them on stop.
   final List<ReconService> _activeRecons = [];
 
   // Live target list built during scanning (mutable so we can update status)
   final List<Target> _liveTargets = [];
+
+  // Addresses added mid-scan via addAddressesToQueue.
+  final List<String> _dynamicQueue = [];
 
   @override
   void initState() {
@@ -102,6 +108,9 @@ class TargetInputPanelState extends State<TargetInputPanel> {
       final ok = await widget.onPasswordNeeded!();
       if (!ok) return;
     }
+
+    _cancelRequested = false;
+    _dynamicQueue.clear();
 
     setState(() {
       _isScanning = true;
@@ -207,8 +216,30 @@ class TargetInputPanelState extends State<TargetInputPanel> {
           : TargetScope.internal;
       final concurrency = firstScope == TargetScope.external ? 2 : 4;
 
-      for (int batchStart = 0; batchStart < aliveHosts.length; batchStart += concurrency) {
-        final batch = aliveHosts.skip(batchStart).take(concurrency).toList();
+      // Use a mutable work list so mid-scan additions can be appended.
+      final workList = List<String>.from(aliveHosts);
+      int batchStart = 0;
+
+      while (!_cancelRequested) {
+        // Drain any addresses added via addAddressesToQueue.
+        if (_dynamicQueue.isNotEmpty) {
+          final additions = List<String>.from(_dynamicQueue);
+          _dynamicQueue.clear();
+          for (final addr in additions) {
+            if (!workList.contains(addr)) {
+              workList.add(addr);
+            }
+          }
+        }
+
+        if (batchStart >= workList.length) break;
+
+        final batch = workList.sublist(
+          batchStart,
+          (batchStart + concurrency).clamp(0, workList.length),
+        );
+        batchStart += batch.length;
+
         for (final addr in batch) _updateTargetStatus(addr, TargetStatus.scanning);
 
         final batchResults = await Future.wait(batch.map((addr) async {
@@ -234,6 +265,7 @@ class TargetInputPanelState extends State<TargetInputPanel> {
             addr, widget.projectName,
             projectId: widget.projectId,
             targetId: widget.getTargetId?.call(addr) ?? 0,
+            scopeNotes: widget.scopeNotes,
           );
           _activeRecons.remove(recon);
           return MapEntry(addr, result);
@@ -244,6 +276,9 @@ class TargetInputPanelState extends State<TargetInputPanel> {
           final filePath = entry.value;
           if (filePath != null) {
             _updateTargetStatus(addr, TargetStatus.complete, jsonFilePath: filePath);
+          } else if (_cancelRequested) {
+            // Recon was interrupted — keep as pending so RESUME picks it up.
+            _updateTargetStatus(addr, TargetStatus.pending);
           } else {
             _updateTargetStatus(addr, TargetStatus.excluded);
           }
@@ -324,6 +359,7 @@ class TargetInputPanelState extends State<TargetInputPanel> {
 
   /// Cancel all active recon loops.
   void stopScan() {
+    _cancelRequested = true;
     for (final recon in _activeRecons) {
       recon.cancel();
     }
@@ -332,6 +368,33 @@ class TargetInputPanelState extends State<TargetInputPanel> {
       _statusMessage = 'Scan stopped by user';
       _isScanning = false;
     });
+  }
+
+  /// Add new addresses to the running scan queue. Deduplicates against
+  /// existing targets. If not scanning, they appear as pending and will
+  /// be picked up on the next GO/RESUME press.
+  Future<void> addAddressesToQueue(List<String> rawAddresses) async {
+    final existingAddrs = _liveTargets.map((t) => t.address).toSet();
+    final novel = rawAddresses.where((a) => !existingAddrs.contains(a)).toList();
+    if (novel.isEmpty) return;
+    for (final addr in novel) {
+      _liveTargets.add(Target(address: addr, status: TargetStatus.pending));
+    }
+    if (_isScanning) {
+      _dynamicQueue.addAll(novel);
+    }
+    await widget.onTargetsDiscovered(List.from(_liveTargets));
+    if (mounted) setState(() {});
+  }
+
+  /// Re-queue a pending target. If scanning, it is added to the live queue
+  /// immediately; otherwise it will be included in the next GO/RESUME.
+  void retryTarget(String address) {
+    if (_isScanning) {
+      _dynamicQueue.add(address);
+      _updateTargetStatus(address, TargetStatus.pending);
+    }
+    // If not scanning, the target is already pending and picked up by next GO.
   }
   String get statusMessage => _statusMessage;
 

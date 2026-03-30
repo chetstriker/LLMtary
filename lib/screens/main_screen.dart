@@ -152,6 +152,7 @@ class _MainScreenState extends State<MainScreen> {
                   onExportPrompts: _exportPrompts,
                   onExportDebug: _exportDebug,
                   analyzingAddresses: _analyzingAddresses,
+                  onReAnalyze: _reAnalyzeTarget,
                 ),
                 ProofExploitTab(
                   isAnalyzing: _isAnalyzing,
@@ -542,6 +543,56 @@ class _MainScreenState extends State<MainScreen> {
     }
   }
 
+  Future<void> _reAnalyzeTarget(Target target) async {
+    if (_isAnalyzing) return;
+    if (!await _ensureSessionPassword()) return;
+    final appState = context.read<AppState>();
+    // Clear existing findings for this target from DB and memory
+    if (target.id != null && appState.currentProject?.id != null) {
+      await DatabaseHelper.clearTargetFindings(appState.currentProject!.id!, target.id!);
+    }
+    appState.vulnerabilities.removeWhere((v) => v.targetAddress == target.address);
+    target.analysisComplete = false;
+    target.noFindings = false;
+    await DatabaseHelper.updateTarget(target);
+    await appState.loadVulnerabilities();
+    if (mounted) setState(() => _analyzingAddresses.add(target.address));
+
+    try {
+      appState.setExecutionStatus('[${target.address}] Re-analyzing...');
+      final deviceJson = await File(target.jsonFilePath).readAsString();
+      final analyzer = VulnerabilityAnalyzer(
+        onPromptResponse: (prompt, response) => appState.addPromptLog(prompt, response),
+        onTokensUsed: (sent, received) => appState.recordTokenUsage('analyze', sent, received, targetId: target.id ?? 0),
+      );
+      final vulns = await analyzer.analyzeDevice(
+        deviceJson,
+        appState.llmSettings,
+        confirmedFindingsContext: appState.confirmedFindingsPromptBlock(target.address),
+        onPhaseChange: (phase) => appState.setExecutionStatus('[${target.address}] $phase'),
+        scopeList: appState.currentProject?.scopeList ?? [],
+        exclusionList: appState.currentProject?.exclusionList ?? [],
+      );
+      for (final v in vulns) {
+        v.targetAddress = target.address;
+        v.targetId = target.id;
+        v.projectId = appState.currentProject?.id;
+        await DatabaseHelper.insertVulnerability(v);
+      }
+      target.analysisComplete = true;
+      target.noFindings = vulns.isEmpty;
+      await DatabaseHelper.updateTarget(target);
+      await appState.loadVulnerabilities();
+      appState.setExecutionStatus('');
+    } catch (e) {
+      appState.addDebugLog('[${target.address}] Re-analysis error: $e');
+      appState.setExecutionStatus('');
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Re-analysis failed: $e')));
+    } finally {
+      if (mounted) setState(() => _analyzingAddresses.remove(target.address));
+    }
+  }
+
   void _toggleSelection(Vulnerability v, bool selected) {
     v.selected = selected;
     setState(() {});
@@ -563,22 +614,99 @@ class _MainScreenState extends State<MainScreen> {
       return;
     }
 
-    // Filter out vulns whose target already has executionComplete
     final targetMap = {for (final t in appState.targets) t.address: t};
-    final toExecute = selected.where((v) {
-      final t = targetMap[v.targetAddress];
-      return t == null || !t.executionComplete;
-    }).toList();
 
-    // Also skip individual vulns that already have a non-pending status
-    final pendingVulns = toExecute.where((v) => v.status == VulnerabilityStatus.pending).toList();
+    // Separate pending vs already-completed selected vulns
+    final alreadyCompleted = selected.where((v) =>
+      v.status != VulnerabilityStatus.pending
+    ).toList();
+    final trulyPending = selected.where((v) =>
+      v.status == VulnerabilityStatus.pending
+    ).toList();
+
+    List<Vulnerability> pendingVulns = trulyPending;
+
+    if (alreadyCompleted.isNotEmpty) {
+      // Show confirmation dialog for already-completed vulns
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: const Color(0xFF161929),
+          title: const Text('Re-test Previously Completed Vulnerabilities?',
+              style: TextStyle(color: Color(0xFFFFBB33), fontSize: 15)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '${alreadyCompleted.length} of your selected vulnerabilit${alreadyCompleted.length == 1 ? 'y has' : 'ies have'} already been tested:',
+                style: const TextStyle(color: Colors.white70, fontSize: 13),
+              ),
+              const SizedBox(height: 10),
+              ...alreadyCompleted.take(5).map((v) => Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Row(children: [
+                  Icon(Icons.circle, size: 6, color: v.status == VulnerabilityStatus.confirmed
+                      ? const Color(0xFF00FF88) : Colors.white38),
+                  const SizedBox(width: 8),
+                  Expanded(child: Text(v.problem,
+                      style: const TextStyle(color: Colors.white54, fontSize: 11),
+                      overflow: TextOverflow.ellipsis)),
+                ]),
+              )),
+              if (alreadyCompleted.length > 5)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text('…and ${alreadyCompleted.length - 5} more',
+                      style: const TextStyle(color: Colors.white38, fontSize: 11)),
+                ),
+              const SizedBox(height: 12),
+              const Text(
+                'Previous results will be removed and these will be re-tested from scratch.',
+                style: TextStyle(color: Colors.white54, fontSize: 12),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('SKIP COMPLETED', style: TextStyle(color: Colors.white54)),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('RE-TEST ALL', style: TextStyle(color: Color(0xFFFFBB33))),
+            ),
+          ],
+        ),
+      );
+      if (confirmed == true) {
+        // Reset completed vulns to pending, clear their results
+        for (final v in alreadyCompleted) {
+          v.status = VulnerabilityStatus.pending;
+          v.proofOutput = null;
+          v.proofCommand = null;
+          v.confirmedAt = null;
+          v.statusReason = '';
+          await DatabaseHelper.updateVulnerabilityStatus(v.id!, VulnerabilityStatus.pending);
+          if (v.id != null) await DatabaseHelper.deleteCommandLogsByVulnId(v.id!);
+        }
+        pendingVulns = [...trulyPending, ...alreadyCompleted];
+      }
+      // If confirmed == false or null: only run trulyPending (already set above)
+    }
 
     if (pendingVulns.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('All selected vulnerabilities already executed')),
+        const SnackBar(content: Text('No vulnerabilities to execute')),
       );
       return;
     }
+
+    // Filter out vulns whose target has executionComplete (unless they were explicitly re-queued)
+    pendingVulns = pendingVulns.where((v) {
+      final t = targetMap[v.targetAddress];
+      return t == null || !t.executionComplete || alreadyCompleted.contains(v);
+    }).toList();
 
     setState(() => _isExecuting = true);
 
@@ -725,6 +853,7 @@ class _MainScreenState extends State<MainScreen> {
                 vuln, appState.llmSettings, appState.requireApproval,
                 projectId: appState.currentProject?.id ?? 0,
                 targetId: targetId,
+                scopeNotes: appState.currentProject?.scopeNotes,
               );
               vuln.status = status;
 

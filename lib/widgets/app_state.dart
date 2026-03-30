@@ -93,9 +93,14 @@ class AppState extends ChangeNotifier {
   }
 
   bool get tab1Unlocked => true;
-  bool get tab2Unlocked => scanComplete;
-  bool get tab3Unlocked => analysisComplete;
-  bool get tab4Unlocked => hasResults || analysisComplete;
+  // Unlock VULN/HUNT as soon as first recon completes (not all)
+  bool get tab2Unlocked => scanComplete || _targets.any((t) => t.status == TargetStatus.complete);
+  // Unlock PROOF/EXPLOIT as soon as first analysis completes (not all)
+  bool get tab3Unlocked => analysisComplete || _targets.any((t) => t.analysisComplete);
+  // Unlock RESULT/REPORT as soon as first confirmed vuln found, or all tested, or legacy flags
+  bool get tab4Unlocked => hasResults || analysisComplete
+      || _vulnerabilities.any((v) => v.status == VulnerabilityStatus.confirmed)
+      || (_vulnerabilities.isNotEmpty && _vulnerabilities.every((v) => v.status != VulnerabilityStatus.pending));
 
   Project? get currentProject => _currentProject;
   String get currentProjectName => _currentProject?.name ?? 'default';

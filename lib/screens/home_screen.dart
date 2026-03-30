@@ -84,7 +84,7 @@ class _HomeScreenState extends State<HomeScreen> {
           decoration: InputDecoration(
             hintText: 'Project name',
             hintStyle: const TextStyle(color: Colors.white38),
-            enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: _cyan.withOpacity(0.4))),
+            enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: _cyan.withValues(alpha: 0.4))),
             focusedBorder: const OutlineInputBorder(borderSide: BorderSide(color: _cyan)),
           ),
           onSubmitted: (v) => Navigator.of(ctx).pop(v.trim()),
@@ -171,90 +171,113 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: _bg,
-      body: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 700),
-          child: Padding(
-            padding: const EdgeInsets.all(40),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const SizedBox(height: 40),
-                Row(
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          final screenWidth = constraints.maxWidth;
+          // Multi-column thresholds (only when 4+ projects)
+          int crossAxisCount = 1;
+          if (_projects.length >= 4) {
+            if (screenWidth > 1400) crossAxisCount = 3;
+            else if (screenWidth > 900) crossAxisCount = 2;
+          }
+          final useGrid = crossAxisCount > 1;
+          final double contentMaxWidth = useGrid ? double.infinity : 700;
+          final double sidePadding = useGrid ? 40 : 40;
+
+          return Center(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: contentMaxWidth),
+              child: Padding(
+                padding: EdgeInsets.symmetric(horizontal: sidePadding, vertical: 40),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        gradient: const LinearGradient(colors: [_cyan, Color(0xFF0080FF)]),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: const Icon(Icons.security, color: Colors.white, size: 32),
-                    ),
-                    const SizedBox(width: 16),
-                    const Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                    const SizedBox(height: 0),
+                    Row(
                       children: [
-                        Text('PenExecute', style: TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold)),
-                        Text('Automated Penetration Testing', style: TextStyle(color: Colors.white38, fontSize: 13)),
+                        Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            gradient: const LinearGradient(colors: [_cyan, Color(0xFF0080FF)]),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: const Icon(Icons.security, color: Colors.white, size: 32),
+                        ),
+                        const SizedBox(width: 16),
+                        const Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('PenExecute', style: TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold)),
+                            Text('Automated Penetration Testing', style: TextStyle(color: Colors.white38, fontSize: 13)),
+                          ],
+                        ),
                       ],
                     ),
+                    const SizedBox(height: 40),
+                    Row(
+                      children: [
+                        ElevatedButton.icon(
+                          onPressed: _createProject,
+                          icon: const Icon(Icons.add, color: Colors.white),
+                          label: const Text('NEW PROJECT', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, letterSpacing: 1)),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: _cyan,
+                            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        OutlinedButton.icon(
+                          onPressed: _importProject,
+                          icon: const Icon(Icons.upload, color: _cyan, size: 18),
+                          label: const Text('IMPORT', style: TextStyle(color: _cyan, fontWeight: FontWeight.bold, letterSpacing: 1)),
+                          style: OutlinedButton.styleFrom(
+                            side: const BorderSide(color: _cyan),
+                            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 32),
+                    const Text('RECENT PROJECTS', style: TextStyle(color: _cyan, fontWeight: FontWeight.bold, fontSize: 11, letterSpacing: 1.5)),
+                    const SizedBox(height: 12),
+                    Expanded(
+                      child: _loading
+                          ? const Center(child: CircularProgressIndicator(color: _cyan))
+                          : _projects.isEmpty
+                              ? Center(
+                                  child: Column(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      Icon(Icons.folder_open, size: 64, color: Colors.white.withValues(alpha: 0.1)),
+                                      const SizedBox(height: 16),
+                                      Text('No projects yet', style: TextStyle(color: Colors.white.withValues(alpha: 0.3), fontSize: 16)),
+                                      const SizedBox(height: 8),
+                                      Text('Create a new project to get started', style: TextStyle(color: Colors.white.withValues(alpha: 0.2), fontSize: 12)),
+                                    ],
+                                  ),
+                                )
+                              : useGrid
+                                  ? GridView.builder(
+                                      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                                        crossAxisCount: crossAxisCount,
+                                        crossAxisSpacing: 12,
+                                        mainAxisSpacing: 8,
+                                        childAspectRatio: 3.8,
+                                      ),
+                                      itemCount: _projects.length,
+                                      itemBuilder: (ctx, i) => _buildProjectRow(_projects[i]),
+                                    )
+                                  : ListView.builder(
+                                      itemCount: _projects.length,
+                                      itemBuilder: (ctx, i) => _buildProjectRow(_projects[i]),
+                                    ),
+                    ),
                   ],
                 ),
-                const SizedBox(height: 48),
-                Row(
-                  children: [
-                    ElevatedButton.icon(
-                      onPressed: _createProject,
-                      icon: const Icon(Icons.add, color: Colors.white),
-                      label: const Text('NEW PROJECT', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, letterSpacing: 1)),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: _cyan,
-                        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    OutlinedButton.icon(
-                      onPressed: _importProject,
-                      icon: const Icon(Icons.upload, color: _cyan, size: 18),
-                      label: const Text('IMPORT', style: TextStyle(color: _cyan, fontWeight: FontWeight.bold, letterSpacing: 1)),
-                      style: OutlinedButton.styleFrom(
-                        side: const BorderSide(color: _cyan),
-                        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 32),
-                const Text('RECENT PROJECTS', style: TextStyle(color: _cyan, fontWeight: FontWeight.bold, fontSize: 11, letterSpacing: 1.5)),
-                const SizedBox(height: 12),
-                Expanded(
-                  child: _loading
-                      ? const Center(child: CircularProgressIndicator(color: _cyan))
-                      : _projects.isEmpty
-                          ? Center(
-                              child: Column(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  Icon(Icons.folder_open, size: 64, color: Colors.white.withOpacity(0.1)),
-                                  const SizedBox(height: 16),
-                                  Text('No projects yet', style: TextStyle(color: Colors.white.withOpacity(0.3), fontSize: 16)),
-                                  const SizedBox(height: 8),
-                                  Text('Create a new project to get started', style: TextStyle(color: Colors.white.withOpacity(0.2), fontSize: 12)),
-                                ],
-                              ),
-                            )
-                          : ListView.builder(
-                              itemCount: _projects.length,
-                              itemBuilder: (ctx, i) {
-                                final p = _projects[i];
-                                return _buildProjectRow(p);
-                              },
-                            ),
-                ),
-              ],
+              ),
             ),
-          ),
-        ),
+          );
+        },
       ),
     );
   }
@@ -268,7 +291,7 @@ class _HomeScreenState extends State<HomeScreen> {
       decoration: BoxDecoration(
         color: _card,
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: _cyan.withOpacity(0.15)),
+        border: Border.all(color: _cyan.withValues(alpha: 0.15)),
       ),
       child: InkWell(
         borderRadius: BorderRadius.circular(10),
@@ -327,9 +350,9 @@ class _HomeScreenState extends State<HomeScreen> {
       margin: const EdgeInsets.only(right: 6),
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.15),
+        color: color.withValues(alpha: 0.15),
         borderRadius: BorderRadius.circular(4),
-        border: Border.all(color: color.withOpacity(0.5)),
+        border: Border.all(color: color.withValues(alpha: 0.5)),
       ),
       child: Text(label, style: TextStyle(color: color, fontSize: 9, fontWeight: FontWeight.bold)),
     );

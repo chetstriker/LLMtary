@@ -5,6 +5,7 @@ import '../../database/database_helper.dart';
 import '../../models/target.dart';
 import '../../widgets/app_state.dart';
 import '../../widgets/target_input_panel.dart';
+import '../../services/recon_service.dart';
 import '../../widgets/stats_bar.dart';
 import '../../widgets/tabbed_log_panel.dart';
 import '../../widgets/pulsating_button.dart';
@@ -38,6 +39,9 @@ class ScopeReconTab extends StatefulWidget {
 class _ScopeReconTabState extends State<ScopeReconTab> {
   final Set<String> _activeAddresses = {};
   final _targetPanelKey = GlobalKey<TargetInputPanelState>();
+  bool _starting = false; // true for the brief gap between GO press and first UI update
+  bool _scanStopped = false; // true after user presses STOP mid-scan
+  String _lastQueuedScope = ''; // scope text at last GO/RESUME press
 
   // Scope field controllers — mirror ScopeConfigDialog
   late final TextEditingController _scopeCtrl;
@@ -80,6 +84,23 @@ class _ScopeReconTabState extends State<ScopeReconTab> {
     final notes = _notesCtrl.text.trim().isEmpty ? null : _notesCtrl.text.trim();
     await DatabaseHelper.updateProjectScope(project!.id!, scope: scope, scopeExclusions: exclusions, scopeNotes: notes);
     appState.updateCurrentProject(project.copyWith(scope: scope, scopeExclusions: exclusions, scopeNotes: notes));
+  }
+
+  void _onScopeChanged() {
+    _saveScope();
+    if (mounted) setState(() {}); // re-evaluate ADD TO QUEUE button visibility
+  }
+
+  Future<void> _addToQueue() async {
+    final panelState = _targetPanelKey.currentState;
+    if (panelState == null) return;
+    final appState = context.read<AppState>();
+    final allAddresses = ReconService.parseTargetInput(_scopeCtrl.text);
+    final existingAddrs = appState.targets.map((t) => t.address).toSet();
+    final novel = allAddresses.where((a) => !existingAddrs.contains(a)).toList();
+    if (novel.isEmpty) return;
+    await panelState.addAddressesToQueue(novel);
+    setState(() => _lastQueuedScope = _scopeCtrl.text.trim());
   }
 
   void _onScanComplete(AppState appState) {
@@ -135,7 +156,7 @@ class _ScopeReconTabState extends State<ScopeReconTab> {
                       scopeCtrl: _scopeCtrl,
                       exclusionsCtrl: _exclusionsCtrl,
                       notesCtrl: _notesCtrl,
-                      onChanged: _saveScope,
+                      onChanged: _onScopeChanged,
                       onPickFile: () async {
                         await panelState?.pickFileIntoController(_scopeCtrl);
                         _saveScope();
@@ -145,8 +166,27 @@ class _ScopeReconTabState extends State<ScopeReconTab> {
                       hasTargets: hasTargets,
                       isExecuting: widget.isExecuting,
                       isAnalyzing: widget.isAnalyzing,
-                      onGo: () => _targetPanelKey.currentState?.startScan(_scopeCtrl.text),
-                      onStop: () => _targetPanelKey.currentState?.stopScan(),
+                      scanStopped: _scanStopped,
+                      showAddToQueue: !isScanning && _scanStopped == false
+                          ? false
+                          : _scopeCtrl.text.trim() != _lastQueuedScope &&
+                              _scopeCtrl.text.trim().isNotEmpty,
+                      onGo: () {
+                        setState(() {
+                          _starting = true;
+                          _scanStopped = false;
+                          _lastQueuedScope = _scopeCtrl.text.trim();
+                        });
+                        _targetPanelKey.currentState?.startScan(_scopeCtrl.text);
+                      },
+                      onStop: () {
+                        setState(() {
+                          _starting = false;
+                          _scanStopped = true;
+                        });
+                        _targetPanelKey.currentState?.stopScan();
+                      },
+                      onAddToQueue: _addToQueue,
                     ),
                   ),
                   // Hidden TargetInputPanel — holds scan logic, renders nothing
@@ -155,6 +195,7 @@ class _ScopeReconTabState extends State<ScopeReconTab> {
                     llmSettings: appState.llmSettings,
                     requireApproval: appState.requireApproval,
                     adminPassword: appState.adminPassword,
+                    scopeNotes: appState.currentProject?.scopeNotes,
                     onPasswordNeeded: widget.onEnsurePassword,
                     onInstallPasswordNeeded: widget.onInstallPasswordNeeded,
                     onApprovalNeeded: (command) async {
@@ -172,9 +213,13 @@ class _ScopeReconTabState extends State<ScopeReconTab> {
                     },
                     onPromptResponse: (p, r) => appState.addPromptLog(p, r),
                     onCommandExecuted: (cmd, output) async => await appState.loadCommandLogs(),
-                    onTargetsDiscovered: (targets) async => await appState.setTargets(targets),
+                    onTargetsDiscovered: (targets) async {
+                      if (_starting && mounted) setState(() => _starting = false);
+                      await appState.setTargets(targets);
+                    },
                     onTargetDeleted: (target) => appState.deleteTarget(target),
                     onScanComplete: () {
+                      if (mounted) setState(() => _starting = false);
                       appState.setScanComplete(true);
                       _onScanComplete(appState);
                     },
@@ -216,9 +261,26 @@ class _ScopeReconTabState extends State<ScopeReconTab> {
                       targets: appState.targets,
                       activeAddresses: _activeAddresses,
                       isScanning: isScanning,
+                      starting: _starting,
                       hasTargets: hasTargets,
                       isDisabled: widget.isExecuting || widget.isAnalyzing,
-                      onGo: () => _targetPanelKey.currentState?.startScan(_scopeCtrl.text),
+                      onGo: () {
+                        setState(() {
+                          _starting = true;
+                          _scanStopped = false;
+                          _lastQueuedScope = _scopeCtrl.text.trim();
+                        });
+                        _targetPanelKey.currentState?.startScan(_scopeCtrl.text);
+                      },
+                      onRetry: (addr) {
+                        final panelState = _targetPanelKey.currentState;
+                        if (panelState == null) return;
+                        panelState.retryTarget(addr);
+                        if (!panelState.isScanning) {
+                          // Show RESUME so the user knows to kick off the queue.
+                          setState(() => _scanStopped = true);
+                        }
+                      },
                     ),
                   ),
                 ],
@@ -253,8 +315,11 @@ class _ScopePanel extends StatelessWidget {
   final bool hasTargets;
   final bool isExecuting;
   final bool isAnalyzing;
+  final bool scanStopped;
+  final bool showAddToQueue;
   final VoidCallback onGo;
   final VoidCallback? onStop;
+  final VoidCallback? onAddToQueue;
   static const _purple = Color(0xFF7C5CFC);
   static const _hint = Color(0xFF8892B0);
   static const _card = Color(0xFF161929);
@@ -271,8 +336,11 @@ class _ScopePanel extends StatelessWidget {
     required this.hasTargets,
     required this.isExecuting,
     required this.isAnalyzing,
+    required this.scanStopped,
+    required this.showAddToQueue,
     required this.onGo,
     this.onStop,
+    this.onAddToQueue,
   });
 
   @override
@@ -340,19 +408,41 @@ class _ScopePanel extends StatelessWidget {
                 ),
               ],
             ),
-            const SizedBox(height: 6),
+            const SizedBox(height: 8),
             _field(scopeCtrl,
                 'IPs, hostnames, CIDRs\ne.g. 192.168.1.0/24\n*.example.com\ncomma or newline separated',
                 5),
-            const SizedBox(height: 10),
+            if (showAddToQueue) ...[
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: onAddToQueue,
+                  icon: const Icon(Icons.playlist_add, size: 16, color: _purple),
+                  label: const Text('ADD TO QUEUE',
+                      style: TextStyle(
+                          color: _purple,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 12,
+                          letterSpacing: 0.8)),
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 10),
+                    side: BorderSide(color: _purple.withValues(alpha: 0.5)),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10)),
+                  ),
+                ),
+              ),
+            ],
+            const SizedBox(height: 16),
             _label('EXCLUSIONS'),
-            const SizedBox(height: 4),
+            const SizedBox(height: 6),
             _field(exclusionsCtrl, 'e.g. 192.168.1.100\nprod.example.com', 3),
-            const SizedBox(height: 10),
+            const SizedBox(height: 16),
             _label('RULES OF ENGAGEMENT'),
-            const SizedBox(height: 4),
+            const SizedBox(height: 6),
             _field(notesCtrl, 'e.g. No DoS, business hours only', 3),
-            // GO button shown at bottom of left panel only while scanning
+            // Bottom action button: STOP while scanning, RESUME after stop
             if (isScanning) ...[
               const SizedBox(height: 14),
               Center(
@@ -371,6 +461,23 @@ class _ScopePanel extends StatelessWidget {
                   ),
                 ),
               ),
+            ] else if (scanStopped) ...[
+              const SizedBox(height: 14),
+              SizedBox(
+                width: double.infinity,
+                height: 44,
+                child: ElevatedButton.icon(
+                  onPressed: onGo,
+                  icon: const Icon(Icons.play_arrow_rounded, color: Colors.white, size: 18),
+                  label: const Text('RESUME RECON',
+                      style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _purple,
+                    padding: const EdgeInsets.symmetric(vertical: 10),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  ),
+                ),
+              ),
             ],
           ],
         ),
@@ -379,23 +486,23 @@ class _ScopePanel extends StatelessWidget {
   }
 
   Widget _label(String text) => Text(text,
-      style: const TextStyle(color: _hint, fontSize: 9, fontWeight: FontWeight.bold, letterSpacing: 0.8));
+      style: const TextStyle(color: _hint, fontSize: 10, fontWeight: FontWeight.bold, letterSpacing: 0.8));
 
   Widget _field(TextEditingController ctrl, String hint, int minLines) => TextField(
     controller: ctrl,
     minLines: minLines,
-    maxLines: minLines + 1,
+    maxLines: minLines + 2,
     onChanged: (_) => onChanged(),
-    style: const TextStyle(color: Colors.white, fontFamily: 'monospace', fontSize: 11),
+    style: const TextStyle(color: Colors.white, fontFamily: 'monospace', fontSize: 12),
     decoration: InputDecoration(
       hintText: hint,
-      hintStyle: TextStyle(color: _hint.withValues(alpha: 0.4), fontSize: 10),
+      hintStyle: TextStyle(color: _hint.withValues(alpha: 0.4), fontSize: 11),
       filled: true,
       fillColor: _dark,
-      contentPadding: const EdgeInsets.all(8),
-      border: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: BorderSide(color: _purple.withValues(alpha: 0.2))),
-      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: BorderSide(color: _purple.withValues(alpha: 0.15))),
-      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: BorderSide(color: _purple.withValues(alpha: 0.5))),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: _purple.withValues(alpha: 0.2))),
+      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: _purple.withValues(alpha: 0.15))),
+      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: _purple.withValues(alpha: 0.5))),
     ),
   );
 }
@@ -408,9 +515,11 @@ class _ReconCenterPanel extends StatelessWidget {
   final List<Target> targets;
   final Set<String> activeAddresses;
   final bool isScanning;
+  final bool starting;
   final bool hasTargets;
   final bool isDisabled;
   final VoidCallback onGo;
+  final void Function(String address)? onRetry;
 
   static const _purple = Color(0xFF7C5CFC);
 
@@ -418,13 +527,39 @@ class _ReconCenterPanel extends StatelessWidget {
     required this.targets,
     required this.activeAddresses,
     required this.isScanning,
+    required this.starting,
     required this.hasTargets,
     required this.isDisabled,
     required this.onGo,
+    this.onRetry,
   });
 
   @override
   Widget build(BuildContext context) {
+    // Brief starting state: GO was pressed but targets not yet discovered
+    if (targets.isEmpty && starting && !isScanning) {
+      return _DottedBackground(
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(
+                width: 52,
+                height: 52,
+                child: CircularProgressIndicator(color: _purple, strokeWidth: 3),
+              ),
+              const SizedBox(height: 20),
+              const Text('STARTING RECON…',
+                  style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700, letterSpacing: 2)),
+              const SizedBox(height: 8),
+              const Text('Resolving targets and launching scans',
+                  style: TextStyle(color: Colors.white38, fontSize: 12)),
+            ],
+          ),
+        ),
+      );
+    }
+
     // Idle state: show dotted background with centered GO button
     if (targets.isEmpty && !isScanning) {
       return _DottedBackground(
@@ -588,6 +723,7 @@ class _ReconCenterPanel extends StatelessWidget {
                             children: targets.map((t) => _TargetRow(
                               target: t,
                               isActive: activeAddresses.contains(t.address),
+                              onRetry: onRetry != null ? () => onRetry!(t.address) : null,
                             )).toList(),
                           );
                         }
@@ -608,6 +744,7 @@ class _ReconCenterPanel extends StatelessWidget {
                                   children: cols[c].map((t) => _TargetRow(
                                     target: t,
                                     isActive: activeAddresses.contains(t.address),
+                                    onRetry: onRetry != null ? () => onRetry!(t.address) : null,
                                   )).toList(),
                                 ),
                               ),
@@ -687,8 +824,9 @@ class _ReconCenterPanel extends StatelessWidget {
 class _TargetRow extends StatefulWidget {
   final Target target;
   final bool isActive;
+  final VoidCallback? onRetry;
 
-  const _TargetRow({required this.target, required this.isActive});
+  const _TargetRow({required this.target, required this.isActive, this.onRetry});
 
   @override
   State<_TargetRow> createState() => _TargetRowState();
@@ -772,6 +910,19 @@ class _TargetRowState extends State<_TargetRow>
                   ),
                 ),
                 _statusChip(widget.target),
+                if (widget.target.status == TargetStatus.pending &&
+                    widget.onRetry != null) ...[
+                  const SizedBox(width: 4),
+                  Tooltip(
+                    message: 'Perform recon again',
+                    child: IconButton(
+                      onPressed: widget.onRetry,
+                      icon: const Icon(Icons.refresh, size: 16, color: _purple),
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
