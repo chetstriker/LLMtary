@@ -3960,6 +3960,7 @@ What can an attacker achieve by combining these findings that they could not ach
 
 ## OUTPUT RULES:
 - vulnerabilityType: "AttackChain"
+- problem: short one-line title summarising the chain (e.g. "FTP credential leak enables Telnet takeover"); REQUIRED
 - severity: CRITICAL if chain reaches domain/system compromise; HIGH otherwise
 - description: full numbered chain referencing the component findings
 - evidence_quote: an exact substring from one of the component findings' statusReason or evidence

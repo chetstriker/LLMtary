@@ -171,113 +171,86 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: _bg,
-      body: LayoutBuilder(
-        builder: (context, constraints) {
-          final screenWidth = constraints.maxWidth;
-          // Multi-column thresholds (only when 4+ projects)
-          int crossAxisCount = 1;
-          if (_projects.length >= 4) {
-            if (screenWidth > 1400) crossAxisCount = 3;
-            else if (screenWidth > 900) crossAxisCount = 2;
-          }
-          final useGrid = crossAxisCount > 1;
-          final double contentMaxWidth = useGrid ? double.infinity : 700;
-          final double sidePadding = useGrid ? 40 : 40;
-
-          return Center(
-            child: ConstrainedBox(
-              constraints: BoxConstraints(maxWidth: contentMaxWidth),
-              child: Padding(
-                padding: EdgeInsets.symmetric(horizontal: sidePadding, vertical: 40),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+      body: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 860),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 40),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
                   children: [
-                    const SizedBox(height: 0),
-                    Row(
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                            gradient: const LinearGradient(colors: [_cyan, Color(0xFF0080FF)]),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: const Icon(Icons.security, color: Colors.white, size: 32),
-                        ),
-                        const SizedBox(width: 16),
-                        const Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text('PenExecute', style: TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold)),
-                            Text('Automated Penetration Testing', style: TextStyle(color: Colors.white38, fontSize: 13)),
-                          ],
-                        ),
-                      ],
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        gradient: const LinearGradient(colors: [_cyan, Color(0xFF0080FF)]),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: const Icon(Icons.security, color: Colors.white, size: 32),
                     ),
-                    const SizedBox(height: 40),
-                    Row(
+                    const SizedBox(width: 16),
+                    const Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        ElevatedButton.icon(
-                          onPressed: _createProject,
-                          icon: const Icon(Icons.add, color: Colors.white),
-                          label: const Text('NEW PROJECT', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, letterSpacing: 1)),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: _cyan,
-                            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        OutlinedButton.icon(
-                          onPressed: _importProject,
-                          icon: const Icon(Icons.upload, color: _cyan, size: 18),
-                          label: const Text('IMPORT', style: TextStyle(color: _cyan, fontWeight: FontWeight.bold, letterSpacing: 1)),
-                          style: OutlinedButton.styleFrom(
-                            side: const BorderSide(color: _cyan),
-                            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-                          ),
-                        ),
+                        Text('PenExecute', style: TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold)),
+                        Text('Automated Penetration Testing', style: TextStyle(color: Colors.white38, fontSize: 13)),
                       ],
-                    ),
-                    const SizedBox(height: 32),
-                    const Text('RECENT PROJECTS', style: TextStyle(color: _cyan, fontWeight: FontWeight.bold, fontSize: 11, letterSpacing: 1.5)),
-                    const SizedBox(height: 12),
-                    Expanded(
-                      child: _loading
-                          ? const Center(child: CircularProgressIndicator(color: _cyan))
-                          : _projects.isEmpty
-                              ? Center(
-                                  child: Column(
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    children: [
-                                      Icon(Icons.folder_open, size: 64, color: Colors.white.withValues(alpha: 0.1)),
-                                      const SizedBox(height: 16),
-                                      Text('No projects yet', style: TextStyle(color: Colors.white.withValues(alpha: 0.3), fontSize: 16)),
-                                      const SizedBox(height: 8),
-                                      Text('Create a new project to get started', style: TextStyle(color: Colors.white.withValues(alpha: 0.2), fontSize: 12)),
-                                    ],
-                                  ),
-                                )
-                              : useGrid
-                                  ? GridView.builder(
-                                      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                                        crossAxisCount: crossAxisCount,
-                                        crossAxisSpacing: 12,
-                                        mainAxisSpacing: 8,
-                                        childAspectRatio: 3.8,
-                                      ),
-                                      itemCount: _projects.length,
-                                      itemBuilder: (ctx, i) => _buildProjectRow(_projects[i]),
-                                    )
-                                  : ListView.builder(
-                                      itemCount: _projects.length,
-                                      itemBuilder: (ctx, i) => _buildProjectRow(_projects[i]),
-                                    ),
                     ),
                   ],
                 ),
-              ),
+                const SizedBox(height: 40),
+                Row(
+                  children: [
+                    ElevatedButton.icon(
+                      onPressed: _createProject,
+                      icon: const Icon(Icons.add, color: Colors.white),
+                      label: const Text('NEW PROJECT', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, letterSpacing: 1)),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: _cyan,
+                        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    OutlinedButton.icon(
+                      onPressed: _importProject,
+                      icon: const Icon(Icons.upload, color: _cyan, size: 18),
+                      label: const Text('IMPORT', style: TextStyle(color: _cyan, fontWeight: FontWeight.bold, letterSpacing: 1)),
+                      style: OutlinedButton.styleFrom(
+                        side: const BorderSide(color: _cyan),
+                        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 32),
+                const Text('RECENT PROJECTS', style: TextStyle(color: _cyan, fontWeight: FontWeight.bold, fontSize: 11, letterSpacing: 1.5)),
+                const SizedBox(height: 12),
+                Expanded(
+                  child: _loading
+                      ? const Center(child: CircularProgressIndicator(color: _cyan))
+                      : _projects.isEmpty
+                          ? Center(
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(Icons.folder_open, size: 64, color: Colors.white.withValues(alpha: 0.1)),
+                                  const SizedBox(height: 16),
+                                  Text('No projects yet', style: TextStyle(color: Colors.white.withValues(alpha: 0.3), fontSize: 16)),
+                                  const SizedBox(height: 8),
+                                  Text('Create a new project to get started', style: TextStyle(color: Colors.white.withValues(alpha: 0.2), fontSize: 12)),
+                                ],
+                              ),
+                            )
+                          : ListView.builder(
+                              itemCount: _projects.length,
+                              itemBuilder: (ctx, i) => _buildProjectRow(_projects[i]),
+                            ),
+                ),
+              ],
             ),
-          );
-        },
+          ),
+        ),
       ),
     );
   }
@@ -285,52 +258,71 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _buildProjectRow(Project project) {
     final lastOpened = project.lastOpenedAt;
     final dateStr = '${lastOpened.year}-${lastOpened.month.toString().padLeft(2, '0')}-${lastOpened.day.toString().padLeft(2, '0')}';
+    final tokens = project.id != null ? (_projectTokenTotals[project.id!] ?? 0) : 0;
 
     return Container(
-      margin: const EdgeInsets.only(bottom: 8),
+      margin: const EdgeInsets.only(bottom: 6),
       decoration: BoxDecoration(
         color: _card,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: _cyan.withValues(alpha: 0.15)),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: _cyan.withValues(alpha: 0.12)),
       ),
       child: InkWell(
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(8),
         onTap: () => _openProject(project),
+        hoverColor: _cyan.withValues(alpha: 0.04),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           child: Row(
             children: [
-              const Icon(Icons.folder, color: _cyan, size: 20),
-              const SizedBox(width: 14),
+              Icon(Icons.folder_rounded, color: _cyan.withValues(alpha: 0.8), size: 18),
+              const SizedBox(width: 12),
               Expanded(
+                child: Text(
+                  project.name,
+                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 14),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              const SizedBox(width: 12),
+              // Status chips — fixed position, right-aligned
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (project.scanComplete) _statusChip('SCANNED', const Color(0xFF00FF88)),
+                  if (project.analysisComplete) _statusChip('ANALYZED', _cyan),
+                  if (project.hasResults) _statusChip('RESULTS', const Color(0xFFFFAA00)),
+                ],
+              ),
+              const SizedBox(width: 12),
+              // Date + tokens — fixed width column
+              SizedBox(
+                width: 160,
                 child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+                  crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    Text(project.name, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 14)),
-                    const SizedBox(height: 2),
-                    Row(
-                      children: [
-                        Text('Last opened: $dateStr', style: const TextStyle(color: Colors.white38, fontSize: 11)),
-                        const SizedBox(width: 12),
-                        if (project.scanComplete) _statusChip('SCANNED', const Color(0xFF00FF88)),
-                        if (project.analysisComplete) _statusChip('ANALYZED', _cyan),
-                        if (project.hasResults) _statusChip('RESULTS', const Color(0xFFFFAA00)),
-                        if (project.id != null && (_projectTokenTotals[project.id!] ?? 0) > 0)
-                          _statusChip('~${_fmtTokens(_projectTokenTotals[project.id!]!)} tokens', Colors.white24),
-                      ],
-                    ),
+                    Text(dateStr, style: const TextStyle(color: Colors.white38, fontSize: 11)),
+                    if (tokens > 0)
+                      Text('~${_fmtTokens(tokens)} tokens', style: const TextStyle(color: Colors.white24, fontSize: 10)),
                   ],
                 ),
               ),
+              const SizedBox(width: 4),
               IconButton(
-                icon: const Icon(Icons.download, color: Colors.white38, size: 18),
+                icon: const Icon(Icons.download, color: Colors.white38, size: 16),
                 onPressed: () => ProjectPorter.exportProject(project, context),
                 tooltip: 'Export project',
+                visualDensity: VisualDensity.compact,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
               ),
               IconButton(
-                icon: const Icon(Icons.delete_outline, color: Colors.white24, size: 18),
+                icon: const Icon(Icons.delete_outline, color: Colors.white24, size: 16),
                 onPressed: () => _deleteProject(project),
                 tooltip: 'Delete project',
+                visualDensity: VisualDensity.compact,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
               ),
             ],
           ),

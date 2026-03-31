@@ -94,7 +94,7 @@ class TargetInputPanelState extends State<TargetInputPanel> {
     await _startScan(scopeInput);
   }
 
-  Future<void> _startScan(String externalInput) async {
+  Future<void> _startScan(String externalInput, {bool clearExisting = true}) async {
     final appState = context.read<AppState>();
     String input = externalInput.trim();
 
@@ -112,15 +112,21 @@ class TargetInputPanelState extends State<TargetInputPanel> {
     _cancelRequested = false;
     _dynamicQueue.clear();
 
-    setState(() {
-      _isScanning = true;
-      _statusMessage = 'Parsing targets...';
-      _liveTargets.clear();
-    });
-
-    // Seed with already-complete targets
-    for (final existing in widget.existingTargets) {
-      if (existing.status == TargetStatus.complete) _liveTargets.add(existing);
+    if (clearExisting) {
+      setState(() {
+        _isScanning = true;
+        _statusMessage = 'Parsing targets...';
+        _liveTargets.clear();
+      });
+      // Seed with already-complete targets
+      for (final existing in widget.existingTargets) {
+        if (existing.status == TargetStatus.complete) _liveTargets.add(existing);
+      }
+    } else {
+      setState(() {
+        _isScanning = true;
+        _statusMessage = 'Parsing targets...';
+      });
     }
 
     try {
@@ -371,8 +377,8 @@ class TargetInputPanelState extends State<TargetInputPanel> {
   }
 
   /// Add new addresses to the running scan queue. Deduplicates against
-  /// existing targets. If not scanning, they appear as pending and will
-  /// be picked up on the next GO/RESUME press.
+  /// existing targets. If already scanning, appends to the dynamic queue;
+  /// otherwise starts a new scan immediately for just the new addresses.
   Future<void> addAddressesToQueue(List<String> rawAddresses) async {
     final existingAddrs = _liveTargets.map((t) => t.address).toSet();
     final novel = rawAddresses.where((a) => !existingAddrs.contains(a)).toList();
@@ -380,11 +386,14 @@ class TargetInputPanelState extends State<TargetInputPanel> {
     for (final addr in novel) {
       _liveTargets.add(Target(address: addr, status: TargetStatus.pending));
     }
-    if (_isScanning) {
-      _dynamicQueue.addAll(novel);
-    }
     await widget.onTargetsDiscovered(List.from(_liveTargets));
     if (mounted) setState(() {});
+    if (_isScanning) {
+      _dynamicQueue.addAll(novel);
+    } else {
+      // Start a fresh scan for only the new addresses.
+      await _startScan(novel.join('\n'), clearExisting: false);
+    }
   }
 
   /// Re-queue a pending target. If scanning, it is added to the live queue

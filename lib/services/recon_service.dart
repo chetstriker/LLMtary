@@ -359,9 +359,12 @@ class ReconService {
     // After maxProbesPerPort attempts on a single port, further commands
     // targeting that port are skipped to prevent spinning (e.g. 35 binary
     // handshake variations on an obscure port).
+    // 8 probes gives web services enough headroom to cover service detection,
+    // application-layer probing (API endpoints, headers, certs, auth checks)
+    // without spinning — duplicate detection prevents wasted probes anyway.
     final portProbeCounts = <String, int>{};
     final exhaustedPorts = <String>{};
-    const maxProbesPerPort = 5;
+    const maxProbesPerPort = 8;
     int consecutiveFailures = 0;
     bool exhaustedOptions = false;
     int connectivityFailures = 0;
@@ -476,19 +479,23 @@ class ReconService {
         }
       }
 
-      // Phase D.4: Port exhaustion early exit — when ≥90% of open ports have been probed
+      // Phase D.4: Port exhaustion early exit — when ≥90% of open ports have been
+      // probed at least twice. Requiring ≥2 probes prevents the initial broad
+      // nmap sweep (which touches every port once) from triggering an early exit
+      // before deep per-port analysis (headers, API endpoints, certs) has run.
       if (executedCommands.length >= 5) {
         final openPortStrings = (findings['open_ports'] as List? ?? [])
             .map((p) => (p as Map)['port']?.toString())
             .whereType<String>()
             .toSet();
         if (openPortStrings.isNotEmpty) {
-          final probedPorts = portProbeCounts.keys.toSet();
-          final coveredCount = probedPorts.intersection(openPortStrings).length;
+          final coveredCount = openPortStrings
+              .where((p) => (portProbeCounts[p] ?? 0) >= 2)
+              .length;
           final coverage = coveredCount / openPortStrings.length;
           if (coverage >= 0.9) {
             onProgress?.call('[$address] Port exhaustion: $coveredCount/${openPortStrings.length} '
-                'discovered ports fully probed (${(coverage * 100).toStringAsFixed(0)}% coverage) — stopping recon');
+                'discovered ports deeply probed (${(coverage * 100).toStringAsFixed(0)}% coverage) — stopping recon');
             break;
           }
         }

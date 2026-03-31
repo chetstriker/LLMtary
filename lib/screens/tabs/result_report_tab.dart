@@ -321,9 +321,10 @@ class _InlineReportFormState extends State<_InlineReportForm> {
           // Results summary
           const Text('RESULTS SUMMARY', style: TextStyle(color: _cyan, fontWeight: FontWeight.bold, fontSize: 12, letterSpacing: 1)),
           const SizedBox(height: 10),
-          Wrap(
-            spacing: 8, runSpacing: 8,
-            children: [
+          LayoutBuilder(builder: (context, constraints) {
+            // Minimum readable card width: label "UNDETERMINED" at 9px needs ~72px.
+            // 9 cards + 8 gaps of 6px = 48px overhead → threshold at 9 * 72 + 48 = 696px.
+            final cards = [
               _statCard('CONFIRMED', confirmed, const Color(0xFF00FF88)),
               _statCard('NOT VULN', notVuln, Colors.white54),
               _statCard('UNDETERMINED', undetermined, const Color(0xFFFFAA00)),
@@ -336,8 +337,25 @@ class _InlineReportFormState extends State<_InlineReportForm> {
                 onTap: appState.credentials.isNotEmpty
                     ? () => _showCredentialsDialog(context, appState.credentials.toList())
                     : null),
-            ],
-          ),
+            ];
+            if (constraints.maxWidth >= 696) {
+              // Wide enough: equal-width row
+              return Row(
+                children: [
+                  for (int i = 0; i < cards.length; i++) ...[
+                    if (i > 0) const SizedBox(width: 6),
+                    Expanded(child: cards[i]),
+                  ],
+                ],
+              );
+            }
+            // Narrow: wrap with fixed minimum card width
+            return Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: cards.map((c) => SizedBox(width: 72, child: c)).toList(),
+            );
+          }),
           const SizedBox(height: 24),
 
           // Attack chains
@@ -383,15 +401,15 @@ class _InlineReportFormState extends State<_InlineReportForm> {
 
   Widget _statCard(String label, int value, Color color, {VoidCallback? onTap}) {
     final card = Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
       decoration: BoxDecoration(
         color: _card,
         borderRadius: BorderRadius.circular(8),
         border: Border.all(color: onTap != null ? color.withValues(alpha: 0.6) : color.withValues(alpha: 0.3)),
       ),
-      child: Column(mainAxisSize: MainAxisSize.min, children: [
-        Text(value.toString(), style: TextStyle(color: color, fontSize: 20, fontWeight: FontWeight.bold, fontFamily: 'monospace')),
-        Text(label, style: const TextStyle(color: Colors.white38, fontSize: 9, letterSpacing: 0.8)),
+      child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Text(value.toString(), textAlign: TextAlign.center, style: TextStyle(color: color, fontSize: 20, fontWeight: FontWeight.bold, fontFamily: 'monospace')),
+        Text(label, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white38, fontSize: 9, letterSpacing: 0.8)),
         if (onTap != null) ...[
           const SizedBox(height: 2),
           Icon(Icons.open_in_new, size: 9, color: color.withValues(alpha: 0.5)),
@@ -828,6 +846,12 @@ class _TokenStatsPanelState extends State<_TokenStatsPanel> {
   Map<String, ({int sent, int received})> _byTarget = {};
   bool _loadingByTarget = false;
 
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _refresh(widget.appState));
+  }
+
   Future<void> _refresh(AppState appState) async {
     if (appState.currentProject?.id == null) return;
     setState(() => _loadingByTarget = true);
@@ -897,12 +921,9 @@ class _TokenStatsPanelState extends State<_TokenStatsPanel> {
                           entry.value.received,
                         ),
                     ],
-                    if (_byTarget.isEmpty) ...[
+                    if (_byTarget.isEmpty && !_loadingByTarget) ...[
                       const SizedBox(height: 12),
-                      GestureDetector(
-                        onTap: () => _refresh(appState),
-                        child: const Text('Tap refresh to load per-target breakdown', style: TextStyle(color: Colors.white24, fontSize: 11)),
-                      ),
+                      const Text('No per-target data yet', style: TextStyle(color: Colors.white24, fontSize: 11)),
                     ],
                   ],
                 ),

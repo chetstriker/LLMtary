@@ -167,10 +167,10 @@ class _ScopeReconTabState extends State<ScopeReconTab> {
                       isExecuting: widget.isExecuting,
                       isAnalyzing: widget.isAnalyzing,
                       scanStopped: _scanStopped,
-                      showAddToQueue: !isScanning && _scanStopped == false
-                          ? false
-                          : _scopeCtrl.text.trim() != _lastQueuedScope &&
-                              _scopeCtrl.text.trim().isNotEmpty,
+                      showAddToQueue: !isScanning &&
+                          _scopeCtrl.text.trim().isNotEmpty &&
+                          ReconService.parseTargetInput(_scopeCtrl.text)
+                              .any((a) => !appState.targets.map((t) => t.address).contains(a)),
                       onGo: () {
                         setState(() {
                           _starting = true;
