@@ -849,7 +849,10 @@ class _TokenStatsPanelState extends State<_TokenStatsPanel> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _refresh(widget.appState));
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final appState = Provider.of<AppState>(context, listen: false);
+      _refresh(appState);
+    });
   }
 
   Future<void> _refresh(AppState appState) async {

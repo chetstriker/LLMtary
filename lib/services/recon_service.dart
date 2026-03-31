@@ -792,7 +792,9 @@ Do NOT propose another port scan variant. Instead:
           requireApproval,
           adminPassword: adminPassword,
           onApprovalNeeded: onApprovalNeeded,
-        );
+        ).timeout(const Duration(minutes: 30), onTimeout: () {
+          return {'output': 'Command timed out after 30 minutes', 'exitCode': -1};
+        });
       } catch (e) {
         historyEntries.add(_HistoryEntry(iteration: iteration + 1, command: command, summary: 'Error: $e'));
         if (e.toString().contains('timed out') || e.toString().contains('TimeoutException')) {
@@ -1016,6 +1018,14 @@ ${(scopeNotes != null && scopeNotes.isNotEmpty) ? '\n## RULES OF ENGAGEMENT:\n$s
 
 ${envInfo != null ? envInfo.toPromptBlock() : ''}
 ${env.shellRules}
+
+## COMMAND TIMEOUT RULES (CRITICAL):
+- ALWAYS use --max-time or --connect-timeout with curl: curl --max-time 30 --connect-timeout 10 URL
+- ALWAYS use timeout wrapper for nc/ncat: timeout 30 nc TARGET PORT
+- ALWAYS use timeout wrapper for openssl: timeout 30 openssl s_client -connect TARGET:PORT
+- For wget: use --timeout=30 --tries=1
+- For any network probe that can hang: wrap with timeout SECONDS command
+- If a command hangs without producing output, it will be killed after 30 minutes
 
 ## FILE OUTPUT RULES (CRITICAL):
 - ALL tool output files MUST use the full absolute path: $outDir
@@ -2493,7 +2503,9 @@ Respond ONLY with valid JSON.''';
           cmd, requireApproval,
           adminPassword: adminPassword,
           onApprovalNeeded: onApprovalNeeded,
-        );
+        ).timeout(const Duration(minutes: 30), onTimeout: () {
+          return {'output': 'Command timed out after 30 minutes', 'exitCode': -1};
+        });
         final output = (result['output'] as String? ?? '').trim();
         final exitCode = (result['exitCode'] as int?) ?? -1;
         executedCommands.add(cmd);
@@ -2786,7 +2798,9 @@ Respond ONLY with valid JSON.''';
           cmd, requireApproval,
           adminPassword: adminPassword,
           onApprovalNeeded: onApprovalNeeded,
-        );
+        ).timeout(const Duration(minutes: 15), onTimeout: () {
+          return {'output': 'Command timed out after 15 minutes', 'exitCode': -1};
+        });
         final output = (result['output'] as String? ?? '').trim();
         final exitCode = (result['exitCode'] as int?) ?? -1;
         executedCommands.add(cmd);
