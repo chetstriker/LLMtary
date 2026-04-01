@@ -1012,6 +1012,15 @@ Respond ONLY with valid JSON.''';
           } else {
             process = await Process.start('bash', ['-c', installCmd]);
           }
+        } else if (packageManager == 'paru' || packageManager == 'yay') {
+          // paru/yay use the Rust `console` crate which calls isatty() and routes
+          // progress/error output directly to /dev/tty when stdout is not a terminal.
+          // Running inside `script -q` allocates a pseudo-TTY so the tool thinks it
+          // is interactive and writes all output through normal stdout/stderr streams.
+          // stderr is merged into stdout (2>&1) so everything is captured in one place.
+          // `script` is part of util-linux and present on all Arch/Debian systems.
+          final scriptedCmd = "script -q -c '$installCmd 2>&1' /dev/null";
+          process = await Process.start('bash', ['-c', scriptedCmd]);
         } else if (adminPassword != null && adminPassword.isNotEmpty && installCmd.contains('sudo')) {
           // Strip any sudo variant (sudo, sudo -n, sudo -S) — we'll supply our own sudo -S
           final cmdWithoutSudo = installCmd.replaceFirst(RegExp(r'sudo\s+(-\w+\s+)*'), '').trim();
@@ -1141,6 +1150,101 @@ Respond ONLY with valid JSON.''';
         print('${_timestamp()} DEBUG: Post-install verification: ${verified ? "SUCCESS" : "FAILED"}');
         return verified;
       }
+
+      // Install failed — ask the LLM to recover using the actual error output.
+      // Trim error to avoid feeding megabytes to the LLM.
+      final errorContext = (stderr.isNotEmpty ? stderr : stdout).trim();
+      final trimmedError = errorContext.length > 800
+          ? errorContext.substring(0, 800)
+          : errorContext;
+
+      if (trimmedError.isNotEmpty) {
+        print('${_timestamp()} DEBUG: Install failed — asking LLM for alternative (error: ${trimmedError.substring(0, trimmedError.length.clamp(0, 120))})');
+
+        final retryPrompt = '''Installing "$primaryTool" on $os failed.
+
+FAILED COMMAND: $installCmd
+ERROR OUTPUT:
+$trimmedError
+
+Suggest ONE alternative install command for "$primaryTool" using $packageManagerInfo.
+If the package name was wrong, provide the correct one.
+If this tool is not available via $packageManager, suggest the closest available alternative that provides equivalent functionality.
+If no viable alternative exists, return {"command": "", "package": ""}.
+
+Respond ONLY with valid JSON:
+{"command": "INSTALL_COMMAND", "package": "package_name"}''';
+
+        try {
+          final retryResponse = await llmService.sendMessage(settings, retryPrompt).timeout(const Duration(seconds: 30));
+          final retryDecision = _parseJson(retryResponse);
+          String retryCmd = retryDecision['command'] ?? '';
+
+          // Apply the same package manager corrections as the first attempt
+          if (retryCmd.isNotEmpty) {
+            final wrongMgr = knownManagers.where((m) => m != packageManager && retryCmd.contains(m)).firstOrNull;
+            if (wrongMgr != null) {
+              final pkg = retryDecision['package'] ?? primaryTool;
+              retryCmd = _getInstallCommand(packageManager, pkg);
+            }
+            retryCmd = retryCmd.replaceAll(RegExp(r'sudo\s+apt-get\s+update\s*&&\s*'), '');
+            retryCmd = retryCmd.replaceAll(RegExp(r'apt-get\s+update\s*&&\s*'), '');
+            if (packageManager == 'brew') retryCmd = retryCmd.replaceAll('sudo ', '');
+            if ((packageManager == 'paru' || packageManager == 'yay')) retryCmd = retryCmd.replaceAll('sudo ', '');
+
+            print('${_timestamp()} DEBUG: Retrying with alternative command: $retryCmd');
+
+            Process retryProcess;
+            if (isWsl) {
+              retryProcess = await Process.start('wsl', ['bash', '-c', retryCmd]);
+            } else if (isWindowsNative) {
+              retryProcess = await Process.start('powershell', ['-Command', retryCmd]);
+            } else if (packageManager == 'brew' && adminPassword != null && adminPassword.isNotEmpty) {
+              final tempDir = Directory.systemTemp;
+              final askpass = File('${tempDir.path}/.askpass_retry2_${DateTime.now().millisecondsSinceEpoch}.sh');
+              await askpass.writeAsString('#!/bin/bash\necho "$adminPassword"');
+              await Process.run('chmod', ['700', askpass.path]);
+              final env = Map<String, String>.from(Platform.environment);
+              env['SUDO_ASKPASS'] = askpass.path;
+              retryProcess = await Process.start('bash', ['-c', retryCmd], environment: env);
+              Future.delayed(const Duration(minutes: 3), () async { try { if (await askpass.exists()) await askpass.delete(); } catch (_) {} });
+            } else if (adminPassword != null && adminPassword.isNotEmpty && retryCmd.contains('sudo')) {
+              final cmdWithoutSudo = retryCmd.replaceFirst(RegExp(r'sudo\s+(-\w+\s+)*'), '').trim();
+              retryProcess = await Process.start('bash', ['-c', 'echo "$adminPassword" | sudo -S bash -c "$cmdWithoutSudo"']);
+            } else {
+              retryProcess = await Process.start('bash', ['-c', retryCmd]);
+            }
+
+            retryProcess.stdout.transform(utf8.decoder).listen((d) => print('${_timestamp()} [RETRY STDOUT] $d'));
+            retryProcess.stderr.transform(utf8.decoder).listen((d) {
+              print('${_timestamp()} [RETRY STDERR] $d');
+              if (d.contains('sudo: timed out reading password') ||
+                  d.contains('sudo: a password is required') ||
+                  d.contains('[sudo] password for')) {
+                _killProcessTree(retryProcess).catchError((_) {});
+              }
+            });
+
+            int retryExit;
+            try {
+              retryExit = await retryProcess.exitCode.timeout(const Duration(minutes: 3));
+            } on TimeoutException {
+              await _killProcessTree(retryProcess);
+              return false;
+            }
+
+            if (retryExit == 0) {
+              final verified = await checkToolExists(primaryTool, settings, llmService);
+              print('${_timestamp()} DEBUG: Post-retry verification: ${verified ? "SUCCESS" : "FAILED"}');
+              return verified;
+            }
+            print('${_timestamp()} DEBUG: Alternative install also failed (exit $retryExit)');
+          }
+        } catch (e) {
+          print('${_timestamp()} DEBUG: LLM retry install error: $e');
+        }
+      }
+
       return false;
     } catch (e) {
       print('${_timestamp()} DEBUG: installTool error: $e');
@@ -1320,6 +1424,16 @@ Respond ONLY with valid JSON.''';
           // WSL / Windows fallback: inject password for top-level sudo only.
           execCommand = command.replaceFirst('sudo', 'echo "$adminPassword" | sudo -S');
         }
+      }
+
+      // macOS ships without GNU coreutils `timeout`. Translate `timeout N cmd`
+      // to `perl -e 'alarm(N); exec(@ARGV)' -- cmd` which works on any POSIX
+      // system without extra packages.
+      if (Platform.isMacOS) {
+        execCommand = execCommand.replaceAllMapped(
+          RegExp(r'\btimeout\s+(\d+(?:\.\d+)?)\s+'),
+          (m) => "perl -e 'alarm(${m.group(1)!.split('.').first}); exec(\@ARGV)' -- ",
+        );
       }
 
       CommandResult result;
