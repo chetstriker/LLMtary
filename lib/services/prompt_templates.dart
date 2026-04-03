@@ -3959,12 +3959,16 @@ Example: (1) LFI on port 80 reads /etc/shadow → (2) Offline crack yields user 
 What can an attacker achieve by combining these findings that they could not achieve with any single finding alone?
 
 ## OUTPUT RULES:
+Return a JSON array. Each element represents one distinct attack chain with these fields:
 - vulnerabilityType: "AttackChain"
 - problem: short one-line title summarising the chain (e.g. "FTP credential leak enables Telnet takeover"); REQUIRED
-- severity: CRITICAL if chain reaches domain/system compromise; HIGH otherwise
+- severity: "CRITICAL" if chain reaches domain/system compromise; "HIGH" otherwise
 - description: full numbered chain referencing the component findings
-- evidence_quote: an exact substring from one of the component findings' statusReason or evidence
-- Generate one entry per distinct chain; if no viable chain exists, return []
+- evidence: an exact substring from one of the component findings' statusReason or evidence
+- recommendation: brief mitigation summary for the chain
+
+If no viable multi-step chain exists, return [].
+Respond ONLY with a valid JSON array. No markdown fences, no explanations, no prose.
 
 ''';
   }
