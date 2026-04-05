@@ -1943,8 +1943,37 @@ Respond ONLY with valid JSON.''';
       final response = await llmService.sendMessage(settings, prompt, onTokensUsed: onTokensUsed)
           .timeout(_llmIterationTimeout);
       final parsed = JsonParser.tryParseJson(response);
-      if (parsed != null) _deepMerge(findings, parsed);
+      if (parsed != null) {
+        _stripCveFromNotes(parsed);
+        _deepMerge(findings, parsed);
+      }
     } catch (_) {}
+  }
+
+  /// Strips CVE ID mentions from all `notes` fields in parsed recon output.
+  /// CVE matching is handled exclusively by the analysis phase — having the
+  /// recon LLM hallucinate CVEs into notes corrupts the analysis pipeline.
+  static void _stripCveFromNotes(Map<String, dynamic> data) {
+    final cvePattern = RegExp(r'\bCVE-\d{4}-\d{4,7}\b', caseSensitive: false);
+    final listKeys = ['web_findings', 'smb_findings', 'waf_findings',
+        'other_findings', 'dns_findings', 'ftp_findings', 'ssh_findings'];
+    for (final key in listKeys) {
+      final list = data[key];
+      if (list is! List) continue;
+      for (final item in list) {
+        if (item is Map && item['notes'] is String) {
+          item['notes'] = (item['notes'] as String).replaceAllMapped(
+            cvePattern,
+            (_) => '[version-matched in analysis phase]',
+          );
+        }
+      }
+    }
+    // Also strip from device-level notes if present
+    if (data['device'] is Map && data['device']['notes'] is String) {
+      data['device']['notes'] = (data['device']['notes'] as String)
+          .replaceAll(cvePattern, '[version-matched in analysis phase]');
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -2080,7 +2109,7 @@ Respond ONLY with valid JSON.''';
     "title": "page title",
     "paths_found": ["/admin", "/login"],
     "technologies": ["WordPress 5.8", "jQuery 3.6"],
-    "notes": "any other relevant observations"
+    "notes": "factual observations only — version strings, auth prompts, observable headers; do NOT include CVE IDs, exploit names, or vulnerability speculation (that is the analysis phase's job)"
   }]''');
       sections.add('  "waf_findings": [{"waf": "Cloudflare", "detected_by": "cf-ray header", "notes": "rate limiting likely"}]');
     }
