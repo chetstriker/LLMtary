@@ -4,6 +4,8 @@
 #ifdef GDK_WINDOWING_X11
 #include <gdk/gdkx.h>
 #endif
+#include <limits.h>
+#include <unistd.h>
 
 #include "flutter/generated_plugin_registrant.h"
 
@@ -69,6 +71,20 @@ static void my_application_activate(GApplication* application) {
   gtk_window_set_resizable(window, TRUE);
   gtk_window_set_decorated(window, TRUE);
   gtk_window_set_type_hint(window, GDK_WINDOW_TYPE_HINT_NORMAL);
+
+  // Set the window icon from the PNG bundled alongside the binary.
+  char exe_link[PATH_MAX];
+  ssize_t exe_len = readlink("/proc/self/exe", exe_link, sizeof(exe_link) - 1);
+  if (exe_len > 0) {
+    exe_link[exe_len] = '\0';
+    gchar* exe_dir = g_path_get_dirname(exe_link);
+    gchar* icon_path = g_build_filename(exe_dir, "penexecuter.png", nullptr);
+    GError* icon_err = nullptr;
+    gtk_window_set_icon_from_file(window, icon_path, &icon_err);
+    if (icon_err) g_error_free(icon_err);
+    g_free(icon_path);
+    g_free(exe_dir);
+  }
   // Geometry hints are applied post-realize in on_window_realize().
   g_signal_connect(window, "realize", G_CALLBACK(on_window_realize), nullptr);
 
