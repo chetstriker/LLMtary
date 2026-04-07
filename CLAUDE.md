@@ -15,7 +15,7 @@ flutter test test/widget_test.dart  # Run single test file
 
 ## Architecture
 
-PenExecute is a Flutter desktop app for AI-assisted penetration testing. It accepts JSON reconnaissance data for a target, uses an LLM to identify vulnerabilities, then executes test commands to validate each finding.
+LLMtary is a Flutter desktop app for AI-assisted penetration testing. It accepts JSON reconnaissance data for a target, uses an LLM to identify vulnerabilities, then executes test commands to validate each finding.
 
 ### Core Data Flow
 
@@ -66,7 +66,7 @@ Vulnerabilities start as `pending`. After execution they become:
 
 ### Cross-Platform Requirement
 
-**PenExecute must run correctly on Windows, macOS, and Linux.** This is a hard requirement — every code change must work on all three platforms.
+**LLMtary must run correctly on Windows, macOS, and Linux.** This is a hard requirement — every code change must work on all three platforms.
 
 - Shell command generation must work on the host OS. `CommandExecutor` handles OS-specific adaptations and exposes `Platform.isWindows`, `Platform.isMacOS`, `Platform.isLinux`, and a WSL detection flag. When modifying any command generation or execution logic, verify it handles all three OS code paths.
 - File path construction must use `path` package helpers (`join`, `dirname`, etc.) — never hardcode `/` separators.

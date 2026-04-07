@@ -1,4 +1,4 @@
-# PenExecute
+# LLMtary
 
 A Flutter desktop application that uses large language models to automate penetration testing workflows — from recon and vulnerability analysis through active exploit validation and professional report generation.
 
@@ -6,7 +6,7 @@ A Flutter desktop application that uses large language models to automate penetr
 
 ## How It Works
 
-PenExecute feeds structured scan data (ports, services, banners, DNS records, WAF findings, SSL certificates) into a phased LLM analysis pipeline that mirrors a real engagement workflow: **passive recon → active recon → vulnerability discovery → targeted exploitation → post-exploitation**. Each phase's findings enrich the next, producing more targeted and accurate results than a flat parallel approach.
+LLMtary feeds structured scan data (ports, services, banners, DNS records, WAF findings, SSL certificates) into a phased LLM analysis pipeline that mirrors a real engagement workflow: **passive recon → active recon → vulnerability discovery → targeted exploitation → post-exploitation**. Each phase's findings enrich the next, producing more targeted and accurate results than a flat parallel approach.
 
 The resulting findings are then individually validated through an autonomous exploit testing loop that executes real commands on your machine, evaluates the output, and iterates until the vulnerability is confirmed, ruled out, or all reasonable approaches are exhausted. After testing completes, a final chain reasoning pass identifies how confirmed findings can be combined into multi-step attack paths.
 
@@ -126,7 +126,7 @@ Provider settings are saved per-provider — switching providers restores that p
 
 ### LLM Requirements
 
-PenExecute's prompts are large and require strong reasoning capabilities. Not all models will produce usable results. The exploit system prompt alone exceeds 6,000 tokens, and the recon system prompt exceeds 5,600 tokens — a 4K context window is physically too small.
+LLMtary's prompts are large and require strong reasoning capabilities. Not all models will produce usable results. The exploit system prompt alone exceeds 6,000 tokens, and the recon system prompt exceeds 5,600 tokens — a 4K context window is physically too small.
 
 #### Local Model Tiers (Ollama / LM Studio)
 
@@ -176,7 +176,7 @@ Cloud providers offer the best results due to large context windows (128K-200K t
 
 ```bash
 git clone <repo>
-cd penexecute
+cd llmtary
 flutter pub get
 flutter run -d linux     # or: macos, windows
 ```
@@ -188,7 +188,7 @@ flutter build linux      # or: macos, windows
 
 ### Recommended Pentest Tools
 
-PenExecute shells out to whatever tools are available on your system. The more tools installed, the more testing approaches the LLM can take. Commonly used tools include:
+LLMtary shells out to whatever tools are available on your system. The more tools installed, the more testing approaches the LLM can take. Commonly used tools include:
 
 - **nmap** — port scanning and service version detection
 - **nuclei** — template-based vulnerability scanning
@@ -454,7 +454,7 @@ lib/
 
 ## Safety and Responsibility
 
-PenExecute executes real shell commands on your local machine against real targets. It is intended for use by security professionals in authorized penetration testing engagements, security research, and CTF competitions.
+LLMtary executes real shell commands on your local machine against real targets. It is intended for use by security professionals in authorized penetration testing engagements, security research, and CTF competitions.
 
 **You are responsible for ensuring you have authorization to test any target.** Unauthorized scanning or exploitation is illegal in most jurisdictions regardless of the tools used.
 
