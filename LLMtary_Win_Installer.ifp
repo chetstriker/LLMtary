@@ -35,7 +35,7 @@
       <InstallationFile size="20.3 MB" type="dll">C:\Temp\LLMtary_Staging\flutter_windows.dll</InstallationFile>
       <InstallationFile size="56 KB" type="exe">C:\Temp\LLMtary_Staging\llmtary.exe</InstallationFile>
       <InstallationFile size="1.6 MB" type="dll">C:\Temp\LLMtary_Staging\sqlite3.dll</InstallationFile>
-      <InstallationFile size="208 KB" type="ico">C:\Temp\LLMtary_Staging\assets\favicon.ico</InstallationFile>
+      <InstallationFile size="208 KB" type="ico">C:\Temp\LLMtary_Staging\favicon.ico</InstallationFile>
     </InstallationFiles>
     <Languages/>
     <Variables/>

@@ -112,17 +112,23 @@ echo "✅ DMG signed."
 # ==========================================
 
 if [ -z "$APPLE_ID" ] || [ -z "$APPLE_TEAM_ID" ] || [ -z "$APPLE_APP_PASSWORD" ]; then
-  echo "❌ Apple notarization variables are missing."
-  exit 1
+  echo "⚠️ Apple notarization variables are missing — skipping notarization."
+  echo "✅ Build complete (signed but not notarized)."
+  exit 0
 fi
 
 echo "🚀 Submitting DMG for notarization..."
 
-xcrun notarytool submit "$DMG_OUTPUT" \
+if ! xcrun notarytool submit "$DMG_OUTPUT" \
   --apple-id "$APPLE_ID" \
   --team-id "$APPLE_TEAM_ID" \
   --password "$APPLE_APP_PASSWORD" \
-  --wait
+  --wait; then
+  echo "⚠️ Notarization failed (expired agreement or network issue)."
+  echo "⚠️ The DMG is signed but not notarized. Users may see a Gatekeeper warning."
+  echo "✅ Build artifact is still available."
+  exit 0
+fi
 
 echo "📎 Stapling notarization ticket..."
 
