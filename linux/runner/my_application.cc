@@ -60,11 +60,11 @@ static void my_application_activate(GApplication* application) {
   if (use_header_bar) {
     GtkHeaderBar* header_bar = GTK_HEADER_BAR(gtk_header_bar_new());
     gtk_widget_show(GTK_WIDGET(header_bar));
-    gtk_header_bar_set_title(header_bar, "penexecuter");
+    gtk_header_bar_set_title(header_bar, "LLMtary");
     gtk_header_bar_set_show_close_button(header_bar, TRUE);
     gtk_window_set_titlebar(window, GTK_WIDGET(header_bar));
   } else {
-    gtk_window_set_title(window, "penexecuter");
+    gtk_window_set_title(window, "LLMtary");
   }
 
   gtk_window_set_default_size(window, 1330, 770);
@@ -78,7 +78,7 @@ static void my_application_activate(GApplication* application) {
   if (exe_len > 0) {
     exe_link[exe_len] = '\0';
     gchar* exe_dir = g_path_get_dirname(exe_link);
-    gchar* icon_path = g_build_filename(exe_dir, "penexecuter.png", nullptr);
+    gchar* icon_path = g_build_filename(exe_dir, "llmtary.png", nullptr);
     GError* icon_err = nullptr;
     gtk_window_set_icon_from_file(window, icon_path, &icon_err);
     if (icon_err) g_error_free(icon_err);

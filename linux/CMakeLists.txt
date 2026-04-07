@@ -4,10 +4,10 @@ project(runner LANGUAGES CXX)
 
 # The name of the executable created for the application. Change this to change
 # the on-disk name of your application.
-set(BINARY_NAME "penexecuter")
+set(BINARY_NAME "llmtary")
 # The unique GTK application identifier for this application. See:
 # https://wiki.gnome.org/HowDoI/ChooseApplicationID
-set(APPLICATION_ID "com.example.penexecuter")
+set(APPLICATION_ID "com.example.llmtary")
 
 # Explicitly opt in to modern CMake behaviors to avoid warnings with recent
 # versions of CMake.
@@ -128,6 +128,6 @@ if(NOT CMAKE_BUILD_TYPE MATCHES "Debug")
 endif()
 
 # Install the application icon alongside the binary.
-install(FILES "${CMAKE_SOURCE_DIR}/penexecuter.png"
+install(FILES "${CMAKE_SOURCE_DIR}/llmtary.png"
   DESTINATION "${CMAKE_INSTALL_PREFIX}"
   COMPONENT Runtime)
