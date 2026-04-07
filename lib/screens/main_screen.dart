@@ -256,9 +256,8 @@ class _MainScreenState extends State<MainScreen> {
           const Text('LLMtary',
               style: TextStyle(
                   color: Colors.white,
-                  fontWeight: FontWeight.w700,
-                  fontSize: 16,
-                  letterSpacing: 0.5)),
+                  fontFamily: 'BungeeSpice',
+                  fontSize: 16)),
           const SizedBox(width: 28),
           // Tab bar
           Flexible(

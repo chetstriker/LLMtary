@@ -193,7 +193,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     const Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('LLMtary', style: TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold)),
+                        Text('LLMtary', style: TextStyle(color: Colors.white, fontSize: 28, fontFamily: 'BungeeSpice')),
                         Text('Automated Penetration Testing', style: TextStyle(color: Colors.white38, fontSize: 13)),
                       ],
                     ),
