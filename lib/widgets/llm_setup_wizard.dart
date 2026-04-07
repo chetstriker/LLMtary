@@ -23,6 +23,7 @@ class _LlmSetupWizardState extends State<LlmSetupWizard> {
   final _apiKeyCtrl = TextEditingController();
   final _modelCtrl = TextEditingController();
   final _modelSearchCtrl = TextEditingController();
+  final _modelNotifier = ValueNotifier<String?>(null);
   List<String> _models = [];
   bool _loadingModels = false;
   bool _testing = false;
@@ -47,6 +48,7 @@ class _LlmSetupWizardState extends State<LlmSetupWizard> {
     _apiKeyCtrl.dispose();
     _modelCtrl.dispose();
     _modelSearchCtrl.dispose();
+    _modelNotifier.dispose();
     super.dispose();
   }
 
@@ -56,6 +58,7 @@ class _LlmSetupWizardState extends State<LlmSetupWizard> {
       _baseUrlCtrl.text = p.requiresBaseUrl ? p.defaultBaseUrl : '';
       _apiKeyCtrl.clear();
       _modelCtrl.clear();
+      _modelNotifier.value = null;
       _models = [];
       _testPassed = false;
       _testResult = '';
@@ -72,7 +75,10 @@ class _LlmSetupWizardState extends State<LlmSetupWizard> {
         modelName: '',
       );
       final models = await _llmService.fetchAvailableModels(settings);
-      if (mounted) setState(() { _models = models; _loadingModels = false; });
+      if (mounted) {
+        setState(() { _models = models; _loadingModels = false; });
+        _modelNotifier.value = models.contains(_modelCtrl.text) ? _modelCtrl.text : null;
+      }
     } catch (_) {
       if (mounted) setState(() => _loadingModels = false);
     }
@@ -267,9 +273,9 @@ class _LlmSetupWizardState extends State<LlmSetupWizard> {
                   child: DropdownButton2<String>(
                     isExpanded: true,
                     hint: const Text('Select model', style: TextStyle(color: Colors.white38)),
-                    value: _models.contains(_modelCtrl.text) ? _modelCtrl.text : null,
-                    items: _models.map((m) => DropdownMenuItem(value: m, child: Text(m, style: const TextStyle(color: Colors.white)))).toList(),
-                    onChanged: (v) { if (v != null) setState(() => _modelCtrl.text = v); },
+                    valueListenable: _modelNotifier,
+                    items: _models.map((m) => DropdownItem(value: m, child: Text(m, style: const TextStyle(color: Colors.white)))).toList(),
+                    onChanged: (v) { if (v != null) { setState(() => _modelCtrl.text = v); _modelNotifier.value = v; } },
                     buttonStyleData: const ButtonStyleData(height: 48, padding: EdgeInsets.symmetric(horizontal: 12)),
                     dropdownStyleData: DropdownStyleData(
                       maxHeight: 280,
@@ -281,8 +287,8 @@ class _LlmSetupWizardState extends State<LlmSetupWizard> {
                     ),
                     dropdownSearchData: DropdownSearchData(
                       searchController: _modelSearchCtrl,
-                      searchInnerWidgetHeight: 48,
-                      searchInnerWidget: Padding(
+                      searchBarWidgetHeight: 48,
+                      searchBarWidget: Padding(
                         padding: const EdgeInsets.all(8),
                         child: TextField(
                           controller: _modelSearchCtrl,

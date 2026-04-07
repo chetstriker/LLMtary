@@ -14,7 +14,7 @@ class FileDialog {
       return await _portalSaveFile(fileName, dialogTitle) ??
           await _legacySaveFile(fileName, dialogTitle);
     }
-    return FilePicker.platform.saveFile(dialogTitle: dialogTitle, fileName: fileName);
+    return FilePicker.saveFile(dialogTitle: dialogTitle, fileName: fileName);
   }
 
   static Future<String?> getDirectoryPath({String dialogTitle = 'Select Folder'}) async {
@@ -22,7 +22,7 @@ class FileDialog {
       // Portal doesn't support directory picking; go straight to legacy tools
       return await _legacyDirDialog(dialogTitle);
     }
-    return FilePicker.platform.getDirectoryPath(dialogTitle: dialogTitle);
+    return FilePicker.getDirectoryPath(dialogTitle: dialogTitle);
   }
 
   static Future<FilePickerResult?> pickFiles({
@@ -35,7 +35,7 @@ class FileDialog {
       if (path == null) return null;
       return FilePickerResult([PlatformFile(path: path, name: path.split('/').last, size: 0)]);
     }
-    return FilePicker.platform.pickFiles(
+    return FilePicker.pickFiles(
       dialogTitle: dialogTitle,
       type: allowedExtensions != null ? FileType.custom : FileType.any,
       allowedExtensions: allowedExtensions,

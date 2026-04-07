@@ -23,6 +23,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _apiKeyController = TextEditingController();
   final _modelController = TextEditingController();
   final _modelSearchController = TextEditingController();
+  final _modelNotifier = ValueNotifier<String?>(null);
   double _temperature = ConfigDefaults.temperature;
   int _maxTokens = ConfigDefaults.maxTokens;
   int _timeoutSeconds = ConfigDefaults.timeoutSeconds;
@@ -42,6 +43,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _baseUrlController.text = settings.baseUrl ?? '';
     _apiKeyController.text = settings.apiKey ?? '';
     _modelController.text = settings.modelName;
+    _modelNotifier.value = settings.modelName.isNotEmpty ? settings.modelName : null;
     _temperature = settings.temperature;
     _maxTokens = settings.maxTokens;
     _timeoutSeconds = settings.timeoutSeconds;
@@ -78,6 +80,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _apiKeyController.dispose();
     _modelController.dispose();
     _modelSearchController.dispose();
+    _modelNotifier.dispose();
     super.dispose();
   }
 
@@ -317,11 +320,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         child: DropdownButton2<String>(
                           isExpanded: true,
                           hint: const Text('Select Model', style: TextStyle(color: Colors.white70)),
-                          value: _availableModels.contains(_modelController.text) ? _modelController.text : null,
-                          items: _availableModels.map((model) => DropdownMenuItem(value: model, child: Text(model, style: const TextStyle(color: Colors.white)))).toList(),
+                          valueListenable: _modelNotifier,
+                          items: _availableModels.map((model) => DropdownItem(value: model, child: Text(model, style: const TextStyle(color: Colors.white)))).toList(),
                           onChanged: (v) {
                             if (v != null) {
                               setState(() => _modelController.text = v);
+                              _modelNotifier.value = v;
                             }
                           },
                           buttonStyleData: const ButtonStyleData(height: 50, padding: EdgeInsets.symmetric(horizontal: 12)),
@@ -335,8 +339,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           ),
                           dropdownSearchData: DropdownSearchData(
                             searchController: _modelSearchController,
-                            searchInnerWidgetHeight: 50,
-                            searchInnerWidget: Container(
+                            searchBarWidgetHeight: 50,
+                            searchBarWidget: Container(
                               padding: const EdgeInsets.all(8),
                               child: TextField(
                                 controller: _modelSearchController,
@@ -763,6 +767,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _availableModels = finalModels;
           _isLoadingModels = false;
         });
+        _modelNotifier.value = finalModels.contains(_modelController.text) ? _modelController.text : null;
         print('DEBUG: State updated with ${_availableModels.length} models');
       }
     } catch (e) {
