@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=LLMtary
+Comment=Automated Penetration Testing
+Exec=/opt/LLMtary/LLMtary
+Icon=LLMtary
+Terminal=false
+Type=Application
+Categories=Security;Network;
+StartupNotify=true

@@ -95,9 +95,14 @@ macos_release:
     - mkdir -p build/macos/Build/Products/Release/LLMtary.app/Contents/Resources/build
 
     # --- SIGNING STEP ---
-    # If you do not have a paid Developer ID yet, comment out these two lines:
-    - chmod +x scripts/sign_macos.sh
-    - ./scripts/sign_macos.sh
+    # Only runs if MACOS_CERTIFICATE is configured in GitLab CI/CD variables.
+    - |
+      if [ -n "$MACOS_CERTIFICATE" ]; then
+        chmod +x scripts/sign_macos.sh
+        ./scripts/sign_macos.sh
+      else
+        echo "Skipping code signing: MACOS_CERTIFICATE not set. Set it in GitLab CI/CD variables to enable signing."
+      fi
     # --------------------
 
     # Copy DMG to root for artifact (avoids subfolder in download)
@@ -160,7 +165,7 @@ linux_release:
     - cp linux/LLMtary.desktop staging/usr/share/applications/
 
     # 6. Install application icon
-    - cp linux/runner/resources/window_icon.png staging/usr/share/pixmaps/LLMtary.png
+    - cp linux/llmtary.png staging/usr/share/pixmaps/LLMtary.png
 
     # 7. Make the binary executable (ensure it has proper permissions)
     - chmod +x staging/opt/LLMtary/LLMary
