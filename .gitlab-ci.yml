@@ -2,7 +2,7 @@ variables:
   GIT_STRATEGY: clone
   GIT_CLONE_PATH: "$CI_PROJECT_DIR"
   # Your specific LAN IP and port
-  REPO_URL: "http://192.168.50.112:1080/root/LLMary.git"
+  REPO_URL: "http://192.168.50.112:1080/root/LLMtary.git"
 
 stages:
   - build
@@ -28,24 +28,24 @@ windows_release:
     - $CleanVersion = $Env:CI_COMMIT_TAG.TrimStart('v')
     - '(Get-Content pubspec.yaml) -replace ''^version: .*'', "version: $CleanVersion" | Set-Content pubspec.yaml'
     # Update Version in .ifp
-    - '(Get-Content LLMary_Win_Installer.ifp) -replace ''<Version>.*?</Version>'', "<Version>$CleanVersion</Version>" | Set-Content LLMary_Win_Installer.ifp'
+    - '(Get-Content LLMtary_Win_Installer.ifp) -replace ''<Version>.*?</Version>'', "<Version>$CleanVersion</Version>" | Set-Content LLMtary_Win_Installer.ifp'
     # Update DisplayVersion in Registry
-    - '(Get-Content LLMary_Win_Installer.ifp) -replace ''name="DisplayVersion" type="string">.*?</RegistryKey>'', (''name="DisplayVersion" type="string">'' + $CleanVersion + ''</RegistryKey>'') | Set-Content LLMary_Win_Installer.ifp'
+    - '(Get-Content LLMtary_Win_Installer.ifp) -replace ''name="DisplayVersion" type="string">.*?</RegistryKey>'', (''name="DisplayVersion" type="string">'' + $CleanVersion + ''</RegistryKey>'') | Set-Content LLMtary_Win_Installer.ifp'
     # Remove hardcoded sizes to avoid mismatch errors during extraction
-    - '(Get-Content LLMary_Win_Installer.ifp) -replace ''size=".*?"'', "" | Set-Content LLMary_Win_Installer.ifp'
+    - '(Get-Content LLMtary_Win_Installer.ifp) -replace ''size=".*?"'', "" | Set-Content LLMtary_Win_Installer.ifp'
     - flutter pub get
     - flutter build windows --release
 
     # 1. Clean and Create Staging
-    - if (Test-Path "C:\Temp\LLMary_Staging") { Remove-Item "C:\Temp\LLMary_Staging" -Recurse -Force }
-    - New-Item -ItemType Directory -Force -Path "C:\Temp\LLMary_Staging"
+    - if (Test-Path "C:\Temp\LLMtary_Staging") { Remove-Item "C:\Temp\LLMtary_Staging" -Recurse -Force }
+    - New-Item -ItemType Directory -Force -Path "C:\Temp\LLMtary_Staging"
 
     # 2. Copy Build Files to Staging
-    - Copy-Item -Path "build\windows\x64\runner\Release\*" -Destination "C:\Temp\LLMary_Staging" -Recurse -Force
+    - Copy-Item -Path "build\windows\x64\runner\Release\*" -Destination "C:\Temp\LLMtary_Staging" -Recurse -Force
 
 
     # 4. Copy Icon
-    - Copy-Item -Path "assets\favicon.ico" -Destination "C:\Temp\LLMary_Staging\favicon.ico"
+    - Copy-Item -Path "assets\favicon.ico" -Destination "C:\Temp\LLMtary_Staging\favicon.ico"
 
     # 5. Create Output Directory (for the installer)
     - New-Item -ItemType Directory -Force -Path "Output"
@@ -53,15 +53,15 @@ windows_release:
     # 6. Run InstallForge CLI Builder
     #    -i = Input (.ifp file)
     #    -o = Output (Setup executable)
-    - '& "C:\Program Files (x86)\solicus\InstallForge\bin\ifbuildx86.exe" -i "LLMary_Win_Installer.ifp" -o "Output\LLMary_Setup_V$($Env:CI_COMMIT_TAG.TrimStart(''v'')).exe"'
+    - '& "C:\Program Files (x86)\solicus\InstallForge\bin\ifbuildx86.exe" -i "LLMtary_Win_Installer.ifp" -o "Output\LLMtary_Setup_V$($Env:CI_COMMIT_TAG.TrimStart(''v'')).exe"'
 
     # 7. Copy installer to root for artifact (avoids subfolder in download)
-    - Copy-Item -Path "Output\LLMary_Setup_V$($Env:CI_COMMIT_TAG.TrimStart('v')).exe" -Destination "."
+    - Copy-Item -Path "Output\LLMtary_Setup_V$($Env:CI_COMMIT_TAG.TrimStart('v')).exe" -Destination "."
 
   artifacts:
-    name: "LLMary-Windows-$CI_COMMIT_TAG"
+    name: "LLMtary-Windows-$CI_COMMIT_TAG"
     paths:
-      - "LLMary_Setup_V*.exe"
+      - "LLMtary_Setup_V*.exe"
     expire_in: 30 days
 
 # ---------------------------------------------------------------------------
@@ -92,7 +92,7 @@ macos_release:
     - flutter build macos --release
 
     # Bundle web assets into the .app bundle
-    - mkdir -p build/macos/Build/Products/Release/LLMary.app/Contents/Resources/build
+    - mkdir -p build/macos/Build/Products/Release/LLMtary.app/Contents/Resources/build
 
     # --- SIGNING STEP ---
     # If you do not have a paid Developer ID yet, comment out these two lines:
@@ -101,12 +101,12 @@ macos_release:
     # --------------------
 
     # Copy DMG to root for artifact (avoids subfolder in download)
-    - cp build/macos/Build/Products/Release/LLMary_Installer_V${CI_COMMIT_TAG#v}.dmg .
+    - cp build/macos/Build/Products/Release/LLMtary_Installer_V${CI_COMMIT_TAG#v}.dmg .
 
   artifacts:
-    name: "LLMary-MacOS-$CI_COMMIT_TAG"
+    name: "LLMtary-MacOS-$CI_COMMIT_TAG"
     paths:
-      - "LLMary_Installer_V*.dmg"
+      - "LLMtary_Installer_V*.dmg"
     expire_in: 30 days
 
 # ---------------------------------------------------------------------------
@@ -141,50 +141,50 @@ linux_release:
 
     # --- PACKAGING PREPARATION ---
     # 1. Create a "fake" file system tree in a folder named 'staging'
-    - mkdir -p staging/opt/LLMary
+    - mkdir -p staging/opt/LLMtary
     - mkdir -p staging/usr/bin
     - mkdir -p staging/usr/share/applications
     - mkdir -p staging/usr/share/pixmaps
 
-    # 2. Copy the build artifacts to /opt/LLMary
-    - cp -r build/linux/x64/release/bundle/* staging/opt/LLMary/
+    # 2. Copy the build artifacts to /opt/LLMtary
+    - cp -r build/linux/x64/release/bundle/* staging/opt/LLMtary/
 
-    # 3. Copy the pre-built web assets to /opt/LLMary/build/web
-    - mkdir -p staging/opt/LLMary/build
+    # 3. Copy the pre-built web assets to /opt/LLMtary/build/web
+    - mkdir -p staging/opt/LLMtary/build
 
-    # 4. Create a symlink so users can type 'LLMary' from anywhere
+    # 4. Create a symlink so users can type 'LLMtary' from anywhere
     #    (Linking to the executable inside /opt)
-    - ln -s /opt/LLMary/LLMary staging/usr/bin/LLMary
+    - ln -s /opt/LLMtary/LLMtary staging/usr/bin/LLMtary
 
     # 5. Install .desktop file for application menu integration
-    - cp linux/LLMary.desktop staging/usr/share/applications/
+    - cp linux/LLMtary.desktop staging/usr/share/applications/
 
     # 6. Install application icon
-    - cp linux/runner/resources/window_icon.png staging/usr/share/pixmaps/LLMary.png
+    - cp linux/runner/resources/window_icon.png staging/usr/share/pixmaps/LLMtary.png
 
     # 7. Make the binary executable (ensure it has proper permissions)
-    - chmod +x staging/opt/LLMary/LLMary
+    - chmod +x staging/opt/LLMtary/LLMary
 
     # --- FPM PACKAGING COMMANDS ---
     # Note: We use ${CI_COMMIT_TAG#v} to strip the 'v' from 'v1.0.0' because RPM forbids 'v' in versions.
 
     # 1. DEB (Debian/Ubuntu/Kali) - Standard
-    - fpm -s dir -t deb --name LLMary --version ${CI_COMMIT_TAG#v} --architecture x86_64 --depends libgtk-3-0 --description "LLMary Security Tool" --maintainer "chetstriker" --after-install linux/post-install.sh -C staging .
+    - fpm -s dir -t deb --name LLMtary --version ${CI_COMMIT_TAG#v} --architecture x86_64 --depends libgtk-3-0 --description "LLMtary Security Tool" --maintainer "chetstriker" --after-install linux/post-install.sh -C staging .
 
     # 2. RPM (RedHat / Fedora / CentOS / AlmaLinux)
     #    Uses dependency 'gtk3'
-    - fpm -s dir -t rpm --name LLMary --version ${CI_COMMIT_TAG#v} --architecture x86_64 --depends gtk3 --description "LLMary Security Tool" --maintainer "chetstriker" --after-install linux/post-install.sh -p "LLMary-${CI_COMMIT_TAG#v}-RH-Fed-Cent_Alma.x86_64.rpm" -C staging .
+    - fpm -s dir -t rpm --name LLMtary --version ${CI_COMMIT_TAG#v} --architecture x86_64 --depends gtk3 --description "LLMtary Security Tool" --maintainer "chetstriker" --after-install linux/post-install.sh -p "LLMtary-${CI_COMMIT_TAG#v}-RH-Fed-Cent_Alma.x86_64.rpm" -C staging .
 
     # 3. RPM (OpenSUSE / SLES)
     #    Uses dependency 'libgtk-3-0' and we add a suffix to the filename so they don't overwrite
     #    -p flag manually sets the output filename
-    - fpm -s dir -t rpm --name LLMary --version ${CI_COMMIT_TAG#v} --architecture x86_64 --depends libgtk-3-0 --description "LLMary for openSUSE" --maintainer "chetstriker" --after-install linux/post-install.sh -p "LLMary-${CI_COMMIT_TAG#v}-opensuse.x86_64.rpm" -C staging .
+    - fpm -s dir -t rpm --name LLMtary --version ${CI_COMMIT_TAG#v} --architecture x86_64 --depends libgtk-3-0 --description "LLMtary for openSUSE" --maintainer "chetstriker" --after-install linux/post-install.sh -p "LLMtary-${CI_COMMIT_TAG#v}-opensuse.x86_64.rpm" -C staging .
 
     # 4. Pacman (Arch Linux)
-    - fpm -s dir -t pacman --name LLMary --version ${CI_COMMIT_TAG#v} --architecture x86_64 --depends gtk3 --description "LLMary Security Tool" --maintainer "chetstriker" --after-install linux/post-install.sh -C staging .
+    - fpm -s dir -t pacman --name LLMtary --version ${CI_COMMIT_TAG#v} --architecture x86_64 --depends gtk3 --description "LLMtary Security Tool" --maintainer "chetstriker" --after-install linux/post-install.sh -C staging .
 
   artifacts:
-    name: "LLMary-Linux-$CI_COMMIT_TAG"
+    name: "LLMtary-Linux-$CI_COMMIT_TAG"
     paths:
       - "*.deb"
       - "*.rpm"        # This captures both RPMs
@@ -211,13 +211,13 @@ create_release:
     - echo "Creating GitLab release for $CI_COMMIT_TAG"
   release:
     tag_name: "$CI_COMMIT_TAG"
-    name: "LLMary $CI_COMMIT_TAG"
+    name: "LLMtary $CI_COMMIT_TAG"
     description: |
-      Cross-platform release for LLMary.
+      Cross-platform release for LLMtary.
 
       **Installation:**
       - **Windows:** Download and run the installer executable.
-      - **macOS:** Download the DMG, open it, and drag LLMary.app to your Applications folder.
+      - **macOS:** Download the DMG, open it, and drag LLMtary.app to your Applications folder.
       - **Linux:** Download the appropriate package for your distribution and install.
     assets:
       links:
@@ -226,10 +226,10 @@ create_release:
         - name: "MacOS Build - DMG"
           url: "$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_TAG/download?job=macos_release"
         - name: "Linux - DEB - Debian or Ubuntu"
-          url: "$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_TAG/raw/LLMary_${CI_COMMIT_TAG#v}_amd64.deb?job=linux_release"
+          url: "$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_TAG/raw/LLMtary_${CI_COMMIT_TAG#v}_amd64.deb?job=linux_release"
         - name: "Linux - RPM - Fedora or RHEL"
-          url: "$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_TAG/raw/LLMary-${CI_COMMIT_TAG#v}-RH-Fed-Cent_Alma.x86_64.rpm?job=linux_release"
+          url: "$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_TAG/raw/LLMtary-${CI_COMMIT_TAG#v}-RH-Fed-Cent_Alma.x86_64.rpm?job=linux_release"
         - name: "Linux - RPM - OpenSUSE"
-          url: "$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_TAG/raw/LLMary-${CI_COMMIT_TAG#v}-opensuse.x86_64.rpm?job=linux_release"
+          url: "$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_TAG/raw/LLMtary-${CI_COMMIT_TAG#v}-opensuse.x86_64.rpm?job=linux_release"
         - name: "Linux - Pacman - Arch Linux"
-          url: "$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_TAG/raw/LLMary-${CI_COMMIT_TAG#v}-1-x86_64.pkg.tar.zst?job=linux_release"
+          url: "$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_TAG/raw/LLMtary-${CI_COMMIT_TAG#v}-1-x86_64.pkg.tar.zst?job=linux_release"
