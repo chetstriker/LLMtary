@@ -32,11 +32,6 @@
       <VisualStyle isEnabled="true"/>
     </UserInterface>
     <InstallationFiles defaultInstallationPath="&lt;LocalApplicationData&gt;\&lt;AppName&gt;\" isDefaultInstallationPathAlterable ="true">
-      <InstallationFile size="N/A" type="[Folder]">C:\Temp\LLMtary_Staging\Themes\</InstallationFile>
-      <InstallationFile size="N/A" type="[Folder]">C:\Temp\LLMtary_Staging\IconLocation\</InstallationFile>
-      <InstallationFile size="N/A" type="[Folder]">C:\Temp\LLMtary_Staging\data\</InstallationFile>
-      <InstallationFile size="N/A" type="[Folder]">C:\Temp\LLMtary_Staging\build\</InstallationFile>
-
       <InstallationFile size="20.3 MB" type="dll">C:\Temp\LLMtary_Staging\flutter_windows.dll</InstallationFile>
       <InstallationFile size="56 KB" type="exe">C:\Temp\LLMtary_Staging\llmtary.exe</InstallationFile>
       <InstallationFile size="1.6 MB" type="dll">C:\Temp\LLMtary_Staging\sqlite3.dll</InstallationFile>

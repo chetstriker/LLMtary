@@ -2,17 +2,17 @@
 set -e
 
 # --- CONFIGURATION ---
-APP_PATH="build/macos/Build/Products/Release/LLMary.app"
+APP_PATH="build/macos/Build/Products/Release/LLMtary.app"
 
 # Use version from CI environment variable if available, otherwise use default name
 if [ -n "$CI_COMMIT_TAG" ]; then
   VERSION="${CI_COMMIT_TAG#v}"  # Strip 'v' prefix
-  DMG_OUTPUT="build/macos/Build/Products/Release/LLMary_Installer_V${VERSION}.dmg"
+  DMG_OUTPUT="build/macos/Build/Products/Release/LLMtary_Installer_V${VERSION}.dmg"
 else
-  DMG_OUTPUT="build/macos/Build/Products/Release/LLMary_Installer.dmg"
+  DMG_OUTPUT="build/macos/Build/Products/Release/LLMtary_Installer.dmg"
 fi
 
-VOL_NAME="LLMary Installer"
+VOL_NAME="LLMtary Installer"
 
 # Variables for Keychain
 KEYCHAIN_PATH=$RUNNER_TEMP_PROJECT_DIR/build.keychain

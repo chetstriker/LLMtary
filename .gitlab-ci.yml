@@ -159,7 +159,7 @@ linux_release:
 
     # 4. Create a symlink so users can type 'LLMtary' from anywhere
     #    (Linking to the executable inside /opt)
-    - ln -s /opt/LLMtary/LLMtary staging/usr/bin/LLMtary
+    - ln -s /opt/LLMtary/llmtary staging/usr/bin/LLMtary
 
     # 5. Install .desktop file for application menu integration
     - cp linux/LLMtary.desktop staging/usr/share/applications/
@@ -168,7 +168,7 @@ linux_release:
     - cp linux/llmtary.png staging/usr/share/pixmaps/LLMtary.png
 
     # 7. Make the binary executable (ensure it has proper permissions)
-    - chmod +x staging/opt/LLMtary/LLMary
+    - chmod +x staging/opt/LLMtary/llmtary
 
     # --- FPM PACKAGING COMMANDS ---
     # Note: We use ${CI_COMMIT_TAG#v} to strip the 'v' from 'v1.0.0' because RPM forbids 'v' in versions.
