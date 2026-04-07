@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../database/database_helper.dart';
@@ -193,7 +194,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     const Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('LLMtary', style: TextStyle(color: Colors.white, fontSize: 28, fontFamily: 'BungeeSpice')),
+                        _BungeeSpiceText('LLMtary', fontSize: 28),
                         Text('Automated Penetration Testing', style: TextStyle(color: Colors.white38, fontSize: 13)),
                       ],
                     ),
@@ -347,6 +348,38 @@ class _HomeScreenState extends State<HomeScreen> {
         border: Border.all(color: color.withValues(alpha: 0.5)),
       ),
       child: Text(label, style: TextStyle(color: color, fontSize: 9, fontWeight: FontWeight.bold)),
+    );
+  }
+}
+
+/// Renders the BungeeSpice title with its orange gradient on Windows (where
+/// color fonts are not supported) and lets the font's built-in colors show
+/// on macOS / Linux.
+class _BungeeSpiceText extends StatelessWidget {
+  const _BungeeSpiceText(this.text, {required this.fontSize});
+  final String text;
+  final double fontSize;
+
+  static const _gradient = LinearGradient(
+    begin: Alignment.topCenter,
+    end: Alignment.bottomCenter,
+    colors: [Color(0xFFFF6B00), Color(0xFFFF9F00)],
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final textWidget = Text(
+      text,
+      style: TextStyle(
+        color: Platform.isWindows ? Colors.white : Colors.white,
+        fontSize: fontSize,
+        fontFamily: 'BungeeSpice',
+      ),
+    );
+    if (!Platform.isWindows) return textWidget;
+    return ShaderMask(
+      shaderCallback: (bounds) => _gradient.createShader(bounds),
+      child: textWidget,
     );
   }
 }

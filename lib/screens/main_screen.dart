@@ -253,11 +253,7 @@ class _MainScreenState extends State<MainScreen> {
             child: const Icon(Icons.security, color: Colors.white, size: 18),
           ),
           const SizedBox(width: 10),
-          const Text('LLMtary',
-              style: TextStyle(
-                  color: Colors.white,
-                  fontFamily: 'BungeeSpice',
-                  fontSize: 16)),
+          _BungeeSpiceText('LLMtary', fontSize: 16),
           const SizedBox(width: 28),
           // Tab bar
           Flexible(
@@ -1227,4 +1223,36 @@ class _TabClipper extends CustomClipper<Path> {
 
   @override
   bool shouldReclip(_TabClipper old) => false;
+}
+
+/// Renders the BungeeSpice title with its orange gradient on Windows (where
+/// color fonts are not supported) and lets the font's built-in colors show
+/// on macOS / Linux.
+class _BungeeSpiceText extends StatelessWidget {
+  const _BungeeSpiceText(this.text, {required this.fontSize});
+  final String text;
+  final double fontSize;
+
+  static const _gradient = LinearGradient(
+    begin: Alignment.topCenter,
+    end: Alignment.bottomCenter,
+    colors: [Color(0xFFFF6B00), Color(0xFFFF9F00)],
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final textWidget = Text(
+      text,
+      style: TextStyle(
+        color: Colors.white,
+        fontSize: fontSize,
+        fontFamily: 'BungeeSpice',
+      ),
+    );
+    if (!Platform.isWindows) return textWidget;
+    return ShaderMask(
+      shaderCallback: (bounds) => _gradient.createShader(bounds),
+      child: textWidget,
+    );
+  }
 }
