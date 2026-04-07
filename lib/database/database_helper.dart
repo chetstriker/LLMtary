@@ -24,7 +24,7 @@ class DatabaseHelper {
     debugPrint('[DB] appSupportDir=${appDir.path}');
     await appDir.create(recursive: true);
     debugPrint('[DB] directory ensured');
-    final path = join(appDir.path, 'penexecute.db');
+    final path = join(appDir.path, 'llmtary.db');
     debugPrint('[DB] opening database at $path');
 
     final db = await openDatabase(

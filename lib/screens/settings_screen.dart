@@ -57,7 +57,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _changeStoragePath() async {
-    final picked = await FileDialog.getDirectoryPath(dialogTitle: 'Select PenExecute storage folder');
+    final picked = await FileDialog.getDirectoryPath(dialogTitle: 'Select LLMtary storage folder');
     if (picked == null) return;
     StorageService.setCustomBasePath(picked);
     await DatabaseHelper.saveSetting(SettingsKeys.storageBasePath, picked);

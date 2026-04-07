@@ -23,7 +23,7 @@ class MyApp extends StatelessWidget {
     return ChangeNotifierProvider(
       create: (_) => AppState()..initialize(),
       child: MaterialApp(
-          title: 'PenExecute',
+          title: 'LLMtary',
           debugShowCheckedModeBanner: false,
           theme: ThemeData(
             brightness: Brightness.dark,

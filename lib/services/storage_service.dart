@@ -14,7 +14,7 @@ class StorageService {
       return _customBasePath!;
     }
     final docs = await getApplicationDocumentsDirectory();
-    return p.join(docs.path, 'PenExecute');
+    return p.join(docs.path, 'LLMtary');
   }
 
   static Future<String> getProjectPath(String projectName) async {

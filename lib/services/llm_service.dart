@@ -683,8 +683,8 @@ class LLMService {
       {
         'Content-Type': 'application/json',
         'Authorization': 'Bearer ${settings.apiKey ?? ''}',
-        'HTTP-Referer': 'https://penexecute.app',
-        'X-Title': 'PenExecute Security Scanner',
+        'HTTP-Referer': 'https://llmtary.app',
+        'X-Title': 'LLMtary Security Scanner',
       },
       body,
       timeout,

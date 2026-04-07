@@ -40,7 +40,7 @@ class ReportGenerator {
         : project.name;
     final preparedBy = project.pentesterName?.isNotEmpty == true
         ? project.pentesterName!
-        : 'PenExecute';
+        : 'LLMtary';
     final proofByCommand = _buildProofIndex(commandLogs, vulnsToReport);
     final effectiveScope = scope.isNotEmpty
         ? scope
@@ -278,7 +278,7 @@ ${project.conclusion?.isNotEmpty == true ? '''
         : project.name;
     final preparedBy = project.pentesterName?.isNotEmpty == true
         ? project.pentesterName!
-        : 'PenExecute';
+        : 'LLMtary';
     final proofByCommand = _buildProofIndex(commandLogs, vulnsToReport);
     final effectiveScope = scope.isNotEmpty
         ? scope

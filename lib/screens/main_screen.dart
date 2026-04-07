@@ -253,7 +253,7 @@ class _MainScreenState extends State<MainScreen> {
             child: const Icon(Icons.security, color: Colors.white, size: 18),
           ),
           const SizedBox(width: 10),
-          const Text('PenExecute',
+          const Text('LLMtary',
               style: TextStyle(
                   color: Colors.white,
                   fontWeight: FontWeight.w700,
@@ -1074,7 +1074,7 @@ class _MainScreenState extends State<MainScreen> {
       appState.vulnerabilities,
       appState.commandLogs,
       target?.address ?? 'unknown',
-      projectName: appState.currentProject?.name ?? 'PenExecute',
+      projectName: appState.currentProject?.name ?? 'LLMtary',
     );
   }
 
@@ -1146,7 +1146,7 @@ class _MainScreenState extends State<MainScreen> {
       '> ${l.command}\n'
       '${l.output}'
     ).join('\n---\n\n');
-    final projectName = appState.currentProject?.name ?? 'PenExecute';
+    final projectName = appState.currentProject?.name ?? 'LLMtary';
     final path = await FileDialog.saveFile(
       dialogTitle: 'Save Command Logs',
       fileName: _buildExportFileName(projectName, 'CommandLogs', 'txt'),
@@ -1158,7 +1158,7 @@ class _MainScreenState extends State<MainScreen> {
 
   Future<void> _exportPrompts(AppState state) async {
     final content = state.promptLogs.map((log) => '=== PROMPT ===\n${log.prompt}\n\n=== RESPONSE ===\n${log.response}\n').join('\n---\n\n');
-    final projectName = state.currentProject?.name ?? 'PenExecute';
+    final projectName = state.currentProject?.name ?? 'LLMtary';
     final path = await FileDialog.saveFile(
       dialogTitle: 'Save Prompts',
       fileName: _buildExportFileName(projectName, 'PromptLogs', 'txt'),
@@ -1170,7 +1170,7 @@ class _MainScreenState extends State<MainScreen> {
 
   Future<void> _exportDebug(AppState state) async {
     final content = state.debugLogs.map((log) => '[${log.timestamp.toString().substring(11, 19)}] ${log.message}').join('\n');
-    final projectName = state.currentProject?.name ?? 'PenExecute';
+    final projectName = state.currentProject?.name ?? 'LLMtary';
     final path = await FileDialog.saveFile(
       dialogTitle: 'Save Debug Log',
       fileName: _buildExportFileName(projectName, 'DebugLogs', 'txt'),

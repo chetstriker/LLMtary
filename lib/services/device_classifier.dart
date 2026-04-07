@@ -1,4 +1,4 @@
-// Device classification engine for PenExecute.
+// Device classification engine for LLMtary.
 //
 // Classifies a target device based on open ports and service banners extracted
 // from recon JSON, then returns a targeted analysis prompt set and an

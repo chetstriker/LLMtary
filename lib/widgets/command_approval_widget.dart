@@ -77,7 +77,7 @@ class CommandApprovalWidget extends StatelessWidget {
               Row(
                 children: [
                   const Text(
-                    'PenExecute wants to run ',
+                    'LLMtary wants to run ',
                     style: TextStyle(
                       color: Colors.white,
                       fontSize: 14,
