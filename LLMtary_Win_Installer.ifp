@@ -32,6 +32,7 @@
       <VisualStyle isEnabled="true"/>
     </UserInterface>
     <InstallationFiles defaultInstallationPath="&lt;LocalApplicationData&gt;\&lt;AppName&gt;\" isDefaultInstallationPathAlterable ="true">
+      <InstallationFile size="N/A" type="[Folder]">C:\Temp\LLMtary_Staging\data\</InstallationFile>
       <InstallationFile size="20.3 MB" type="dll">C:\Temp\LLMtary_Staging\flutter_windows.dll</InstallationFile>
       <InstallationFile size="56 KB" type="exe">C:\Temp\LLMtary_Staging\llmtary.exe</InstallationFile>
       <InstallationFile size="1.6 MB" type="dll">C:\Temp\LLMtary_Staging\sqlite3.dll</InstallationFile>
@@ -51,8 +52,8 @@
       <RegistryKey root="HKCU" key="Software\Microsoft\Windows\CurrentVersion\Uninstall\LLMtary" name="Publisher" type="string">LLMtary</RegistryKey>
     </Registry>
     <Shortcuts defaultPath="&lt;Company&gt;\&lt;AppName&gt;\" isDefaultPathAlterable="false" isCreateStartmenuShortcutsForAllUsers="false" isCreateDesktopShortcutsForAllUsers="false">
-      <Shortcut destination="Desktop" name="LLMtary" targetFile="&lt;InstallPath&gt;\LLMtary.exe" commandLineArguments="" iconFilePath="&lt;InstallPath&gt;\favicon.ico" iconIndex="0"/>
-      <Shortcut destination="Startmenu" name="LLMtary" targetFile="&lt;InstallPath&gt;\LLMtary.exe" commandLineArguments="" iconFilePath="&lt;InstallPath&gt;\favicon.ico" iconIndex="0"/>
+      <Shortcut destination="Desktop" name="LLMtary" targetFile="&lt;InstallPath&gt;\llmtary.exe" commandLineArguments="" iconFilePath="&lt;InstallPath&gt;\favicon.ico" iconIndex="0"/>
+      <Shortcut destination="Startmenu" name="LLMtary" targetFile="&lt;InstallPath&gt;\llmtary.exe" commandLineArguments="" iconFilePath="&lt;InstallPath&gt;\favicon.ico" iconIndex="0"/>
     </Shortcuts>
     <Serials isDialogEnabled="false" count="1000" mask ="#####-#####-#####-#####"/>
     <SplashScreen isDialogEnabled="false" delayTime="2">
