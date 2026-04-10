@@ -692,10 +692,16 @@ ${critical > 0 ? ' $critical <strong>Critical</strong> severity finding(s) repre
   /// Build an index of command logs keyed by the vulnerability's database ID for O(1) lookup.
   /// Prefers logs whose command starts with "PROOF:" for a given vulnerability;
   /// falls back to the most recent log for that vulnerability.
-  /// [allVulns] is the original unsorted list used to map vulnerabilityIndex → id.
+  ///
+  /// Newer logs (schema v21+) carry [CommandLog.vulnerabilityId] — a stable FK to the
+  /// vulnerability's DB id — and are matched directly. Older logs only have the
+  /// positional [CommandLog.vulnerabilityIndex] and are matched via the [allVulns]
+  /// list for backward compatibility. Using the positional index on old data may still
+  /// produce mismatches if the report sort order differs from the execution order; that
+  /// is the legacy behaviour and cannot be corrected retroactively.
   static Map<int, CommandLog> _buildProofIndex(
       List<CommandLog> logs, List<Vulnerability> allVulns) {
-    // Build a map from list-index → vulnerability id
+    // Backward-compat map: list-position → vulnerability DB id (for pre-v21 logs only).
     final indexToId = <int, int>{};
     for (int i = 0; i < allVulns.length; i++) {
       final id = allVulns[i].id;
@@ -704,9 +710,9 @@ ${critical > 0 ? ' $critical <strong>Critical</strong> severity finding(s) repre
 
     final index = <int, CommandLog>{};
     for (final log in logs) {
-      final listIdx = log.vulnerabilityIndex;
-      if (listIdx == null) continue;
-      final vulnId = indexToId[listIdx];
+      // v21+: use the stable FK directly; pre-v21: fall back to positional mapping.
+      final vulnId = log.vulnerabilityId ??
+          (log.vulnerabilityIndex != null ? indexToId[log.vulnerabilityIndex!] : null);
       if (vulnId == null) continue;
       final existing = index[vulnId];
       final isProof = log.command.startsWith('PROOF:');

@@ -29,7 +29,7 @@ class DatabaseHelper {
 
     final db = await openDatabase(
       path,
-      version: 20,
+      version: 21,
       singleInstance: true,
       onConfigure: (db) async {
         await db.execute('PRAGMA busy_timeout=5000');
@@ -80,6 +80,7 @@ class DatabaseHelper {
             output TEXT NOT NULL,
             exitCode INTEGER NOT NULL,
             vulnerabilityIndex INTEGER,
+            vulnerabilityId INTEGER,
             projectId INTEGER DEFAULT 0,
             targetId INTEGER DEFAULT 0
           )
@@ -426,6 +427,11 @@ class DatabaseHelper {
         if (oldVersion < 20) {
           try { await db.execute('ALTER TABLE vulnerabilities ADD COLUMN reportReady INTEGER NOT NULL DEFAULT 1'); } catch (_) {}
           try { await db.execute('ALTER TABLE targets ADD COLUMN classifiedAs TEXT'); } catch (_) {}
+        }
+        if (oldVersion < 21) {
+          // Add stable FK link from command_logs → vulnerabilities to fix proof-output
+          // mismatch caused by positional vulnerabilityIndex changing across sort orders.
+          try { await db.execute('ALTER TABLE command_logs ADD COLUMN vulnerabilityId INTEGER'); } catch (_) {}
         }
       },
     );

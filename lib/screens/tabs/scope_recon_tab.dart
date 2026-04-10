@@ -41,7 +41,6 @@ class _ScopeReconTabState extends State<ScopeReconTab> {
   final _targetPanelKey = GlobalKey<TargetInputPanelState>();
   bool _starting = false; // true for the brief gap between GO press and first UI update
   bool _scanStopped = false; // true after user presses STOP mid-scan
-  String _lastQueuedScope = ''; // scope text at last GO/RESUME press
 
   // Scope field controllers — mirror ScopeConfigDialog
   late final TextEditingController _scopeCtrl;
@@ -100,7 +99,7 @@ class _ScopeReconTabState extends State<ScopeReconTab> {
     final novel = allAddresses.where((a) => !existingAddrs.contains(a)).toList();
     if (novel.isEmpty) return;
     await panelState.addAddressesToQueue(novel);
-    setState(() => _lastQueuedScope = _scopeCtrl.text.trim());
+    setState(() {});
   }
 
   void _onScanComplete(AppState appState) {
@@ -175,7 +174,6 @@ class _ScopeReconTabState extends State<ScopeReconTab> {
                         setState(() {
                           _starting = true;
                           _scanStopped = false;
-                          _lastQueuedScope = _scopeCtrl.text.trim();
                         });
                         _targetPanelKey.currentState?.startScan(_scopeCtrl.text);
                       },
@@ -268,7 +266,6 @@ class _ScopeReconTabState extends State<ScopeReconTab> {
                         setState(() {
                           _starting = true;
                           _scanStopped = false;
-                          _lastQueuedScope = _scopeCtrl.text.trim();
                         });
                         _targetPanelKey.currentState?.startScan(_scopeCtrl.text);
                       },

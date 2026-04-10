@@ -526,8 +526,7 @@ Respond ONLY with valid JSON.''';
         
         final exitCode = await process.exitCode.timeout(Duration(seconds: 60));
         final stdout = stdoutBuffer.toString();
-        final stderr = stderrBuffer.toString();
-        
+
         print('${_timestamp()} DEBUG: Setup check exit code: $exitCode');
         
         // If check command succeeds, setup is already done
