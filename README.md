@@ -4,6 +4,8 @@
 > From passive recon to active exploit validation and professional report generation — all running locally, all under your control.
 
 <p align="center">
+  <a href="https://github.com/chetstriker/LLMtary/stargazers"><img src="https://img.shields.io/github/stars/chetstriker/LLMtary?style=for-the-badge&color=fbbf24&logo=github"/></a>
+  <a href="https://github.com/chetstriker/LLMtary/releases/latest"><img src="https://img.shields.io/github/v/release/chetstriker/LLMtary?style=for-the-badge&color=10b981&logo=github"/></a>
   <img src="https://img.shields.io/badge/Built_with-Flutter-02569B?style=for-the-badge&logo=flutter"/>
   <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-555555?style=for-the-badge&logo=linux"/>
   <img src="https://img.shields.io/badge/License-MIT-22c55e?style=for-the-badge"/>
@@ -13,9 +15,26 @@
 
 ---
 
+## ⬇️ Download
+
+**No Flutter or developer tools required** — grab the installer for your platform directly from the [Releases page](https://github.com/chetstriker/LLMtary/releases/latest):
+
+| Platform | Package |
+|----------|---------|
+| 🪟 **Windows** | `.exe` installer |
+| 🍎 **macOS** (Apple Silicon) | `.dmg` installer |
+| 🐧 **Linux** — Debian / Ubuntu | `.deb` package |
+| 🐧 **Linux** — RHEL / Fedora / CentOS / Alma | `.rpm` package |
+| 🐧 **Linux** — Arch | `.pkg.tar.zst` package |
+| 🐧 **Linux** — openSUSE | `.rpm` package |
+
+> Building from source? See [Setup](#setup) at the bottom.
+
+---
+
 ## What Is LLMtary?
 
-LLMtary is an open-source Flutter desktop application that brings **large language model intelligence** to every phase of a penetration test. It accepts JSON reconnaissance data for a target, uses an LLM to identify vulnerabilities across dozens of attack categories, then autonomously executes and validates each finding — all without leaving your machine.
+LLMtary is an open-source Flutter desktop application that brings **large language model intelligence** to every phase of a penetration test. Enter a target — an IP, hostname, FQDN, or CIDR range — and LLMtary autonomously runs recon, identifies vulnerabilities across dozens of attack categories, then executes and validates each finding — all without leaving your machine.
 
 Whether you're running a local model on your own GPU with **zero data leaving your network**, or leveraging a cloud frontier model for maximum accuracy, LLMtary provides a structured, agentic testing loop that mirrors how a real engagement works: **passive recon → service fingerprinting → vulnerability discovery → targeted exploitation → post-exploitation → professional reporting**.
 
@@ -201,14 +220,25 @@ Cloud providers offer the best results due to large context windows (128K–200K
 
 ## Setup
 
-### Prerequisites
+### Install from Pre-Built Package (Recommended)
 
-- [Flutter SDK](https://docs.flutter.dev/get-started/install) (stable channel)
-- Desktop support enabled: `flutter config --enable-linux-desktop` (or `macos` / `windows`)
+Download the installer for your platform from the [Releases page](https://github.com/chetstriker/LLMtary/releases/latest). No Flutter or developer tools required.
 
-### Build & Run
+| Platform | Install |
+|----------|---------|
+| 🪟 **Windows** | Run the `.exe` installer |
+| 🍎 **macOS** | Open the `.dmg` and drag to Applications |
+| 🐧 **Debian / Ubuntu** | `sudo dpkg -i llmtary_*.deb` |
+| 🐧 **RHEL / Fedora / CentOS / Alma** | `sudo rpm -i LLMtary-*-RH-Fed-Cent_Alma.x86_64.rpm` |
+| 🐧 **Arch** | `sudo pacman -U LLMtary-*-x86_64.pkg.tar.zst` |
+| 🐧 **openSUSE** | `sudo rpm -i LLMtary-*-opensuse.x86_64.rpm` |
+
+### Build from Source (Developers)
+
+Requires [Flutter SDK](https://docs.flutter.dev/get-started/install) (stable channel) with desktop support enabled.
 
 ```bash
+flutter config --enable-linux-desktop   # or: macos-desktop / windows-desktop
 git clone https://github.com/chetstriker/LLMtary.git
 cd LLMtary
 flutter pub get
@@ -248,10 +278,10 @@ If a tool is missing, the LLM will attempt to install it automatically. If insta
 Click the settings icon (top right). Select your AI provider, enter your API key and model name. A **Test** button validates the configuration. Settings are saved per-provider.
 
 ### 2. Create or Select a Project
-Projects organize your work. Create a named project, then add targets — each target can be a hostname, FQDN, or IP address.
+Projects organize your work. Create a named project to get started.
 
-### 3. Input Scan Data
-Use the **SCOPE / RECON** tab to run autonomous recon against your targets, or paste existing scan data JSON directly.
+### 3. Define Your Scope
+On the **SCOPE / RECON** tab, enter your targets in the **In-Scope Targets** field — accepts IPs, hostnames, FQDNs, and CIDR ranges, comma or newline separated. You can also import a target list from a file (one address per line). Optionally add exclusions and Rules of Engagement, then press **GO** to start autonomous recon.
 
 ### 4. Analyze
 Navigate to the **VULN / HUNT** tab and click **Analyze**. Multiple LLM passes run in parallel. Findings appear in the vulnerability table as they arrive, sorted by severity.

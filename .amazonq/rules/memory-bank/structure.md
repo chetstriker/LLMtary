@@ -81,7 +81,7 @@ penexecuter/
 
 ## Core Data Flow
 
-1. **Input**: User pastes device JSON or runs autonomous recon via `ReconService`
+1. **Input**: User enters targets (IPs, hostnames, FQDNs, or CIDR ranges — comma/newline separated or imported from file) with optional exclusions and Rules of Engagement, then runs autonomous recon via `ReconService`
 2. **Analysis**: `VulnerabilityAnalyzer` runs Phase 1 (fast context), then Phase 2 (full analysis enriched with Phase 1 context)
 3. **Execution**: `ExploitExecutor` runs agentic loop per finding — generates commands, executes via `CommandExecutor`, evaluates output, updates status
 4. **Chain reasoning**: Post-execution pass identifies multi-step attack paths from confirmed findings

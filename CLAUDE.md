@@ -19,7 +19,7 @@ LLMtary is a Flutter desktop app for AI-assisted penetration testing. It accepts
 
 ### Core Data Flow
 
-1. **Input**: User pastes device JSON (ports/services/versions) into the UI, or uses the built-in `ReconService` to autonomously collect scan data via an LLM-guided recon loop. Recon output is stored per-target and merged with any user-supplied JSON.
+1. **Input**: User enters targets (IPs, hostnames, FQDNs, or CIDR ranges — comma or newline separated, or imported from a file) into the **SCOPE / RECON** tab, with optional exclusions and Rules of Engagement. The built-in `ReconService` then autonomously collects scan data via an LLM-guided recon loop. Recon output is stored per-target and merged into the device data.
 2. **Analysis** (2-phase): `VulnerabilityAnalyzer` runs a phased pipeline:
    - **Phase 1** — fast context discovery: CVE/version matching, DNS/OSINT, network services, SNMP. Results build a context block.
    - **Phase 2** — full vulnerability analysis: all web, AD, tech-specific, and specialized prompts, each enriched with Phase 1 context. Phase 2 findings are more targeted because they know what Phase 1 found.
