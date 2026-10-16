@@ -432,15 +432,28 @@ Respond ONLY with valid JSON.''';
   
   // Each entry is a RegExp pattern matched against the full command (case-insensitive).
   // Use word-boundary / anchored patterns to avoid false positives like 'rfi' matching 'rm -rf /'.
+  // Each entry is matched (case-insensitive) against the command AFTER whitespace
+  // normalization (`_collapseWhitespace`), so flag spacing does not matter.
+  // `rm` recursive+force is detected in any flag order/spelling (see below), not
+  // only the `-rf` cluster, which the previous single pattern missed.
   static final _dangerousPatterns = [
-    RegExp(r'rm\s+-[a-z]*r[a-z]*f[a-z]*\s+/', caseSensitive: false),  // rm -rf /
+    // rm recursive + force (combined -rf / -fr, or separate -r -f / --recursive --force),
+    // in any order, targeting a root-ish path (/, /*, ~, \$HOME, . or *).
+    RegExp(r'\brm\b(?=.*(?:-[a-wyz]*r[a-wyz]*f|-[a-wyz]*f[a-wyz]*r|-[a-z]*r\b.*-[a-z]*f|-[a-z]*f\b.*-[a-z]*r|--recursive.*--force|--force.*--recursive))(?=.*\s(?:/|~|\$\{?home))', caseSensitive: false),
     RegExp(r'\bformat\s+[a-z]:', caseSensitive: false),                 // format C:
     RegExp(r'del\s+/f\s+/[sq]\s+[a-z]:', caseSensitive: false),        // del /f /q c:
     RegExp(r'rmdir\s+/s\s+/q\s+[a-z]:', caseSensitive: false),         // rmdir /s /q c:
     RegExp(r'\bmkfs\b', caseSensitive: false),                          // mkfs
-    RegExp(r'dd\s+if=/dev/zero\s+of=/dev/', caseSensitive: false),      // dd if=/dev/zero of=/dev/...
+    RegExp(r'\bdd\b[^|&;]*\bof=/dev/(?:sd|nvme|hd|vd|disk|mmcblk)', caseSensitive: false),  // dd of=/dev/<disk>
+    RegExp(r'>\s*/dev/(?:sd|nvme|hd|vd|disk|mmcblk)', caseSensitive: false),  // redirect over a raw disk
+    RegExp(r'\bchmod\s+-[a-z]*r[a-z]*\s+0?777\s+(?:/|~|\$\{?home)', caseSensitive: false),  // chmod -R 777 / ~ $HOME
+    RegExp(r'\b(?:curl|wget)\b[^|]*\|\s*(?:sudo\s+)?(?:ba|z|k)?sh\b', caseSensitive: false),  // curl|wget piped into a shell
     RegExp(r':\(\)\{:\|:&\};:', caseSensitive: false),                  // fork bomb
   ];
+
+  /// Collapse runs of whitespace to single spaces so safety patterns are not
+  /// defeated by extra spaces/tabs (e.g. `rm  -r   -f  /`).
+  static String _collapseWhitespace(String c) => c.replaceAll(RegExp(r'\s+'), ' ').trim();
 
 
   static Future<Map<String, dynamic>> verifyToolSetup(String tool, LLMSettings settings, LLMService llmService) async {
@@ -1361,8 +1374,9 @@ Respond ONLY with valid JSON:
   }
 
   static Future<Map<String, dynamic>> executeCommand(String command, bool requireApproval, {String? adminPassword, Future<String?> Function(String)? onApprovalNeeded}) async {
+    final normalizedForSafety = _collapseWhitespace(command);
     for (final pattern in _dangerousPatterns) {
-      if (pattern.hasMatch(command)) {
+      if (pattern.hasMatch(normalizedForSafety)) {
         return {
           'exitCode': -1,
           'output': 'BLOCKED: Dangerous command detected',
