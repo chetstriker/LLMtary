@@ -156,12 +156,22 @@ class _ManagedProcess {
   final Process process;
   final int maxBufferLines;
   final List<String> _buffer = [];
+  bool _exited = false;
 
   _ManagedProcess({
     required this.name,
     required this.process,
     required this.maxBufferLines,
-  });
+  }) {
+    // The old isAlive implementation tried to synchronously probe whether
+    // process.exitCode had already completed by scheduling a .then() and
+    // reading the flag right after — but that flag can only ever be set by
+    // a microtask that hasn't run yet at read time, so isAlive always
+    // returned true even for long-dead processes (start() never detected
+    // the process had exited and never restarted it; callers treated a
+    // dead process as alive indefinitely). Track exit explicitly instead.
+    process.exitCode.then((_) => _exited = true);
+  }
 
   void _appendLine(String line) {
     _buffer.add(line);
@@ -170,21 +180,5 @@ class _ManagedProcess {
     }
   }
 
-  bool get isAlive {
-    try {
-      // kill(0) checks existence without actually signalling on POSIX.
-      // On Dart we can only check if the exitCode future has completed.
-      return !process.exitCode.isCompleted;
-    } catch (_) {
-      return false;
-    }
-  }
-}
-
-extension _FutureCompleted<T> on Future<T> {
-  bool get isCompleted {
-    var done = false;
-    then((_) => done = true).ignore();
-    return done;
-  }
+  bool get isAlive => !_exited;
 }

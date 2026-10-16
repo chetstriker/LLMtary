@@ -859,13 +859,14 @@ Do NOT propose another port scan variant. Instead:
         'nxdomain',
         'name or service not known',
         'no such host',
-        'connection refused',
         '0 hosts up',
         'network is unreachable',
       ];
       final lowerOutput = output.toLowerCase();
       // Also treat empty output from a DNS tool (dig/host/nslookup) with non-zero exit as a failure
-      final isDnsTool = ['dig', 'host', 'nslookup', 'drill'].any((t) => command.contains(t));
+      final cmdTool =
+          command.trim().split(RegExp(r'\s+')).first.split('/').last.toLowerCase();
+      final isDnsTool = ['dig', 'host', 'nslookup', 'drill'].contains(cmdTool);
       final hasConnectivityFailure = connectivityFailurePatterns.any((p) => lowerOutput.contains(p)) ||
           (isDnsTool && output.isEmpty && exitCode != 0);
       if (hasConnectivityFailure) {
@@ -1925,6 +1926,15 @@ Extract EVERY piece of information useful for later vulnerability analysis.
 Be thorough — capture version numbers, banners, headers, paths, usernames, share names, record values, config details.
 Only include keys that have real data from this output (omit empty arrays/objects).
 
+CRITICAL — NO GUESSING ON SCALAR FIELDS: For every scalar field in the schema below
+(os_version, hostname, mac, uptime, product, version, banner, etc.), only fill it in
+if that EXACT value appears literally in the output above. If the value is not
+literally present, leave the field as an empty string or omit the key entirely —
+never infer, extrapolate, or recall a plausible-looking value from general/training
+knowledge. Example: input contains only "OS: Linux" (no kernel/build string) ->
+os_version must be "" (NOT a guessed string like "5.15.0-xx-generic"). A wrong
+guess is worse than an empty field.
+
 CRITICAL FOR NMAP OUTPUT: The nmap output may contain 20+ open ports. You MUST extract ALL of them into open_ports[]. Do NOT stop after the first port. Scan the ENTIRE output for every line matching "PORT/tcp open" or "PORT/udp open" and include each one.
 
 CRITICAL FOR VERSION EXTRACTION:
@@ -1947,7 +1957,9 @@ Respond ONLY with valid JSON.''';
         _stripCveFromNotes(parsed);
         _deepMerge(findings, parsed);
       }
-    } catch (_) {}
+    } catch (e) {
+      onProgress?.call('[$address] recon merge/parse error: $e');
+    }
   }
 
   /// Strips CVE ID mentions from all `notes` fields in parsed recon output.
@@ -2002,7 +2014,40 @@ Respond ONLY with valid JSON.''';
       return _parseNmapText(output, address);
     }
 
+    // --- ping output parser ---
+    // Previously ping output with no explicit baseline handling fell through
+    // to the generic LLM extraction prompt, which had no packet-loss-specific
+    // field/instruction. The model then had to interpret raw ICMP output
+    // itself and could get the reachability sense backwards (e.g. reporting
+    // "0% packet loss" — meaning the host IS reachable — as "unreachable").
+    // Parsing packet loss % deterministically removes that ambiguity.
+    if (cmdLower.trim().startsWith('ping ') || cmdLower.contains(' ping ')) {
+      final parsed = _parsePingOutput(output, address);
+      if (parsed != null) return parsed;
+    }
+
     return null; // Unknown format — fall back to LLM
+  }
+
+  /// Deterministically parses `ping` output for packet loss / reachability,
+  /// avoiding LLM misinterpretation of raw ICMP statistics.
+  Map<String, dynamic>? _parsePingOutput(String output, String address) {
+    final match = RegExp(r'(\d+(?:\.\d+)?)\s*%\s*packet loss')
+        .firstMatch(output.toLowerCase());
+    if (match == null) return null;
+    final lossPct = double.tryParse(match.group(1)!);
+    if (lossPct == null) return null;
+    return {
+      'other_findings': [
+        {
+          'type': 'ping_reachability',
+          'data': {
+            'reachable': lossPct < 100,
+            'packet_loss_pct': lossPct,
+          },
+        },
+      ],
+    };
   }
 
   /// Phase 1.1: Returns true when command output contains no actionable data
@@ -2064,14 +2109,28 @@ Respond ONLY with valid JSON.''';
 
     final sections = <String>[];
 
-    // Device block — always included
-    sections.add('''  "device": {
-    "os": "full OS string",
-    "os_version": "version",
-    "hostname": "hostname",
-    "mac": "MAC address",
+    // Device block — only for commands that actually reveal OS/host/MAC, so the
+    // model is not invited to hallucinate scalar device fields from, e.g., a
+    // `curl -I`, `dig` or banner grab (structural grounding, from the R3 fix),
+    // COMBINED with explicit per-field "only if literally present" guards
+    // (from the original grounding fix) as defense in depth even within the
+    // commands that are allowed to populate this block.
+    final revealsDevice = cmd.contains('nmap') ||
+        cmd.contains('arp') ||
+        cmd.contains('smb') ||
+        cmd.contains('nbtscan') ||
+        cmd.contains('snmp') ||
+        cmd.contains('--osscan') ||
+        cmd.contains('ping ');
+    if (revealsDevice) {
+      sections.add('''  "device": {
+    "os": "full OS string, ONLY if literally present in output, else \"\"",
+    "os_version": "version, ONLY if a literal kernel/build string is present in output (e.g. '5.15.0-123-generic'), NEVER guessed from a generic 'OS: Linux' line, else \"\"",
+    "hostname": "hostname, ONLY if literally present in output, else \"\"",
+    "mac": "MAC address, ONLY if literally present in output, else \"\"",
     "uptime": "uptime if shown"
   }''');
+    }
 
     // Open ports — for nmap, masscan, port scan output
     final isPortScan = cmd.contains('nmap') || cmd.contains('masscan') ||
@@ -2575,7 +2634,7 @@ Respond ONLY with valid JSON.''';
       icmpFailed = lower.contains('0 received') ||
           lower.contains('100% packet loss') ||
           lower.contains('network is unreachable') ||
-          lower.contains('false'); // Test-NetConnection False = unreachable
+          (isWin && lower.trim() == 'false'); // Test-NetConnection Quiet → False
     }
     if (icmpFailed) {
       // TCP fallback: some hosts block ICMP but respond on common TCP ports
@@ -2665,7 +2724,9 @@ Respond ONLY with valid JSON.''';
           });
           hasSmbPort = parsedPorts.any((p) => p['port'] == 445);
       }
-    } catch (_) {}
+    } catch (e) {
+      onProgress?.call('[$address] nmap XML parse error: $e');
+    }
 
     // B2b — Fast fallback scan if the full -sV -sC scan timed out.
     // The host is alive (passed liveness check) but version detection was too
@@ -3104,8 +3165,8 @@ Respond ONLY with valid JSON.''';
         isWindows ? 'ping' : 'ping',
         args,
       ).timeout(const Duration(seconds: 10));
-      if (result.exitCode == 0) return true;
-      // Some systems return exit 0 even on failure; parse output as fallback
+      // Some systems (notably Windows ping) return exit 0 even on failure, so
+      // check the loss/unreachable markers BEFORE trusting the exit code.
       final out = (result.stdout as String).toLowerCase();
       if (out.contains('0 received') ||
           out.contains('100% packet loss') ||

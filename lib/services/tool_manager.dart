@@ -441,7 +441,10 @@ Respond ONLY with valid JSON.''';
         'sqlmap', 'hydra', 'dirb', 'gobuster', 'ffuf', 'smbclient',
         'smbmap', 'nuclei', 'scapy'
       ];
-      if (noSetupTools.contains(tool.toLowerCase())) {
+      // Normalize to the primary tool token so e.g. "nmap -sV" matches "nmap".
+      final primaryTool =
+          tool.trim().split(RegExp(r'\s+')).first.split('/').last.toLowerCase();
+      if (noSetupTools.contains(primaryTool)) {
         return {'needs_setup': false};
       }
 
@@ -491,7 +494,7 @@ Respond ONLY with valid JSON.''';
       }
 
       final checkCmd = decision['check_command'];
-      if (checkCmd == null || checkCmd.isEmpty) {
+      if (checkCmd is! String || checkCmd.isEmpty) {
         return decision;
       }
 

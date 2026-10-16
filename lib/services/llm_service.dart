@@ -454,7 +454,9 @@ class LLMService {
   String _extractChatResponse(http.Response response, String providerName) {
     if (response.statusCode == 200) {
       final choices = json.decode(response.body)['choices'] as List?;
-      return choices?[0]['message']['content'] as String? ?? 'No response';
+      if (choices == null || choices.isEmpty) return 'No response';
+      final message = choices[0]['message'];
+      return (message is Map ? message['content'] as String? : null) ?? 'No response';
     }
     throw LLMApiException(providerName, response.statusCode, response.body);
   }
@@ -571,7 +573,10 @@ class LLMService {
           return block['text'] as String? ?? 'No response';
         }
       }
-      return content?[0]['text'] as String? ?? 'No response';
+      if (content != null && content.isNotEmpty && content[0]['text'] is String) {
+        return content[0]['text'] as String;
+      }
+      return 'No response';
     }
     throw LLMApiException('Claude', response.statusCode, response.body);
   }
@@ -661,8 +666,11 @@ class LLMService {
         );
       }
       final candidates = responseBody['candidates'] as List?;
-      final parts = candidates?[0]['content']['parts'] as List?;
-      return parts?[0]['text'] as String? ?? 'No response';
+      if (candidates == null || candidates.isEmpty) return 'No response';
+      final contentMap = candidates[0]['content'];
+      final parts = (contentMap is Map ? contentMap['parts'] : null) as List?;
+      if (parts == null || parts.isEmpty) return 'No response';
+      return parts[0]['text'] as String? ?? 'No response';
     }
     throw LLMApiException('Gemini', response.statusCode, response.body);
   }

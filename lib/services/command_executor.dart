@@ -1,6 +1,8 @@
 import 'dart:io';
 import 'dart:async';
 import 'dart:convert';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import '../models/llm_settings.dart';
 import '../database/database_helper.dart';
 import '../utils/json_parser.dart';
@@ -432,15 +434,28 @@ Respond ONLY with valid JSON.''';
   
   // Each entry is a RegExp pattern matched against the full command (case-insensitive).
   // Use word-boundary / anchored patterns to avoid false positives like 'rfi' matching 'rm -rf /'.
+  // Each entry is matched (case-insensitive) against the command AFTER whitespace
+  // normalization (`_collapseWhitespace`), so flag spacing does not matter.
+  // `rm` recursive+force is detected in any flag order/spelling (see below), not
+  // only the `-rf` cluster, which the previous single pattern missed.
   static final _dangerousPatterns = [
-    RegExp(r'rm\s+-[a-z]*r[a-z]*f[a-z]*\s+/', caseSensitive: false),  // rm -rf /
+    // rm recursive + force (combined -rf / -fr, or separate -r -f / --recursive --force),
+    // in any order, targeting a root-ish path (/, /*, ~, \$HOME, . or *).
+    RegExp(r'\brm\b(?=.*(?:-[a-wyz]*r[a-wyz]*f|-[a-wyz]*f[a-wyz]*r|-[a-z]*r\b.*-[a-z]*f|-[a-z]*f\b.*-[a-z]*r|--recursive.*--force|--force.*--recursive))(?=.*\s(?:/|~|\$\{?home))', caseSensitive: false),
     RegExp(r'\bformat\s+[a-z]:', caseSensitive: false),                 // format C:
     RegExp(r'del\s+/f\s+/[sq]\s+[a-z]:', caseSensitive: false),        // del /f /q c:
     RegExp(r'rmdir\s+/s\s+/q\s+[a-z]:', caseSensitive: false),         // rmdir /s /q c:
     RegExp(r'\bmkfs\b', caseSensitive: false),                          // mkfs
-    RegExp(r'dd\s+if=/dev/zero\s+of=/dev/', caseSensitive: false),      // dd if=/dev/zero of=/dev/...
+    RegExp(r'\bdd\b[^|&;]*\bof=/dev/(?:sd|nvme|hd|vd|disk|mmcblk)', caseSensitive: false),  // dd of=/dev/<disk>
+    RegExp(r'>\s*/dev/(?:sd|nvme|hd|vd|disk|mmcblk)', caseSensitive: false),  // redirect over a raw disk
+    RegExp(r'\bchmod\s+-[a-z]*r[a-z]*\s+0?777\s+(?:/|~|\$\{?home)', caseSensitive: false),  // chmod -R 777 / ~ $HOME
+    RegExp(r'\b(?:curl|wget)\b[^|]*\|\s*(?:sudo\s+)?(?:ba|z|k)?sh\b', caseSensitive: false),  // curl|wget piped into a shell
     RegExp(r':\(\)\{:\|:&\};:', caseSensitive: false),                  // fork bomb
   ];
+
+  /// Collapse runs of whitespace to single spaces so safety patterns are not
+  /// defeated by extra spaces/tabs (e.g. `rm  -r   -f  /`).
+  static String _collapseWhitespace(String c) => c.replaceAll(RegExp(r'\s+'), ' ').trim();
 
 
   static Future<Map<String, dynamic>> verifyToolSetup(String tool, LLMSettings settings, LLMService llmService) async {
@@ -903,7 +918,7 @@ Respond ONLY with valid JSON.''';
           print('${_timestamp()} DEBUG: Admin password provided — verifying sudo -S access...');
           try {
             final sudoCheck = await Process.run('bash',
-                ['-c', 'echo "$adminPassword" | sudo -S true 2>/dev/null'])
+                ['-c', 'echo ${_shQuote(adminPassword)} | sudo -S true 2>/dev/null'])
                 .timeout(const Duration(seconds: 5));
             if (sudoCheck.exitCode != 0) {
               print('${_timestamp()} DEBUG: Admin password incorrect or sudo not available');
@@ -932,7 +947,7 @@ Respond ONLY with valid JSON.''';
                 if (prompted != null && prompted.isNotEmpty) {
                   // Verify the prompted password works
                   final verify = await Process.run('bash',
-                      ['-c', 'echo "$prompted" | sudo -S true 2>/dev/null'])
+                      ['-c', 'echo ${_shQuote(prompted)} | sudo -S true 2>/dev/null'])
                       .timeout(const Duration(seconds: 5));
                   if (verify.exitCode != 0) {
                     print('${_timestamp()} DEBUG: Prompted password incorrect');
@@ -966,7 +981,7 @@ Respond ONLY with valid JSON.''';
         print('${_timestamp()} DEBUG: Running install command in WSL');
         // Use admin password if provided
         if (adminPassword != null && adminPassword.isNotEmpty && installCmd.contains('sudo')) {
-          final sudoCmd = 'echo "$adminPassword" | sudo -S bash -c "${installCmd.replaceFirst('sudo', '')}"';
+          final sudoCmd = 'echo ${_shQuote(adminPassword)} | sudo -S bash -c "${installCmd.replaceFirst('sudo', '')}"';
           process = await Process.start('wsl', ['bash', '-c', sudoCmd]);
         } else {
           process = await Process.start('wsl', ['bash', '-c', installCmd]);
@@ -991,7 +1006,7 @@ Respond ONLY with valid JSON.''';
             // Create a temporary askpass script with restricted permissions
             final tempDir = Directory.systemTemp;
             final askpassScript = File('${tempDir.path}/.askpass_${DateTime.now().millisecondsSinceEpoch}.sh');
-            await askpassScript.writeAsString('#!/bin/bash\necho "$adminPassword"');
+            await askpassScript.writeAsString('#!/bin/bash\necho ${_shQuote(adminPassword)}');
             // Set permissions to 700 (owner read/write/execute only)
             await Process.run('chmod', ['700', askpassScript.path]);
             
@@ -1023,7 +1038,7 @@ Respond ONLY with valid JSON.''';
         } else if (adminPassword != null && adminPassword.isNotEmpty && installCmd.contains('sudo')) {
           // Strip any sudo variant (sudo, sudo -n, sudo -S) — we'll supply our own sudo -S
           final cmdWithoutSudo = installCmd.replaceFirst(RegExp(r'sudo\s+(-\w+\s+)*'), '').trim();
-          final sudoCmd = 'echo "$adminPassword" | sudo -S bash -c "$cmdWithoutSudo"';
+          final sudoCmd = 'echo ${_shQuote(adminPassword)} | sudo -S bash -c "$cmdWithoutSudo"';
           process = await Process.start('bash', ['-c', sudoCmd]);
         } else {
           process = await Process.start('bash', ['-c', installCmd]);
@@ -1102,7 +1117,7 @@ Respond ONLY with valid JSON.''';
             if (adminPassword != null && adminPassword.isNotEmpty && packageManager == 'brew') {
               final tempDir = Directory.systemTemp;
               retryAskpass = File('${tempDir.path}/.askpass_retry_${DateTime.now().millisecondsSinceEpoch}.sh');
-              await retryAskpass.writeAsString('#!/bin/bash\necho "$adminPassword"');
+              await retryAskpass.writeAsString('#!/bin/bash\necho ${_shQuote(adminPassword)}');
               await Process.run('chmod', ['700', retryAskpass.path]);
               
               retryEnv = Map<String, String>.from(Platform.environment);
@@ -1201,7 +1216,7 @@ Respond ONLY with valid JSON:
             } else if (packageManager == 'brew' && adminPassword != null && adminPassword.isNotEmpty) {
               final tempDir = Directory.systemTemp;
               final askpass = File('${tempDir.path}/.askpass_retry2_${DateTime.now().millisecondsSinceEpoch}.sh');
-              await askpass.writeAsString('#!/bin/bash\necho "$adminPassword"');
+              await askpass.writeAsString('#!/bin/bash\necho ${_shQuote(adminPassword)}');
               await Process.run('chmod', ['700', askpass.path]);
               final env = Map<String, String>.from(Platform.environment);
               env['SUDO_ASKPASS'] = askpass.path;
@@ -1209,7 +1224,7 @@ Respond ONLY with valid JSON:
               Future.delayed(const Duration(minutes: 3), () async { try { if (await askpass.exists()) await askpass.delete(); } catch (_) {} });
             } else if (adminPassword != null && adminPassword.isNotEmpty && retryCmd.contains('sudo')) {
               final cmdWithoutSudo = retryCmd.replaceFirst(RegExp(r'sudo\s+(-\w+\s+)*'), '').trim();
-              retryProcess = await Process.start('bash', ['-c', 'echo "$adminPassword" | sudo -S bash -c "$cmdWithoutSudo"']);
+              retryProcess = await Process.start('bash', ['-c', 'echo ${_shQuote(adminPassword)} | sudo -S bash -c "$cmdWithoutSudo"']);
             } else {
               retryProcess = await Process.start('bash', ['-c', retryCmd]);
             }
@@ -1361,8 +1376,9 @@ Respond ONLY with valid JSON:
   }
 
   static Future<Map<String, dynamic>> executeCommand(String command, bool requireApproval, {String? adminPassword, Future<String?> Function(String)? onApprovalNeeded}) async {
+    final normalizedForSafety = _collapseWhitespace(command);
     for (final pattern in _dangerousPatterns) {
-      if (pattern.hasMatch(command)) {
+      if (pattern.hasMatch(normalizedForSafety)) {
         return {
           'exitCode': -1,
           'output': 'BLOCKED: Dangerous command detected',
@@ -1421,7 +1437,7 @@ Respond ONLY with valid JSON:
           execCommand = 'export PATH=/tmp:\$PATH; $execCommand';
         } else if (command.trim().startsWith('sudo') && !command.contains('sudo -S')) {
           // WSL / Windows fallback: inject password for top-level sudo only.
-          execCommand = command.replaceFirst('sudo', 'echo "$adminPassword" | sudo -S');
+          execCommand = command.replaceFirst('sudo', 'echo ${_shQuote(adminPassword)} | sudo -S');
         }
       }
 
@@ -1491,7 +1507,53 @@ Respond ONLY with valid JSON:
   /// Global command timeout. Generous to accommodate any tool the LLM chooses.
   static const Duration _commandTimeout = Duration(minutes: 30);
 
+  /// Idle-output watchdog: if a command produces NO stdout/stderr at all for
+  /// this long, it is almost certainly network-hung (connected but the target
+  /// never responds, DNS stall, etc.) rather than doing legitimate quiet work.
+  /// Observed in practice: katana, httpx (even with an explicit -timeout flag
+  /// in the command itself) and nuclei all hung at 0% CPU for 3-12 minutes
+  /// with zero output before a human had to kill them manually — prompt-level
+  /// rules telling the LLM to "always pass -timeout" do not help when the
+  /// hang happens below the tool's own timeout handling (e.g. a TCP connect
+  /// that succeeds but never gets a response). Kept deliberately generous
+  /// (vs. the 30-minute hard cap above) so a tool that is genuinely quiet for
+  /// a while (compiling nuclei templates, scanning a large wordlist, slow DNS)
+  /// is not falsely killed. This is a *second*, independent safety net, not a
+  /// replacement for _commandTimeout.
+  static const Duration _idleOutputTimeout = Duration(seconds: 150);
+
+  /// Appends one JSONL record per idle-timeout kill (tool name, seconds of
+  /// silence, truncated command) to idle_kills.jsonl alongside the app's
+  /// other data files. Deliberately not logged to the DB/UI — this is raw
+  /// data for tuning _idleOutputTimeout against real tool behavior, not a
+  /// user-facing finding. Failures here are swallowed: logging must never
+  /// be the reason a command result is lost.
+  static Future<void> _logIdleKill(String command, int silentSeconds) async {
+    try {
+      final appDir = await getApplicationSupportDirectory();
+      final logPath = p.join(appDir.path, 'idle_kills.jsonl');
+      final parts = command.trim().split(RegExp(r'\s+'));
+      final tool = parts.isNotEmpty ? parts.first : 'unknown';
+      final truncated = command.length > 200 ? '${command.substring(0, 200)}...' : command;
+      final record = jsonEncode({
+        'timestamp': DateTime.now().toIso8601String(),
+        'tool': tool,
+        'silentSeconds': silentSeconds,
+        'command': truncated,
+      });
+      await File(logPath).writeAsString('$record\n', mode: FileMode.append);
+    } catch (_) {
+      // Non-fatal — tuning data only, never block the actual command result.
+    }
+  }
+
   /// Write (or overwrite) a thin sudo wrapper at a fixed path in /tmp so that
+  /// Quote [s] as a single POSIX shell token, safe against injection: wrap in
+  /// single quotes and escape embedded single quotes as '\''. Used wherever an
+  /// admin password (or other untrusted string) is placed into a shell command
+  /// or an askpass script, so characters like ", $, `, \ cannot break out.
+  static String _shQuote(String s) => "'" + s.replaceAll("'", "'\\''") + "'";
+
   /// any 'sudo' call within a command chain receives the password automatically
   /// via stdin without requiring an interactive TTY.
   ///
@@ -1499,11 +1561,9 @@ Respond ONLY with valid JSON:
   /// running the command, ensuring our wrapper shadows /usr/bin/sudo.
   static Future<void> _ensureSudoWrapper(String password) async {
     try {
-      // Single-quote–safe escaping: replace each ' with '\''
-      final escaped = password.replaceAll("'", "'\\''");
       const wrapperPath = '/tmp/.pe_sudo';
       await File(wrapperPath).writeAsString(
-        "#!/bin/bash\necho '$escaped' | /usr/bin/sudo -S \"\$@\"\n",
+        "#!/bin/bash\necho ${_shQuote(password)} | /usr/bin/sudo -S \"\$@\"\n",
       );
       await Process.run('chmod', ['700', wrapperPath]);
       // Symlink as 'sudo' in /tmp so PATH lookup finds it first.
@@ -1519,12 +1579,33 @@ Respond ONLY with valid JSON:
   /// Kill a process and all its children to prevent orphaned subprocesses.
   static Future<void> _killProcessTree(Process process) async {
     try {
-      process.kill(ProcessSignal.sigkill);
       if (!Platform.isWindows) {
-        await Process.run('pkill', ['-9', '-P', '${process.pid}'])
-            .timeout(const Duration(seconds: 3))
-            .catchError((_) => ProcessResult(0, 0, '', ''));
+        // A11: `pkill -P` only reaps direct children, and killing the shell first
+        // reparents its descendants (grandchildren: bash → timeout → nmap → helper)
+        // to init, orphaning them. Walk the descendant tree and kill it
+        // depth-first (deepest first) so nothing is reparented before we reach it.
+        // The processes are not started in their own session, so a process-group
+        // kill would also hit this app — hence an explicit per-pid walk.
+        await _killDescendants(process.pid);
       }
+      process.kill(ProcessSignal.sigkill);
+    } catch (_) {}
+  }
+
+  /// Recursively kill [pid] and all of its descendants, deepest first (POSIX).
+  static Future<void> _killDescendants(int pid) async {
+    try {
+      final res = await Process.run('pgrep', ['-P', '$pid'])
+          .timeout(const Duration(seconds: 2));
+      for (final line in (res.stdout as String).split('\n')) {
+        final child = int.tryParse(line.trim());
+        if (child != null && child != pid) {
+          await _killDescendants(child);
+        }
+      }
+    } catch (_) {}
+    try {
+      await Process.run('kill', ['-9', '$pid']).timeout(const Duration(seconds: 2));
     } catch (_) {}
   }
 
@@ -1560,7 +1641,7 @@ Respond ONLY with valid JSON:
 
       final decoder = Utf8Decoder(allowMalformed: true);
 
-      process.stdout.transform(decoder).listen((data) {
+      final outSub = process.stdout.transform(decoder).listen((data) {
         if (killed) return;
         final sanitized = OutputSanitizer.sanitize(data);
         totalBytes += sanitized.length;
@@ -1590,7 +1671,7 @@ Respond ONLY with valid JSON:
         stdoutBuffer.write(sanitized);
       });
 
-      process.stderr.transform(decoder).listen((data) {
+      final errSub = process.stderr.transform(decoder).listen((data) {
         if (killed) return;
         final sanitized = OutputSanitizer.sanitize(data);
         totalBytes += sanitized.length;
@@ -1615,6 +1696,13 @@ Respond ONLY with valid JSON:
       });
 
       final exitCode = await process.exitCode.timeout(_commandTimeout);
+      // A2: drain any buffered stdout/stderr before reading the buffers (the last
+      // lines — often the proof of success — can still be in flight at exit), then
+      // cancel the subscriptions to avoid leaks.
+      await Future.wait([outSub.asFuture<void>(), errSub.asFuture<void>()])
+          .timeout(const Duration(seconds: 5), onTimeout: () => const <void>[]);
+      await outSub.cancel();
+      await errSub.cancel();
       if (killed) {
         return CommandResult(-1, stdoutBuffer.toString(),
             'KILLED: $killReason. The command was producing excessive or repetitive output and was terminated.');
@@ -1643,7 +1731,7 @@ Respond ONLY with valid JSON:
 
       final decoder = Utf8Decoder(allowMalformed: true);
 
-      process.stdout.transform(decoder).listen((data) {
+      final outSub = process.stdout.transform(decoder).listen((data) {
         if (killed) return;
         final sanitized = OutputSanitizer.sanitize(data);
         totalBytes += sanitized.length;
@@ -1672,7 +1760,7 @@ Respond ONLY with valid JSON:
         stdoutBuffer.write(sanitized);
       });
 
-      process.stderr.transform(decoder).listen((data) {
+      final errSub = process.stderr.transform(decoder).listen((data) {
         if (killed) return;
         final sanitized = OutputSanitizer.sanitize(data);
         totalBytes += sanitized.length;
@@ -1696,6 +1784,13 @@ Respond ONLY with valid JSON:
       });
 
       final exitCode = await process.exitCode.timeout(_commandTimeout);
+      // A2: drain any buffered stdout/stderr before reading the buffers (the last
+      // lines — often the proof of success — can still be in flight at exit), then
+      // cancel the subscriptions to avoid leaks.
+      await Future.wait([outSub.asFuture<void>(), errSub.asFuture<void>()])
+          .timeout(const Duration(seconds: 5), onTimeout: () => const <void>[]);
+      await outSub.cancel();
+      await errSub.cancel();
       if (killed) {
         return CommandResult(-1, stdoutBuffer.toString(),
             'KILLED: $killReason. The command was producing excessive or repetitive output and was terminated.');
@@ -1724,11 +1819,32 @@ Respond ONLY with valid JSON:
       bool killed = false;
       String? killReason;
       final recentLines = <String>[];
+      var lastOutputAt = DateTime.now();
+
+      // Idle-output watchdog (see _idleOutputTimeout doc comment above): checked
+      // on a short interval so a hang is caught within ~10s of crossing the
+      // threshold instead of waiting for the full 30-minute hard cap below.
+      final idleWatchdog = Timer.periodic(const Duration(seconds: 10), (timer) {
+        if (killed) {
+          timer.cancel();
+          return;
+        }
+        final silentFor = DateTime.now().difference(lastOutputAt);
+        if (silentFor > _idleOutputTimeout) {
+          killed = true;
+          killReason = 'idle-timeout: no output for ${silentFor.inSeconds}s '
+              '(likely network-hung: connected but target never responded)';
+          timer.cancel();
+          _logIdleKill(command, silentFor.inSeconds);
+          _killProcessTree(process!);
+        }
+      });
 
       final decoder = Utf8Decoder(allowMalformed: true);
 
-      process.stdout.transform(decoder).listen((data) {
+      final outSub = process.stdout.transform(decoder).listen((data) {
         if (killed) return;
+        lastOutputAt = DateTime.now();
         final sanitized = OutputSanitizer.sanitize(data);
         totalBytes += sanitized.length;
         final lines = sanitized.split('\n');
@@ -1756,8 +1872,9 @@ Respond ONLY with valid JSON:
         stdoutBuffer.write(sanitized);
       });
 
-      process.stderr.transform(decoder).listen((data) {
+      final errSub = process.stderr.transform(decoder).listen((data) {
         if (killed) return;
+        lastOutputAt = DateTime.now();
         final sanitized = OutputSanitizer.sanitize(data);
         totalBytes += sanitized.length;
         if (totalBytes > _maxOutputBytes) {
@@ -1770,12 +1887,25 @@ Respond ONLY with valid JSON:
         stderrBuffer.write(sanitized);
       });
 
-      final exitCode = await process.exitCode.timeout(_commandTimeout);
-      if (killed) {
-        return CommandResult(-1, stdoutBuffer.toString(),
-            'KILLED: $killReason. The command was producing excessive or repetitive output and was terminated.');
+      try {
+        final exitCode = await process.exitCode.timeout(_commandTimeout);
+        // A2: drain any buffered stdout/stderr before reading the buffers (the last
+        // lines — often the proof of success — can still be in flight at exit), then
+        // cancel the subscriptions to avoid leaks.
+        await Future.wait([outSub.asFuture<void>(), errSub.asFuture<void>()])
+            .timeout(const Duration(seconds: 5), onTimeout: () => const <void>[]);
+        await outSub.cancel();
+        await errSub.cancel();
+        if (killed) {
+          final reason = killReason ?? 'unknown';
+          final isIdle = reason.startsWith('idle-timeout');
+          return CommandResult(-1, stdoutBuffer.toString(),
+              'KILLED: $reason. ${isIdle ? 'The command was terminated after producing no output for this long. This is usually a network hang (connected but the target never responded), but some tools are legitimately silent for a while (loading large templates/wordlists, slow DNS). If this tool can genuinely take a long time with no output, retry with an explicit verbose/progress flag or a shorter, more targeted scope (smaller wordlist, narrower options); otherwise try a different tool or approach instead of repeating the identical command.' : 'The command was producing excessive or repetitive output and was terminated.'}');
+        }
+        return CommandResult(exitCode, stdoutBuffer.toString(), stderrBuffer.toString());
+      } finally {
+        idleWatchdog.cancel();
       }
-      return CommandResult(exitCode, stdoutBuffer.toString(), stderrBuffer.toString());
     } on TimeoutException {
       if (process != null) await _killProcessTree(process);
       return CommandResult(-1, "", "Command timed out.");

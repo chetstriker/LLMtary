@@ -99,7 +99,10 @@ class DeviceClassifier {
       if (!ports.contains(445)) s += 1;
       if (!_containsAny(allText, ['windows'])) s += 1;
       final ttlStr = _findValue(deviceJson, 'ttl');
-      if (ttlStr != null && ttlStr.contains('64')) s += 2;
+      final ttlNum = ttlStr == null
+          ? null
+          : int.tryParse(RegExp(r'\d+').firstMatch(ttlStr)?.group(0) ?? '');
+      if (ttlNum == 64) s += 2; // Linux default TTL (exact, not substring)
       final os = _extractOs(deviceJson);
       if (_containsAny(os, ['linux', 'ubuntu', 'debian', 'centos',
           'fedora', 'rhel', 'alpine'])) { s += 3; }

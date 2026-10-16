@@ -254,7 +254,15 @@ class _MainScreenState extends State<MainScreen> {
           ),
           const SizedBox(width: 10),
           _BungeeSpiceText('LLMtary', fontSize: 16),
-          const SizedBox(width: 28),
+          const SizedBox(width: 6),
+          const Padding(
+            padding: EdgeInsets.only(top: 6),
+            child: Text(
+              'patched by Ziomik & Hydra 🤖',
+              style: TextStyle(color: Color(0xFF00F5FF), fontSize: 9),
+            ),
+          ),
+          const SizedBox(width: 22),
           // Tab bar
           Flexible(
             child: Consumer<AppState>(

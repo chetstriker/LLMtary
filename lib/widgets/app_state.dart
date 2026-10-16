@@ -120,8 +120,14 @@ class AppState extends ChangeNotifier {
 
   /// Estimated cost in USD based on current token usage and the active provider's pricing.
   double get estimatedCostUsd {
-    final inputTokens = _tokensSentTotal / 4.0; // chars to tokens approximation
-    final outputTokens = _tokensReceivedTotal / 4.0;
+    // _tokensSentTotal/_tokensReceivedTotal already hold REAL token counts:
+    // recordTokenUsage() is fed from each provider's own usage.prompt_tokens/
+    // completion_tokens (or Ollama's prompt_eval_count/eval_count), not raw
+    // character counts. The "chars to tokens" /4.0 here was a second,
+    // incorrect conversion applied on top of already-real token numbers,
+    // under-reporting cost and token displays by ~4x for every provider.
+    final inputTokens = _tokensSentTotal.toDouble();
+    final outputTokens = _tokensReceivedTotal.toDouble();
 
     // Per-MTok pricing (input, output) by provider
     double inputPricePerMTok = 0.0;
@@ -169,11 +175,12 @@ class AppState extends ChangeNotifier {
     return '~\$${cost.toStringAsFixed(2)}';
   }
 
-  /// Estimated tokens sent across all phases
-  int get estimatedTokensSent => (_tokensSentTotal / 4).round();
+  /// Tokens sent across all phases (already real token counts, see
+  /// estimatedCostUsd for why no /4 "chars to tokens" conversion applies).
+  int get estimatedTokensSent => _tokensSentTotal;
 
-  /// Estimated tokens received across all phases
-  int get estimatedTokensReceived => (_tokensReceivedTotal / 4).round();
+  /// Tokens received across all phases (see estimatedTokensSent).
+  int get estimatedTokensReceived => _tokensReceivedTotal;
 
   void recordTokenUsage(String phase, int sent, int received, {int targetId = 0}) {
     _tokensSentTotal += sent;
@@ -229,6 +236,14 @@ class AppState extends ChangeNotifier {
   /// Record a confirmed vulnerability's artifacts for cross-vuln chaining.
   void addConfirmedArtifact(Vulnerability vuln) {
     if (vuln.status != VulnerabilityStatus.confirmed) return;
+    // No dedup before: a vulnerability re-confirmed on a later pass (e.g.
+    // the exploit loop revisiting it) would be appended again, producing
+    // duplicate entries for the same finding in the report/UI.
+    final alreadyPresent = _confirmedArtifacts.any((a) =>
+        a['problem'] == vuln.problem &&
+        a['target'] == vuln.targetAddress &&
+        a['type'] == vuln.vulnerabilityType);
+    if (alreadyPresent) return;
     final evidence = vuln.statusReason.isNotEmpty ? vuln.statusReason : vuln.evidence;
     _confirmedArtifacts.add({
       'problem': vuln.problem,
@@ -534,6 +549,18 @@ Raise confidence to HIGH for any finding where these credentials directly enable
     if (target.id != null) {
       await DatabaseHelper.updateTarget(target);
     }
+    // Previously only persisted to the DB — the in-memory _targets list
+    // (which the UI actually reads from) was never updated and
+    // notifyListeners() was never called, so any caller of this method
+    // would see the DB change but not the UI. Currently unused elsewhere
+    // in the app (target_input_panel.dart has its own local
+    // _updateTargetStatus that only touches widget-local state), but fixed
+    // here for correctness so it behaves as its name implies if/when used.
+    final idx = _targets.indexWhere((t) => t.id == target.id);
+    if (idx != -1) {
+      _targets[idx] = target;
+    }
+    notifyListeners();
   }
 
   void selectTarget(Target? target) {
@@ -543,6 +570,10 @@ Raise confidence to HIGH for any finding where these credentials directly enable
 
   void setAdminPassword(String password) {
     _adminPassword = password;
+    // Missing before: any widget bound to this value (e.g. a settings
+    // screen showing whether an admin password is set) would not rebuild
+    // until some unrelated state change happened to trigger a notify.
+    notifyListeners();
   }
 
   void setPendingCommand(String? command) {
