@@ -859,13 +859,14 @@ Do NOT propose another port scan variant. Instead:
         'nxdomain',
         'name or service not known',
         'no such host',
-        'connection refused',
         '0 hosts up',
         'network is unreachable',
       ];
       final lowerOutput = output.toLowerCase();
       // Also treat empty output from a DNS tool (dig/host/nslookup) with non-zero exit as a failure
-      final isDnsTool = ['dig', 'host', 'nslookup', 'drill'].any((t) => command.contains(t));
+      final cmdTool =
+          command.trim().split(RegExp(r'\s+')).first.split('/').last.toLowerCase();
+      final isDnsTool = ['dig', 'host', 'nslookup', 'drill'].contains(cmdTool);
       final hasConnectivityFailure = connectivityFailurePatterns.any((p) => lowerOutput.contains(p)) ||
           (isDnsTool && output.isEmpty && exitCode != 0);
       if (hasConnectivityFailure) {
@@ -1947,7 +1948,9 @@ Respond ONLY with valid JSON.''';
         _stripCveFromNotes(parsed);
         _deepMerge(findings, parsed);
       }
-    } catch (_) {}
+    } catch (e) {
+      onProgress?.call('[$address] recon merge/parse error: $e');
+    }
   }
 
   /// Strips CVE ID mentions from all `notes` fields in parsed recon output.
@@ -2064,14 +2067,25 @@ Respond ONLY with valid JSON.''';
 
     final sections = <String>[];
 
-    // Device block — always included
-    sections.add('''  "device": {
+    // Device block — only for commands that actually reveal OS/host/MAC, so the
+    // model is not invited to hallucinate scalar device fields from, e.g., a
+    // `curl -I`, `dig` or banner grab (grounding fix).
+    final revealsDevice = cmd.contains('nmap') ||
+        cmd.contains('arp') ||
+        cmd.contains('smb') ||
+        cmd.contains('nbtscan') ||
+        cmd.contains('snmp') ||
+        cmd.contains('--osscan') ||
+        cmd.contains('ping ');
+    if (revealsDevice) {
+      sections.add('''  "device": {
     "os": "full OS string",
     "os_version": "version",
     "hostname": "hostname",
     "mac": "MAC address",
     "uptime": "uptime if shown"
   }''');
+    }
 
     // Open ports — for nmap, masscan, port scan output
     final isPortScan = cmd.contains('nmap') || cmd.contains('masscan') ||
@@ -2575,7 +2589,7 @@ Respond ONLY with valid JSON.''';
       icmpFailed = lower.contains('0 received') ||
           lower.contains('100% packet loss') ||
           lower.contains('network is unreachable') ||
-          lower.contains('false'); // Test-NetConnection False = unreachable
+          (isWin && lower.trim() == 'false'); // Test-NetConnection Quiet → False
     }
     if (icmpFailed) {
       // TCP fallback: some hosts block ICMP but respond on common TCP ports
@@ -2665,7 +2679,9 @@ Respond ONLY with valid JSON.''';
           });
           hasSmbPort = parsedPorts.any((p) => p['port'] == 445);
       }
-    } catch (_) {}
+    } catch (e) {
+      onProgress?.call('[$address] nmap XML parse error: $e');
+    }
 
     // B2b — Fast fallback scan if the full -sV -sC scan timed out.
     // The host is alive (passed liveness check) but version detection was too
@@ -3104,8 +3120,8 @@ Respond ONLY with valid JSON.''';
         isWindows ? 'ping' : 'ping',
         args,
       ).timeout(const Duration(seconds: 10));
-      if (result.exitCode == 0) return true;
-      // Some systems return exit 0 even on failure; parse output as fallback
+      // Some systems (notably Windows ping) return exit 0 even on failure, so
+      // check the loss/unreachable markers BEFORE trusting the exit code.
       final out = (result.stdout as String).toLowerCase();
       if (out.contains('0 received') ||
           out.contains('100% packet loss') ||
