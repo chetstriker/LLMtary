@@ -903,7 +903,7 @@ Respond ONLY with valid JSON.''';
           print('${_timestamp()} DEBUG: Admin password provided — verifying sudo -S access...');
           try {
             final sudoCheck = await Process.run('bash',
-                ['-c', 'echo "$adminPassword" | sudo -S true 2>/dev/null'])
+                ['-c', 'echo ${_shQuote(adminPassword)} | sudo -S true 2>/dev/null'])
                 .timeout(const Duration(seconds: 5));
             if (sudoCheck.exitCode != 0) {
               print('${_timestamp()} DEBUG: Admin password incorrect or sudo not available');
@@ -932,7 +932,7 @@ Respond ONLY with valid JSON.''';
                 if (prompted != null && prompted.isNotEmpty) {
                   // Verify the prompted password works
                   final verify = await Process.run('bash',
-                      ['-c', 'echo "$prompted" | sudo -S true 2>/dev/null'])
+                      ['-c', 'echo ${_shQuote(prompted)} | sudo -S true 2>/dev/null'])
                       .timeout(const Duration(seconds: 5));
                   if (verify.exitCode != 0) {
                     print('${_timestamp()} DEBUG: Prompted password incorrect');
@@ -966,7 +966,7 @@ Respond ONLY with valid JSON.''';
         print('${_timestamp()} DEBUG: Running install command in WSL');
         // Use admin password if provided
         if (adminPassword != null && adminPassword.isNotEmpty && installCmd.contains('sudo')) {
-          final sudoCmd = 'echo "$adminPassword" | sudo -S bash -c "${installCmd.replaceFirst('sudo', '')}"';
+          final sudoCmd = 'echo ${_shQuote(adminPassword)} | sudo -S bash -c "${installCmd.replaceFirst('sudo', '')}"';
           process = await Process.start('wsl', ['bash', '-c', sudoCmd]);
         } else {
           process = await Process.start('wsl', ['bash', '-c', installCmd]);
@@ -991,7 +991,7 @@ Respond ONLY with valid JSON.''';
             // Create a temporary askpass script with restricted permissions
             final tempDir = Directory.systemTemp;
             final askpassScript = File('${tempDir.path}/.askpass_${DateTime.now().millisecondsSinceEpoch}.sh');
-            await askpassScript.writeAsString('#!/bin/bash\necho "$adminPassword"');
+            await askpassScript.writeAsString('#!/bin/bash\necho ${_shQuote(adminPassword)}');
             // Set permissions to 700 (owner read/write/execute only)
             await Process.run('chmod', ['700', askpassScript.path]);
             
@@ -1023,7 +1023,7 @@ Respond ONLY with valid JSON.''';
         } else if (adminPassword != null && adminPassword.isNotEmpty && installCmd.contains('sudo')) {
           // Strip any sudo variant (sudo, sudo -n, sudo -S) — we'll supply our own sudo -S
           final cmdWithoutSudo = installCmd.replaceFirst(RegExp(r'sudo\s+(-\w+\s+)*'), '').trim();
-          final sudoCmd = 'echo "$adminPassword" | sudo -S bash -c "$cmdWithoutSudo"';
+          final sudoCmd = 'echo ${_shQuote(adminPassword)} | sudo -S bash -c "$cmdWithoutSudo"';
           process = await Process.start('bash', ['-c', sudoCmd]);
         } else {
           process = await Process.start('bash', ['-c', installCmd]);
@@ -1102,7 +1102,7 @@ Respond ONLY with valid JSON.''';
             if (adminPassword != null && adminPassword.isNotEmpty && packageManager == 'brew') {
               final tempDir = Directory.systemTemp;
               retryAskpass = File('${tempDir.path}/.askpass_retry_${DateTime.now().millisecondsSinceEpoch}.sh');
-              await retryAskpass.writeAsString('#!/bin/bash\necho "$adminPassword"');
+              await retryAskpass.writeAsString('#!/bin/bash\necho ${_shQuote(adminPassword)}');
               await Process.run('chmod', ['700', retryAskpass.path]);
               
               retryEnv = Map<String, String>.from(Platform.environment);
@@ -1201,7 +1201,7 @@ Respond ONLY with valid JSON:
             } else if (packageManager == 'brew' && adminPassword != null && adminPassword.isNotEmpty) {
               final tempDir = Directory.systemTemp;
               final askpass = File('${tempDir.path}/.askpass_retry2_${DateTime.now().millisecondsSinceEpoch}.sh');
-              await askpass.writeAsString('#!/bin/bash\necho "$adminPassword"');
+              await askpass.writeAsString('#!/bin/bash\necho ${_shQuote(adminPassword)}');
               await Process.run('chmod', ['700', askpass.path]);
               final env = Map<String, String>.from(Platform.environment);
               env['SUDO_ASKPASS'] = askpass.path;
@@ -1209,7 +1209,7 @@ Respond ONLY with valid JSON:
               Future.delayed(const Duration(minutes: 3), () async { try { if (await askpass.exists()) await askpass.delete(); } catch (_) {} });
             } else if (adminPassword != null && adminPassword.isNotEmpty && retryCmd.contains('sudo')) {
               final cmdWithoutSudo = retryCmd.replaceFirst(RegExp(r'sudo\s+(-\w+\s+)*'), '').trim();
-              retryProcess = await Process.start('bash', ['-c', 'echo "$adminPassword" | sudo -S bash -c "$cmdWithoutSudo"']);
+              retryProcess = await Process.start('bash', ['-c', 'echo ${_shQuote(adminPassword)} | sudo -S bash -c "$cmdWithoutSudo"']);
             } else {
               retryProcess = await Process.start('bash', ['-c', retryCmd]);
             }
@@ -1421,7 +1421,7 @@ Respond ONLY with valid JSON:
           execCommand = 'export PATH=/tmp:\$PATH; $execCommand';
         } else if (command.trim().startsWith('sudo') && !command.contains('sudo -S')) {
           // WSL / Windows fallback: inject password for top-level sudo only.
-          execCommand = command.replaceFirst('sudo', 'echo "$adminPassword" | sudo -S');
+          execCommand = command.replaceFirst('sudo', 'echo ${_shQuote(adminPassword)} | sudo -S');
         }
       }
 
@@ -1492,6 +1492,12 @@ Respond ONLY with valid JSON:
   static const Duration _commandTimeout = Duration(minutes: 30);
 
   /// Write (or overwrite) a thin sudo wrapper at a fixed path in /tmp so that
+  /// Quote [s] as a single POSIX shell token, safe against injection: wrap in
+  /// single quotes and escape embedded single quotes as '\''. Used wherever an
+  /// admin password (or other untrusted string) is placed into a shell command
+  /// or an askpass script, so characters like ", $, `, \ cannot break out.
+  static String _shQuote(String s) => "'" + s.replaceAll("'", "'\\''") + "'";
+
   /// any 'sudo' call within a command chain receives the password automatically
   /// via stdin without requiring an interactive TTY.
   ///
@@ -1499,11 +1505,9 @@ Respond ONLY with valid JSON:
   /// running the command, ensuring our wrapper shadows /usr/bin/sudo.
   static Future<void> _ensureSudoWrapper(String password) async {
     try {
-      // Single-quote–safe escaping: replace each ' with '\''
-      final escaped = password.replaceAll("'", "'\\''");
       const wrapperPath = '/tmp/.pe_sudo';
       await File(wrapperPath).writeAsString(
-        "#!/bin/bash\necho '$escaped' | /usr/bin/sudo -S \"\$@\"\n",
+        "#!/bin/bash\necho ${_shQuote(password)} | /usr/bin/sudo -S \"\$@\"\n",
       );
       await Process.run('chmod', ['700', wrapperPath]);
       // Symlink as 'sudo' in /tmp so PATH lookup finds it first.
