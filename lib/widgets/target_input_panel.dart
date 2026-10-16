@@ -290,8 +290,17 @@ class TargetInputPanelState extends State<TargetInputPanel> {
           }
         }
 
-        final useful = _liveTargets.where((t) => t.status == TargetStatus.complete).toList();
-        await widget.onTargetsDiscovered(List.from(useful));
+        // Persist every target whose status changed this batch, not just the
+        // "complete" ones — an "excluded" target must also be written to the
+        // DB/app state, otherwise it stays "pending"/analysisComplete=0
+        // forever and the UI/DB never reflect that the LLM concluded there
+        // was no useful data for it.
+        final changedThisBatch = _liveTargets
+            .where((t) =>
+                t.status == TargetStatus.complete ||
+                t.status == TargetStatus.excluded)
+            .toList();
+        await widget.onTargetsDiscovered(List.from(changedThisBatch));
       }
 
       final completeCount = _liveTargets.where((t) => t.status == TargetStatus.complete).length;

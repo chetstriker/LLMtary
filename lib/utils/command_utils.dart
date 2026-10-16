@@ -206,18 +206,46 @@ class CommandUtils {
         }
       }
 
-      // Same nmap scan (same port + same script)
+      // Same nmap scan (same port + same script set).
+      // Robust to flag-order and to comma-separated multi-script lists —
+      // the old version only compared the first captured script and
+      // required an exact string match, so e.g. "--script ssl-cert,ssl-poodle"
+      // vs "--script ssl-poodle,ssl-cert" (or a reordered/extra -Pn flag)
+      // would not be recognized as the same scan and would re-run.
       if (newCmdLower.contains('nmap') && execLower.contains('nmap')) {
         final newPort =
             RegExp(r'-p\s*(\d+)').firstMatch(newCmdLower)?.group(1);
         final execPort =
             RegExp(r'-p\s*(\d+)').firstMatch(execLower)?.group(1);
-        final newScript =
-            RegExp(r'--script[=\s]+([^\s]+)').firstMatch(newCmdLower)?.group(1);
-        final execScript =
-            RegExp(r'--script[=\s]+([^\s]+)').firstMatch(execLower)?.group(1);
 
-        if (newPort == execPort && newScript == execScript) {
+        Set<String> scriptSet(String cmd) {
+          final m = RegExp(r'--script[=\s]+([^\s]+)').firstMatch(cmd);
+          if (m == null) return <String>{};
+          return m.group(1)!.split(',').map((s) => s.trim()).toSet();
+        }
+
+        final newScripts = scriptSet(newCmdLower);
+        final execScripts = scriptSet(execLower);
+
+        if (newScripts.isNotEmpty && execScripts.isNotEmpty) {
+          // Both specify scripts: same scan if the script sets match,
+          // regardless of flag order. Port, if present on both, must also
+          // match; if either side omits an explicit -p, don't let that
+          // alone defeat an otherwise-identical script-set match.
+          final portsCompatible =
+              newPort == null || execPort == null || newPort == execPort;
+          if (newScripts.length == execScripts.length &&
+              newScripts.containsAll(execScripts) &&
+              portsCompatible) {
+            return true;
+          }
+        } else if (newPort != null &&
+            execPort != null &&
+            newPort == execPort &&
+            newScripts.isEmpty &&
+            execScripts.isEmpty) {
+          // Plain port scan, no scripts on either side: fall back to the
+          // original port-only comparison.
           return true;
         }
       }
