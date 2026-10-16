@@ -63,14 +63,18 @@ class SubnetScanner {
     if (parts.length != 2) return null;
     final prefix = int.tryParse(parts[1]) ?? -1;
     if (prefix < 16 || prefix > 30) return null; // safety cap
-    final octets = parts[0].split('.').map(int.parse).toList();
-    if (octets.length != 4) return null;
+    final octets = parts[0].split('.').map(int.tryParse).toList();
+    if (octets.length != 4 || octets.any((o) => o == null || o < 0 || o > 255)) {
+      return null;
+    }
 
     final hostBits = 32 - prefix;
     final hostCount = (1 << hostBits) - 2; // exclude network and broadcast
     if (hostCount > 65534) return null;
 
-    final networkInt = (octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3];
+    final rawInt = (octets[0]! << 24) | (octets[1]! << 16) | (octets[2]! << 8) | octets[3]!;
+    // Mask to the network base so e.g. 192.168.1.5/24 enumerates .1..254, not .6..
+    final networkInt = rawInt & ~((1 << hostBits) - 1);
     final hosts = <String>[];
     for (var i = 1; i <= hostCount; i++) {
       final addr = networkInt + i;
@@ -195,7 +199,21 @@ class SubnetScanner {
       final cmd = Platform.isWindows ? 'ping -n 1 -w 500 $ip' : 'ping -c 1 -W 1 $ip';
       final result = await CommandExecutor.executeCommand(cmd, false)
           .timeout(const Duration(seconds: 3), onTimeout: () => {'exitCode': -1});
-      if ((result['exitCode'] ?? -1) == 0) {
+      // Windows `ping` returns exit 0 even on failure, so require a positive reply
+      // marker and no loss marker there; on POSIX the exit code is reliable.
+      final out = (result['output'] ?? '').toString().toLowerCase();
+      final lossMarker = out.contains('100% packet loss') ||
+          out.contains('0 received') ||
+          out.contains('destination host unreachable') ||
+          out.contains('request timed out');
+      final replyMarker = out.contains('ttl=') ||
+          out.contains('bytes from') ||
+          out.contains('1 received') ||
+          out.contains('reply from');
+      final reachable = Platform.isWindows
+          ? (replyMarker && !lossMarker)
+          : ((result['exitCode'] ?? -1) == 0 && !lossMarker);
+      if (reachable) {
         return DiscoveredHost(ip: ip);
       }
     } catch (_) {}
