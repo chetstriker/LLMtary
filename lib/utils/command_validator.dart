@@ -2,6 +2,7 @@ import 'dart:async';
 import '../models/llm_settings.dart';
 import '../services/command_executor.dart';
 import '../services/llm_service.dart';
+import '../services/llm_schemas.dart';
 import 'json_parser.dart';
 
 /// Result of a pre-flight command validation check.
@@ -335,7 +336,7 @@ If invalid:
 Respond ONLY with valid JSON. No markdown, no explanation outside the JSON.''';
 
       final response = await llmService
-          .sendMessage(settings, prompt)
+          .sendMessage(settings, prompt, responseSchema: LlmSchemas.commandValidation)
           .timeout(const Duration(seconds: 20));
 
       // 6.4c — Parse and act on the response

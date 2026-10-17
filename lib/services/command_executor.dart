@@ -6,6 +6,7 @@ import '../database/database_helper.dart';
 import '../utils/json_parser.dart';
 import '../utils/output_sanitizer.dart';
 import 'llm_service.dart';
+import 'llm_schemas.dart';
 import 'tool_manager.dart';
 
 // Re-export tool_manager types so existing callers don't need to change imports

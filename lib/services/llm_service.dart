@@ -124,6 +124,7 @@ class LLMService {
     bool useSystemPrompt = true,
     String? systemPromptOverride,
     void Function(int sent, int received)? onTokensUsed,
+    Map<String, dynamic>? responseSchema,
   }) async {
     final timeout = Duration(seconds: settings.timeoutSeconds);
     final systemPrompt = systemPromptOverride ?? (useSystemPrompt ? _securityExpertSystemPrompt : null);
@@ -156,13 +157,13 @@ class LLMService {
         Future<String> doProviderCall() async {
           switch (settings.provider) {
             case LLMProvider.ollama:
-              return await _sendOllama(settings, message, timeout, systemPrompt, onTokensUsed: onTokensUsed);
+              return await _sendOllama(settings, message, timeout, systemPrompt, onTokensUsed: onTokensUsed, responseSchema: responseSchema);
             case LLMProvider.lmStudio:
-              return await _sendLMStudio(settings, message, timeout, systemPrompt, onTokensUsed: onTokensUsed);
+              return await _sendLMStudio(settings, message, timeout, systemPrompt, onTokensUsed: onTokensUsed, responseSchema: responseSchema);
             case LLMProvider.claude:
               return await _sendClaude(settings, message, timeout, systemPrompt, onTokensUsed: onTokensUsed);
             case LLMProvider.chatGPT:
-              return await _sendChatGPT(settings, message, timeout, systemPrompt, onTokensUsed: onTokensUsed);
+              return await _sendChatGPT(settings, message, timeout, systemPrompt, onTokensUsed: onTokensUsed, responseSchema: responseSchema);
             case LLMProvider.gemini:
               return await _sendGemini(settings, message, timeout, systemPrompt, onTokensUsed: onTokensUsed);
             case LLMProvider.openRouter:
@@ -461,12 +462,14 @@ class LLMService {
 
   // --- Provider implementations ---
 
-  Future<String> _sendOllama(LLMSettings settings, String message, Duration timeout, String? systemPrompt, {void Function(int, int)? onTokensUsed}) async {
+  Future<String> _sendOllama(LLMSettings settings, String message, Duration timeout, String? systemPrompt, {void Function(int, int)? onTokensUsed, Map<String, dynamic>? responseSchema}) async {
     final body = <String, dynamic>{
       'model': settings.modelName,
       'prompt': message,
       'stream': false,
-      'format': 'json',
+      // Part 1: hand Ollama the EXACT JSON schema (structured outputs) when the
+      // caller knows the shape; fall back to the generic 'json' otherwise.
+      'format': responseSchema ?? 'json',
       'options': {
         'temperature': settings.temperature,
         'num_predict': settings.maxTokens,
@@ -495,13 +498,16 @@ class LLMService {
     throw LLMApiException('Ollama', response.statusCode, response.body);
   }
 
-  Future<String> _sendLMStudio(LLMSettings settings, String message, Duration timeout, String? systemPrompt, {void Function(int, int)? onTokensUsed}) async {
+  Future<String> _sendLMStudio(LLMSettings settings, String message, Duration timeout, String? systemPrompt, {void Function(int, int)? onTokensUsed, Map<String, dynamic>? responseSchema}) async {
     final body = <String, dynamic>{
       'model': settings.modelName,
       'messages': _buildChatMessages(message, systemPrompt),
       'temperature': settings.temperature,
       'max_tokens': settings.maxTokens,
     };
+    if (responseSchema != null) {
+      body['response_format'] = _jsonSchemaResponseFormat(responseSchema);
+    }
 
     final headers = <String, String>{'Content-Type': 'application/json'};
     if (settings.apiKey != null && settings.apiKey!.trim().isNotEmpty) {
@@ -576,7 +582,15 @@ class LLMService {
     throw LLMApiException('Claude', response.statusCode, response.body);
   }
 
-  Future<String> _sendChatGPT(LLMSettings settings, String message, Duration timeout, String? systemPrompt, {void Function(int, int)? onTokensUsed}) async {
+  /// OpenAI-compatible structured-output `response_format` from an exact JSON
+  /// schema (used by ChatGPT / LM Studio). `strict:false` so wide schemas with
+  /// open `additionalProperties` are accepted.
+  static Map<String, dynamic> _jsonSchemaResponseFormat(Map<String, dynamic> schema) => {
+        'type': 'json_schema',
+        'json_schema': {'name': 'llmtary_result', 'schema': schema, 'strict': false},
+      };
+
+  Future<String> _sendChatGPT(LLMSettings settings, String message, Duration timeout, String? systemPrompt, {void Function(int, int)? onTokensUsed, Map<String, dynamic>? responseSchema}) async {
     final body = <String, dynamic>{
       'model': settings.modelName,
       'messages': _buildChatMessages(message, systemPrompt),
@@ -585,8 +599,11 @@ class LLMService {
       'store': false,
     };
 
-    // Enable structured outputs for supported models
-    if (settings.modelName.contains('gpt-4o') || settings.modelName.contains('gpt-4-turbo')) {
+    // Enable structured outputs for supported models: an exact JSON schema when
+    // the caller supplies one, else the generic json_object for 4o/turbo.
+    if (responseSchema != null) {
+      body['response_format'] = _jsonSchemaResponseFormat(responseSchema);
+    } else if (settings.modelName.contains('gpt-4o') || settings.modelName.contains('gpt-4-turbo')) {
       body['response_format'] = {'type': 'json_object'};
     }
 
