@@ -1,8 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:penexecuter/utils/command_validator.dart';
-import 'package:penexecuter/models/llm_settings.dart';
-import 'package:penexecuter/models/llm_provider.dart';
-import 'package:penexecuter/services/llm_service.dart';
+import 'package:llmtary/utils/command_validator.dart';
+import 'package:llmtary/models/llm_settings.dart';
+import 'package:llmtary/models/llm_provider.dart';
+import 'package:llmtary/services/llm_service.dart';
 
 void main() {
   // Minimal settings — Tier 2 LLM calls are not exercised in static tests.

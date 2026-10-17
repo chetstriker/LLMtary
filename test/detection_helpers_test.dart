@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:penexecuter/services/vulnerability_analyzer.dart';
-import 'package:penexecuter/utils/subdomain_takeover_fingerprints.dart';
+import 'package:llmtary/services/vulnerability_analyzer.dart';
+import 'package:llmtary/utils/subdomain_takeover_fingerprints.dart';
 
 void main() {
   final analyzer = VulnerabilityAnalyzer();

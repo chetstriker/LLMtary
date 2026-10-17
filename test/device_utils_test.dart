@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:penexecuter/utils/device_utils.dart';
+import 'package:llmtary/utils/device_utils.dart';
 
 void main() {
   group('DeviceUtils.classifyTarget', () {

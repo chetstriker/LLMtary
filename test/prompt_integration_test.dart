@@ -1,7 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:penexecuter/services/prompt_templates.dart';
-import 'package:penexecuter/models/vulnerability.dart';
-import 'package:penexecuter/utils/json_parser.dart';
+import 'package:llmtary/services/prompt_templates.dart';
+import 'package:llmtary/models/vulnerability.dart';
+import 'package:llmtary/utils/json_parser.dart';
 
 /// Integration tests verifying that analysis prompts produce structurally valid
 /// output and that proofCommandExpectedOutput is parsed and stored correctly.

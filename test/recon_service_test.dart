@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:penexecuter/services/recon_service.dart';
+import 'package:llmtary/services/recon_service.dart';
 
 /// Cross-platform validation tests for ReconService.
 /// Tests command generation, nmap XML parsing, and graceful degradation.
