@@ -1041,18 +1041,24 @@ class _MainScreenState extends State<MainScreen> {
       );
 
       // Only persist findings whose problem doesn't already exist for this target
-      final existingProblems = appState.vulnerabilities
+      // De-duplicate against existing findings for this target using the SAME
+      // fuzzy criteria as the analyzer (normalized fingerprint + trigram title
+      // similarity), not an exact problem-name match: a second pass rewords the
+      // same issue, so an exact-name filter let near-duplicates through.
+      final existing = appState.vulnerabilities
           .where((v) => v.targetAddress == targetAddress)
-          .map((v) => v.problem.toLowerCase().trim())
-          .toSet();
+          .toList();
 
       int added = 0;
       for (final v in authVulns) {
-        if (existingProblems.contains(v.problem.toLowerCase().trim())) continue;
+        final dup = existing.any((e) => VulnerabilityAnalyzer.isLikelyDuplicateProblem(
+            v.vulnerabilityType, v.problem, e.vulnerabilityType, e.problem));
+        if (dup) continue;
         v.targetAddress = targetAddress;
         v.targetId = target.id;
         v.projectId = appState.currentProject?.id;
         await DatabaseHelper.insertVulnerability(v);
+        existing.add(v); // i successivi findings deduplicano anche contro questo
         added++;
       }
       appState.addDebugLog('Authenticated re-analysis added $added new findings for $targetAddress');
