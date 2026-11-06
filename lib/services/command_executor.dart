@@ -1519,12 +1519,33 @@ Respond ONLY with valid JSON:
   /// Kill a process and all its children to prevent orphaned subprocesses.
   static Future<void> _killProcessTree(Process process) async {
     try {
-      process.kill(ProcessSignal.sigkill);
       if (!Platform.isWindows) {
-        await Process.run('pkill', ['-9', '-P', '${process.pid}'])
-            .timeout(const Duration(seconds: 3))
-            .catchError((_) => ProcessResult(0, 0, '', ''));
+        // A11: `pkill -P` only reaps direct children, and killing the shell first
+        // reparents its descendants (grandchildren: bash → timeout → nmap → helper)
+        // to init, orphaning them. Walk the descendant tree and kill it
+        // depth-first (deepest first) so nothing is reparented before we reach it.
+        // The processes are not started in their own session, so a process-group
+        // kill would also hit this app — hence an explicit per-pid walk.
+        await _killDescendants(process.pid);
       }
+      process.kill(ProcessSignal.sigkill);
+    } catch (_) {}
+  }
+
+  /// Recursively kill [pid] and all of its descendants, deepest first (POSIX).
+  static Future<void> _killDescendants(int pid) async {
+    try {
+      final res = await Process.run('pgrep', ['-P', '$pid'])
+          .timeout(const Duration(seconds: 2));
+      for (final line in (res.stdout as String).split('\n')) {
+        final child = int.tryParse(line.trim());
+        if (child != null && child != pid) {
+          await _killDescendants(child);
+        }
+      }
+    } catch (_) {}
+    try {
+      await Process.run('kill', ['-9', '$pid']).timeout(const Duration(seconds: 2));
     } catch (_) {}
   }
 
@@ -1560,7 +1581,7 @@ Respond ONLY with valid JSON:
 
       final decoder = Utf8Decoder(allowMalformed: true);
 
-      process.stdout.transform(decoder).listen((data) {
+      final outSub = process.stdout.transform(decoder).listen((data) {
         if (killed) return;
         final sanitized = OutputSanitizer.sanitize(data);
         totalBytes += sanitized.length;
@@ -1590,7 +1611,7 @@ Respond ONLY with valid JSON:
         stdoutBuffer.write(sanitized);
       });
 
-      process.stderr.transform(decoder).listen((data) {
+      final errSub = process.stderr.transform(decoder).listen((data) {
         if (killed) return;
         final sanitized = OutputSanitizer.sanitize(data);
         totalBytes += sanitized.length;
@@ -1615,6 +1636,13 @@ Respond ONLY with valid JSON:
       });
 
       final exitCode = await process.exitCode.timeout(_commandTimeout);
+      // A2: drain any buffered stdout/stderr before reading the buffers (the last
+      // lines — often the proof of success — can still be in flight at exit), then
+      // cancel the subscriptions to avoid leaks.
+      await Future.wait([outSub.asFuture<void>(), errSub.asFuture<void>()])
+          .timeout(const Duration(seconds: 5), onTimeout: () => const <void>[]);
+      await outSub.cancel();
+      await errSub.cancel();
       if (killed) {
         return CommandResult(-1, stdoutBuffer.toString(),
             'KILLED: $killReason. The command was producing excessive or repetitive output and was terminated.');
@@ -1643,7 +1671,7 @@ Respond ONLY with valid JSON:
 
       final decoder = Utf8Decoder(allowMalformed: true);
 
-      process.stdout.transform(decoder).listen((data) {
+      final outSub = process.stdout.transform(decoder).listen((data) {
         if (killed) return;
         final sanitized = OutputSanitizer.sanitize(data);
         totalBytes += sanitized.length;
@@ -1672,7 +1700,7 @@ Respond ONLY with valid JSON:
         stdoutBuffer.write(sanitized);
       });
 
-      process.stderr.transform(decoder).listen((data) {
+      final errSub = process.stderr.transform(decoder).listen((data) {
         if (killed) return;
         final sanitized = OutputSanitizer.sanitize(data);
         totalBytes += sanitized.length;
@@ -1696,6 +1724,13 @@ Respond ONLY with valid JSON:
       });
 
       final exitCode = await process.exitCode.timeout(_commandTimeout);
+      // A2: drain any buffered stdout/stderr before reading the buffers (the last
+      // lines — often the proof of success — can still be in flight at exit), then
+      // cancel the subscriptions to avoid leaks.
+      await Future.wait([outSub.asFuture<void>(), errSub.asFuture<void>()])
+          .timeout(const Duration(seconds: 5), onTimeout: () => const <void>[]);
+      await outSub.cancel();
+      await errSub.cancel();
       if (killed) {
         return CommandResult(-1, stdoutBuffer.toString(),
             'KILLED: $killReason. The command was producing excessive or repetitive output and was terminated.');
@@ -1727,7 +1762,7 @@ Respond ONLY with valid JSON:
 
       final decoder = Utf8Decoder(allowMalformed: true);
 
-      process.stdout.transform(decoder).listen((data) {
+      final outSub = process.stdout.transform(decoder).listen((data) {
         if (killed) return;
         final sanitized = OutputSanitizer.sanitize(data);
         totalBytes += sanitized.length;
@@ -1756,7 +1791,7 @@ Respond ONLY with valid JSON:
         stdoutBuffer.write(sanitized);
       });
 
-      process.stderr.transform(decoder).listen((data) {
+      final errSub = process.stderr.transform(decoder).listen((data) {
         if (killed) return;
         final sanitized = OutputSanitizer.sanitize(data);
         totalBytes += sanitized.length;
@@ -1771,6 +1806,13 @@ Respond ONLY with valid JSON:
       });
 
       final exitCode = await process.exitCode.timeout(_commandTimeout);
+      // A2: drain any buffered stdout/stderr before reading the buffers (the last
+      // lines — often the proof of success — can still be in flight at exit), then
+      // cancel the subscriptions to avoid leaks.
+      await Future.wait([outSub.asFuture<void>(), errSub.asFuture<void>()])
+          .timeout(const Duration(seconds: 5), onTimeout: () => const <void>[]);
+      await outSub.cancel();
+      await errSub.cancel();
       if (killed) {
         return CommandResult(-1, stdoutBuffer.toString(),
             'KILLED: $killReason. The command was producing excessive or repetitive output and was terminated.');
